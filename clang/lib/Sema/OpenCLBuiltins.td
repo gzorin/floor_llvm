@@ -236,7 +236,7 @@ class VolatileType<Type _Ty> : Type<_Ty.Name, _Ty.QTExpr> {
 
 // OpenCL image types (e.g. image2d).
 class ImageType<Type _Ty, string _AccessQualifier> :
-    Type<_Ty.Name, QualType<_Ty.QTExpr.TypeExpr # _AccessQualifier # "Ty", 0>> {
+    Type<_Ty.Name, QualType<_Ty.QTExpr.TypeExpr # "Ty", 0>> {
   let VecWidth = 0;
   let AccessQualifier = _AccessQualifier;
   // Inherited fields
@@ -376,6 +376,10 @@ def Image2dMsaa           : Type<"image2d_msaa_t", QualType<"Context.OCLImage2dM
 def Image2dArrayMsaa      : Type<"image2d_array_msaa_t", QualType<"Context.OCLImage2dArrayMSAA", 1>>;
 def Image2dMsaaDepth      : Type<"image2d_msaa_depth_t", QualType<"Context.OCLImage2dMSAADepth", 1>>;
 def Image2dArrayMsaaDepth : Type<"image2d_array_msaa_depth_t", QualType<"Context.OCLImage2dArrayMSAADepth", 1>>;
+def ImageCube             : Type<"imagecube_t", QualType<"Context.OCLImageCube", 1>>;
+def ImageCubeArray        : Type<"imagecube_array_t", QualType<"Context.OCLImageCubeArray", 1>>;
+def ImageCubeDepth        : Type<"imagecube_depth_t", QualType<"Context.OCLImageCubeDepth", 1>>;
+def ImageCubeArrayDepth   : Type<"imagecube_array_depth_t", QualType<"Context.OCLImageCubeArrayDepth", 1>>;
 
 def Sampler               : Type<"sampler_t", QualType<"Context.OCLSamplerTy">>;
 def ClkEvent              : Type<"clk_event_t", QualType<"Context.OCLClkEventTy">>;

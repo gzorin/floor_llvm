@@ -42,7 +42,7 @@ public:
     _LIBCPP_INLINE_VISIBILITY _LIBCPP_CONSTEXPR_AFTER_CXX17
     reference_wrapper(_Up&& __u) _NOEXCEPT_(noexcept(__fun(declval<_Up>()))) {
         type& __f = static_cast<_Up&&>(__u);
-        __f_ = _VSTD::addressof(__f);
+        __f_ = __builtin_addressof(__f);
     }
 
     // access

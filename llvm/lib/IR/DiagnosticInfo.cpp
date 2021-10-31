@@ -63,6 +63,8 @@ void DiagnosticInfoInlineAsm::print(DiagnosticPrinter &DP) const {
   DP << getMsgStr();
   if (getLocCookie())
     DP << " at line " << getLocCookie();
+  if (Instr)
+    DP << *Instr;
 }
 
 void DiagnosticInfoResourceLimit::print(DiagnosticPrinter &DP) const {

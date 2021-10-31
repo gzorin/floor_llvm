@@ -663,7 +663,9 @@ template<class InputIterator, class OutputIterator>
 #include <__config>
 #include <__debug>
 #include <cstddef>
+#if 0
 #include <cstring>
+#endif
 #include <functional>
 #include <initializer_list>
 #include <iterator>

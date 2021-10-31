@@ -182,6 +182,7 @@ const uint64_t Sema::MaximumAlignment;
 Sema::Sema(Preprocessor &pp, ASTContext &ctxt, ASTConsumer &consumer,
            TranslationUnitKind TUKind, CodeCompleteConsumer *CodeCompleter)
     : ExternalSource(nullptr), isMultiplexExternalSource(false),
+      OpenCLFeatures(ctxt.getOpenCLFeatures()),
       CurFPFeatures(pp.getLangOpts()), LangOpts(pp.getLangOpts()), PP(pp),
       Context(ctxt), Consumer(consumer), Diags(PP.getDiagnostics()),
       SourceMgr(PP.getSourceManager()), CollectStats(false),
@@ -332,6 +333,11 @@ void Sema::Initialize() {
         Context.getTargetInfo().getSupportedOpenCLOpts(), getLangOpts());
     addImplicitTypedef("sampler_t", Context.OCLSamplerTy);
     addImplicitTypedef("event_t", Context.OCLEventTy);
+
+#define IMAGE_TYPE(ImgType, Id, SingletonId, Access, Suffix) \
+    addImplicitTypedef(#ImgType #Suffix "_t", Context. SingletonId);
+#include "clang/Basic/OpenCLImageTypes.def"
+
     auto OCLCompatibleVersion = getLangOpts().getOpenCLCompatibleVersion();
     if (OCLCompatibleVersion >= 200) {
       if (getLangOpts().OpenCLCPlusPlus || getLangOpts().Blocks) {
@@ -1441,8 +1447,12 @@ NamedDecl *Sema::getCurFunctionOrMethodDecl() {
 }
 
 LangAS Sema::getDefaultCXXMethodAddrSpace() const {
+#if 0 // we don't want this + we don't want any calls to this -> error if so
   if (getLangOpts().OpenCL)
     return getASTContext().getDefaultOpenCLPointeeAddrSpace();
+#else
+  assert(false && "should not be here - all calls to this should be disabled");
+#endif
   return LangAS::Default;
 }
 

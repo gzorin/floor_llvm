@@ -247,6 +247,7 @@ add_llvm_component_library(LLVMCodeGen
   BitReader
   BitWriter
   Core
+  LibFloor
   MC
   ProfileData
   Scalar

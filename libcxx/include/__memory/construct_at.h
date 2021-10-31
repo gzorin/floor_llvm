@@ -99,7 +99,7 @@ template <class _ForwardIterator, class _Size>
 _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_AFTER_CXX17
 _ForwardIterator destroy_n(_ForwardIterator __first, _Size __n) {
     for (; __n > 0; (void)++__first, --__n)
-        _VSTD::__destroy_at(_VSTD::addressof(*__first));
+        _VSTD::__destroy_at(__builtin_addressof(*__first));
     return __first;
 }
 

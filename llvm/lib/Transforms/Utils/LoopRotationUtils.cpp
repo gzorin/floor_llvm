@@ -304,6 +304,7 @@ bool LoopRotate::rotateLoop(Loop *L, bool SimplifiedLatch) {
 
       CodeMetrics Metrics;
       Metrics.analyzeBasicBlock(OrigHeader, *TTI, EphValues, PrepareForLTO);
+#if 0 // TODO/NOTE: ignoring this for now, duplicates can very well exist in the same scope
       if (Metrics.notDuplicatable) {
         LLVM_DEBUG(
                    dbgs() << "LoopRotation: NOT rotating - contains non-duplicatable"
@@ -317,6 +318,7 @@ bool LoopRotate::rotateLoop(Loop *L, bool SimplifiedLatch) {
                    L->dump());
         return Rotated;
       }
+#endif
       if (Metrics.NumInsts > MaxHeaderSize) {
         LLVM_DEBUG(dbgs() << "LoopRotation: NOT rotating - contains "
                           << Metrics.NumInsts

@@ -2421,7 +2421,7 @@ void MicrosoftCXXNameMangler::mangleType(const BuiltinType *T, Qualifiers,
 
 #define IMAGE_TYPE(ImgType, Id, SingletonId, Access, Suffix) \
   case BuiltinType::Id: \
-    Out << "PAUocl_" #ImgType "_" #Suffix "@@"; \
+    Out << "PAUocl_" #ImgType #Suffix "@@"; \
     break;
 #include "clang/Basic/OpenCLImageTypes.def"
   case BuiltinType::OCLSampler:

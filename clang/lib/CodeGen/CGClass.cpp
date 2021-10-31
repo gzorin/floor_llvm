@@ -221,7 +221,10 @@ CodeGenFunction::GetAddressOfDirectBaseInCompleteClass(Address This,
                                                    const CXXRecordDecl *Base,
                                                    bool BaseIsVirtual) {
   // 'this' must be a pointer (in some address space) to Derived.
-  assert(This.getElementType() == ConvertType(Derived));
+  // NOTE: element type might be flattend/packed, so if ConvertType() fails,
+  //       check if it is the corresponding flattened record type
+  assert(This.getElementType() == ConvertType(Derived) ||
+         This.getElementType() == CGM.getTypes().getFlattenedRecordType(Derived));
 
   // Compute the offset of the virtual base.
   CharUnits Offset;
@@ -271,8 +274,12 @@ ApplyNonVirtualAndVirtualOffset(CodeGenFunction &CGF, Address addr,
 
   // Apply the base offset.
   llvm::Value *ptr = addr.getPointer();
+#if 0 // we don't want this
   unsigned AddrSpace = ptr->getType()->getPointerAddressSpace();
   ptr = CGF.Builder.CreateBitCast(ptr, CGF.Int8Ty->getPointerTo(AddrSpace));
+#else
+  ptr = CGF.Builder.CreateBitCast(ptr, CGF.Int8PtrTy);
+#endif
   ptr = CGF.Builder.CreateInBoundsGEP(CGF.Int8Ty, ptr, baseOffset, "add.ptr");
 
   // If we have a virtual component, the alignment of the result will
@@ -326,7 +333,7 @@ Address CodeGenFunction::GetAddressOfBaseClass(
     VBase = nullptr; // we no longer have a virtual step
   }
 
-  // Get the base pointer type.
+  // Get the base pointer type, and keep the Values address space if it has one
   llvm::Type *BaseValueTy = ConvertType((PathEnd[-1])->getType());
   llvm::Type *BasePtrTy =
       BaseValueTy->getPointerTo(Value.getType()->getPointerAddressSpace());
@@ -407,9 +414,14 @@ CodeGenFunction::GetAddressOfDerivedClass(Address BaseAddr,
 
   QualType DerivedTy =
     getContext().getCanonicalType(getContext().getTagDeclType(Derived));
+#if 0 // we don't want this
   unsigned AddrSpace = BaseAddr.getAddressSpace();
   llvm::Type *DerivedValueTy = ConvertType(DerivedTy);
   llvm::Type *DerivedPtrTy = DerivedValueTy->getPointerTo(AddrSpace);
+#else
+  llvm::Type *DerivedValueTy = ConvertType(DerivedTy);
+  llvm::Type *DerivedPtrTy = DerivedValueTy->getPointerTo();
+#endif
 
   llvm::Value *NonVirtualOffset =
     CGM.GetNonVirtualBaseClassOffset(Derived, PathBegin, PathEnd);
@@ -2053,6 +2065,7 @@ void CodeGenFunction::EmitCXXConstructorCall(const CXXConstructorDecl *D,
                                              AggValueSlot ThisAVS,
                                              const CXXConstructExpr *E) {
   CallArgList Args;
+#if 0 // we don't want this
   Address This = ThisAVS.getAddress();
   LangAS SlotAS = ThisAVS.getQualifiers().getAddressSpace();
   QualType ThisType = D->getThisType();
@@ -2066,6 +2079,10 @@ void CodeGenFunction::EmitCXXConstructorCall(const CXXConstructorDecl *D,
     ThisPtr = getTargetHooks().performAddrSpaceCast(*this, This.getPointer(),
                                                     ThisAS, SlotAS, NewType);
   }
+#else
+  Address This = ThisAVS.getAddress();
+  llvm::Value *ThisPtr = This.getPointer();
+#endif
 
   // Push the this ptr.
   Args.add(RValue::get(ThisPtr), D->getThisType());
@@ -2507,8 +2524,13 @@ void CodeGenFunction::InitializeVTablePointer(const VPtr &Vptr) {
 
   // Finally, store the address point. Use the same LLVM types as the field to
   // support optimization.
+#if 0 // we don't want this
   unsigned GlobalsAS = CGM.getDataLayout().getDefaultGlobalsAddressSpace();
   unsigned ProgAS = CGM.getDataLayout().getProgramAddressSpace();
+#else
+  constexpr unsigned GlobalsAS = 0;
+  constexpr unsigned ProgAS = 0;
+#endif
   llvm::Type *VTablePtrTy =
       llvm::FunctionType::get(CGM.Int32Ty, /*isVarArg=*/true)
           ->getPointerTo(ProgAS)

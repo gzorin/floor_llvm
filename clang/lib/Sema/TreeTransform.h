@@ -4788,8 +4788,10 @@ QualType TreeTransform<Derived>::RebuildQualifiedType(QualType T,
   //   [When] adding cv-qualifications on top of the function type [...] the
   //   cv-qualifiers are ignored.
   if (T->isFunctionType()) {
+#if 0 // we don't want this
     T = SemaRef.getASTContext().getAddrSpaceQualType(T,
                                                      Quals.getAddressSpace());
+#endif
     return T;
   }
 

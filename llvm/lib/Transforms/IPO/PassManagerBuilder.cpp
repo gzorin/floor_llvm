@@ -39,6 +39,7 @@
 #include "llvm/Transforms/IPO/InferFunctionAttrs.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Instrumentation.h"
+#include "llvm/Transforms/LibFloor.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/GVN.h"
 #include "llvm/Transforms/Scalar/InstSimplifyPass.h"
@@ -51,6 +52,7 @@
 #include "llvm/Transforms/Vectorize/LoopVectorize.h"
 #include "llvm/Transforms/Vectorize/SLPVectorizer.h"
 #include "llvm/Transforms/Vectorize/VectorCombine.h"
+#include "llvm/SPIRVerifier/SpirValidation.h"
 
 using namespace llvm;
 
@@ -220,6 +222,17 @@ PassManagerBuilder::PassManagerBuilder() {
     PerformThinLTO = EnablePerformThinLTO;
     DivergentTarget = false;
     CallGraphProfile = true;
+
+    EnableAddressSpaceFix = false;
+    EnableCUDAPasses = false;
+    EnableMetalPasses = false;
+    EnableMetalIntelWorkarounds = false;
+    EnableMetalNvidiaWorkarounds = false;
+    EnableSPIRPasses = false;
+    EnableSPIRIntelWorkarounds = false;
+    EnableVerifySPIR = false;
+    EnableVulkanPasses = false;
+    EnableVulkanLLVMPreStructurizationPass = false;
 }
 
 PassManagerBuilder::~PassManagerBuilder() {
@@ -368,7 +381,7 @@ void PassManagerBuilder::addPGOInstrPasses(legacy::PassManagerBase &MPM,
     MPM.add(createCFGSimplificationPass(
         SimplifyCFGOptions().convertSwitchRangeToICmp(
             true)));                           // Merge & remove BBs
-    MPM.add(createInstructionCombiningPass()); // Combine silly seq's
+    MPM.add(createInstructionCombiningPass(EnableVulkanPasses)); // Combine silly seq's
     addExtensionsToPM(EP_Peephole, MPM);
   }
   if ((EnablePGOInstrGen && !IsCS) || (EnablePGOCSInstrGen && IsCS)) {
@@ -427,7 +440,7 @@ void PassManagerBuilder::addFunctionSimplificationPasses(
   // Combine silly seq's
   if (OptLevel > 2)
     MPM.add(createAggressiveInstCombinerPass());
-  MPM.add(createInstructionCombiningPass());
+  MPM.add(createInstructionCombiningPass(EnableVulkanPasses));
   if (SizeLevel == 0 && !DisableLibCallsShrinkWrap)
     MPM.add(createLibCallsShrinkWrapPass());
   addExtensionsToPM(EP_Peephole, MPM);
@@ -479,7 +492,7 @@ void PassManagerBuilder::addFunctionSimplificationPasses(
   // need for this.
   MPM.add(createCFGSimplificationPass(
       SimplifyCFGOptions().convertSwitchRangeToICmp(true)));
-  MPM.add(createInstructionCombiningPass());
+  MPM.add(createInstructionCombiningPass(EnableVulkanPasses));
   // We resume loop passes creating a second loop pipeline here.
   if (EnableLoopFlatten) {
     MPM.add(createLoopFlattenPass()); // Flatten loops
@@ -519,7 +532,7 @@ void PassManagerBuilder::addFunctionSimplificationPasses(
 
   // Run instcombine after redundancy elimination to exploit opportunities
   // opened up by them.
-  MPM.add(createInstructionCombiningPass());
+  MPM.add(createInstructionCombiningPass(EnableVulkanPasses));
   addExtensionsToPM(EP_Peephole, MPM);
   if (OptLevel > 1) {
     if (EnableDFAJumpThreading && SizeLevel == 0)
@@ -547,7 +560,7 @@ void PassManagerBuilder::addFunctionSimplificationPasses(
   MPM.add(createCFGSimplificationPass(
       SimplifyCFGOptions().hoistCommonInsts(true).sinkCommonInsts(true)));
   // Clean up after everything.
-  MPM.add(createInstructionCombiningPass());
+  MPM.add(createInstructionCombiningPass(EnableVulkanPasses));
   addExtensionsToPM(EP_Peephole, MPM);
 
   if (EnableCHR && OptLevel >= 3 &&
@@ -582,7 +595,7 @@ void PassManagerBuilder::addVectorPasses(legacy::PassManagerBase &PM,
     PM.add(createLoopLoadEliminationPass());
   }
   // Cleanup after the loop optimization passes.
-  PM.add(createInstructionCombiningPass());
+  PM.add(createInstructionCombiningPass(EnableVulkanPasses));
 
   if (OptLevel > 1 && ExtraVectorizerPasses) {
     // At higher optimization levels, try to clean up any runtime overlap and
@@ -593,13 +606,13 @@ void PassManagerBuilder::addVectorPasses(legacy::PassManagerBase &PM,
     // dead (or speculatable) control flows or more combining opportunities.
     PM.add(createEarlyCSEPass());
     PM.add(createCorrelatedValuePropagationPass());
-    PM.add(createInstructionCombiningPass());
+    PM.add(createInstructionCombiningPass(EnableVulkanPasses));
     PM.add(createLICMPass(LicmMssaOptCap, LicmMssaNoAccForPromotionCap,
                           /*AllowSpeculation=*/true));
     PM.add(createLoopUnswitchPass(SizeLevel || OptLevel < 3, DivergentTarget));
     PM.add(createCFGSimplificationPass(
         SimplifyCFGOptions().convertSwitchRangeToICmp(true)));
-    PM.add(createInstructionCombiningPass());
+    PM.add(createInstructionCombiningPass(EnableVulkanPasses));
   }
 
   // Now that we've formed fast to execute loop structures, we do further
@@ -621,7 +634,7 @@ void PassManagerBuilder::addVectorPasses(legacy::PassManagerBase &PM,
 
   if (IsFullLTO) {
     PM.add(createSCCPPass());                 // Propagate exposed constants
-    PM.add(createInstructionCombiningPass()); // Clean up again
+    PM.add(createInstructionCombiningPass(EnableVulkanPasses)); // Clean up again
     PM.add(createBitTrackingDCEPass());
   }
 
@@ -633,11 +646,11 @@ void PassManagerBuilder::addVectorPasses(legacy::PassManagerBase &PM,
   }
 
   // Enhance/cleanup vector code.
-  PM.add(createVectorCombinePass());
+  PM.add(createVectorCombinePass(EnableVulkanPasses));
 
   if (!IsFullLTO) {
     addExtensionsToPM(EP_Peephole, PM);
-    PM.add(createInstructionCombiningPass());
+    PM.add(createInstructionCombiningPass(EnableVulkanPasses));
 
     if (EnableUnrollAndJam && !DisableUnrollLoops) {
       // Unroll and Jam. We do this before unroll but need to be in a separate
@@ -652,7 +665,7 @@ void PassManagerBuilder::addVectorPasses(legacy::PassManagerBase &PM,
 
     if (!DisableUnrollLoops) {
       // LoopUnroll may generate some redundency to cleanup.
-      PM.add(createInstructionCombiningPass());
+      PM.add(createInstructionCombiningPass(EnableVulkanPasses));
 
       // Runtime unrolling will introduce runtime check in loop prologue. If the
       // unrolled loop is a inner loop, then the prologue will be inside the
@@ -670,11 +683,14 @@ void PassManagerBuilder::addVectorPasses(legacy::PassManagerBase &PM,
   PM.add(createAlignmentFromAssumptionsPass());
 
   if (IsFullLTO)
-    PM.add(createInstructionCombiningPass());
+    PM.add(createInstructionCombiningPass(EnableVulkanPasses));
 }
 
 void PassManagerBuilder::populateModulePassManager(
     legacy::PassManagerBase &MPM) {
+  // Add LibraryInfo if we have some.
+  if (LibraryInfo) MPM.add(new TargetLibraryInfoWrapperPass(*LibraryInfo));
+
   // Whether this is a default or *LTO pre-link pipeline. The FullLTO post-link
   // is handled separately, so just check this is not the ThinLTO post-link.
   bool DefaultOrPreLinkPipeline = !PerformThinLTO;
@@ -691,6 +707,34 @@ void PassManagerBuilder::populateModulePassManager(
   }
 
   // Allow forcing function attributes as a debugging and tuning aid.
+  MPM.add(createForceFunctionAttrsLegacyPass());
+
+  if (EnableAddressSpaceFix) {
+    // address space fixing should be run as early as possible, but it also
+    // requires readonly/nocapture/etc function and argument attributes,
+    // which in turn requires certain alias analysis to be run first
+    // NOTE: the original FunctionAttrs pass should still be run later on,
+    // because the code will have changed significantly due to optimizations
+    // and other pass changes
+    addInitialAliasAnalysisPasses(MPM);
+    MPM.add(createAAResultsWrapperPass());
+    MPM.add(createPostOrderFunctionAttrsLegacyPass());
+    MPM.add(createAddressSpaceFixPass());
+    MPM.add(createInternalizePass()); // kill cloned functions
+    //MPM.add(createBarrierNoopPass());
+  }
+
+  // run "first" passes that should run before all else
+  // if(EnableCUDAPasses) --none
+  if(EnableMetalPasses) {
+    MPM.add(createMetalFirstPass(EnableMetalIntelWorkarounds, EnableMetalNvidiaWorkarounds));
+  }
+  // if(EnableSPIRPasses) --none
+
+  // run this before any other major optimizations (it will be helpful to them)
+  MPM.add(createPropagateRangeInfoPass());
+
+  // run this again, since functions might have changed
   MPM.add(createForceFunctionAttrsLegacyPass());
 
   // If all optimizations are disabled, just run the always-inline pass and,
@@ -740,7 +784,8 @@ void PassManagerBuilder::populateModulePassManager(
   if (LibraryInfo)
     MPM.add(new TargetLibraryInfoWrapperPass(*LibraryInfo));
 
-  addInitialAliasAnalysisPasses(MPM);
+  if (!EnableAddressSpaceFix)
+    addInitialAliasAnalysisPasses(MPM);
 
   // For ThinLTO there are two passes of indirect call promotion. The
   // first is during the compile phase when PerformThinLTO=false and
@@ -788,7 +833,7 @@ void PassManagerBuilder::populateModulePassManager(
 
   MPM.add(createDeadArgEliminationPass()); // Dead argument elimination
 
-  MPM.add(createInstructionCombiningPass()); // Clean up after IPCP & DAE
+  MPM.add(createInstructionCombiningPass(EnableVulkanPasses)); // Clean up after IPCP & DAE
   addExtensionsToPM(EP_Peephole, MPM);
   MPM.add(
       createCFGSimplificationPass(SimplifyCFGOptions().convertSwitchRangeToICmp(
@@ -841,6 +886,35 @@ void PassManagerBuilder::populateModulePassManager(
   // pass manager that we are specifically trying to avoid. To prevent this
   // we must insert a no-op module pass to reset the pass manager.
   MPM.add(createBarrierNoopPass());
+
+  // run image read/write function passes after inling everything,
+  // this way we can actually check each use of these functions and their arguments,
+  // with constants potentially changing/improving the behavior and allowing
+  // additional checking (like oob offsets).
+  if(EnableCUDAPasses || EnableMetalPasses || EnableSPIRPasses) {
+    if(EnableCUDAPasses) MPM.add(createCUDAImagePass(floor_image_capabilities));
+    if(EnableMetalPasses) MPM.add(createMetalImagePass(floor_image_capabilities));
+    if(EnableSPIRPasses) {
+      if(!EnableVulkanPasses) {
+        MPM.add(createSPIRImagePass(floor_image_capabilities, EnableSPIRIntelWorkarounds));
+      }
+      else {
+        MPM.add(createVulkanImagePass(floor_image_capabilities));
+      }
+    }
+    
+    // and cleanup afterwards, including loop and unrolling related things
+    MPM.add(createTailCallEliminationPass());
+    MPM.add(createLoopRotatePass());
+    MPM.add(createLICMPass());
+    MPM.add(createSimpleLoopUnrollPass());
+    
+    MPM.add(createGVNPass());
+    MPM.add(createAggressiveDCEPass());
+    MPM.add(createCFGSimplificationPass());
+    MPM.add(createInstructionCombiningPass());
+    addExtensionsToPM(EP_Peephole, MPM);
+  }
 
   if (RunPartialInlining)
     MPM.add(createPartialInliningPass());
@@ -998,6 +1072,74 @@ void PassManagerBuilder::populateModulePassManager(
 
   addExtensionsToPM(EP_OptimizerLast, MPM);
 
+  // run backend final passes at the very end, no IR should change after this point!
+  if (EnableCUDAPasses) MPM.add(createCUDAFinalPass());
+  if (EnableSPIRPasses) MPM.add(createSPIRFinalPass());
+  if (EnableVulkanPasses) { // must run after spir!
+    // initial cfg cleanup/simplification
+    MPM.add(createAggressiveDCEPass(true /* allow CFG removal here */));
+    // NOTE: we no longer need to or want to perform switch lowering (switch'es can be handled now!)
+    //MPM.add(createLowerSwitchPass());
+    MPM.add(createCFGSimplificationPass());
+    MPM.add(createSinkingPass());
+
+    // improve GEPs
+    MPM.add(createSeparateConstOffsetFromGEPPass());
+    MPM.add(createSpeculativeExecutionPass());
+    MPM.add(createStraightLineStrengthReducePass());
+    MPM.add(createGVNPass());
+    MPM.add(createNaryReassociatePass());
+    MPM.add(createEarlyCSEPass());
+
+    // builtin -> parameter replacement
+    MPM.add(createVulkanBuiltinParamHandlingPass());
+
+    // "pre-final" vulkanization (prior to cfg structurization)
+    MPM.add(createVulkanPreFinalPass());
+
+    // Vulkan requires structured control flow:
+    // -> hit it with LLVM passes/fixes first
+    MPM.add(createFixIrreduciblePass());
+    MPM.add(createUnifyLoopExitsPass());
+    // NOTE: while this may "fix" certain corner cases, it leads to trouble in the dxil-spirv structurizer,
+    // since it can generate incorrect control flow (e.g. might run through, but produce incorrect results)
+    // -> only enable it if requested
+    if (EnableVulkanLLVMPreStructurizationPass) {
+      MPM.add(createStructurizeCFGPass(false));
+    }
+    // -> finally use the CFG structurizer from dxil-spirv to get a proper conformant CFG
+    MPM.add(createCFGStructurizationPass());
+
+    // vulkanization
+    MPM.add(createVulkanFinalPass());
+    MPM.add(createVulkanFinalModuleCleanupPass());
+  }
+  if (EnableMetalPasses) {
+    MPM.add(createMetalFinalPass(EnableMetalIntelWorkarounds, EnableMetalNvidiaWorkarounds));
+    MPM.add(createMetalFinalModuleCleanupPass());
+  }
+
+  // cleanup
+  if (EnableMetalPasses || EnableCUDAPasses || (EnableSPIRPasses && !EnableVulkanPasses)) {
+    MPM.add(createTailCallEliminationPass());
+    MPM.add(createCFGSimplificationPass());
+    MPM.add(createInstructionCombiningPass());
+    MPM.add(createGVNPass());
+    MPM.add(createAggressiveDCEPass());
+  }
+  if (EnableVulkanPasses) {
+    // certain cleanup / post-final passes are disabled for Vulkan, because we don't
+    // want to change the CFG or introduce "invalid" instructions
+    MPM.add(createFMACombinerPass());
+    MPM.add(createTailCallEliminationPass());
+    MPM.add(createInstructionCombiningPass(true, true /* Vulkan */));
+    // NOTE: use new GVN here, b/c it doesn't change basic blocks
+    MPM.add(createNewGVNPass());
+    MPM.add(createAggressiveDCEPass(false /* don't allow CFG removal */));
+  }
+
+  if (EnableVerifySPIR) MPM.add(createSpirValidationPass());
+
   if (PrepareForLTO) {
     MPM.add(createCanonicalizeAliasesPass());
     // Rename anon globals to be able to handle them in the summary
@@ -1091,7 +1233,7 @@ void PassManagerBuilder::addLTOOptimizationPasses(legacy::PassManagerBase &PM) {
   // calls, etc, so let instcombine do this.
   if (OptLevel > 2)
     PM.add(createAggressiveInstCombinerPass());
-  PM.add(createInstructionCombiningPass());
+  PM.add(createInstructionCombiningPass(EnableVulkanPasses));
   addExtensionsToPM(EP_Peephole, PM);
 
   // Inline small functions
@@ -1125,7 +1267,7 @@ void PassManagerBuilder::addLTOOptimizationPasses(legacy::PassManagerBase &PM) {
   PM.add(createArgumentPromotionPass());
 
   // The IPO passes may leave cruft around.  Clean up after them.
-  PM.add(createInstructionCombiningPass());
+  PM.add(createInstructionCombiningPass(EnableVulkanPasses));
   addExtensionsToPM(EP_Peephole, PM);
   PM.add(createJumpThreadingPass(/*FreezeSelectCond*/ true));
 

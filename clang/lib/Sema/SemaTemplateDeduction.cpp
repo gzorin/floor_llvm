@@ -3214,7 +3214,7 @@ Sema::SubstituteExplicitTemplateArguments(
       return TDK_SubstitutionFailure;
     // CUDA: Kernel function must have 'void' return type.
     if (getLangOpts().CUDA)
-      if (Function->hasAttr<CUDAGlobalAttr>() && !ResultType->isVoidType()) {
+      if (Function->hasAttr<ComputeKernelAttr>() && !ResultType->isVoidType()) {
         Diag(Function->getLocation(), diag::err_kern_type_not_void_return)
             << Function->getType() << Function->getSourceRange();
         return TDK_SubstitutionFailure;
@@ -3338,7 +3338,7 @@ CheckOriginalCallArgDeduction(Sema &S, TemplateDeductionInfo &Info,
 
     if (AQuals == DeducedAQuals) {
       // Qualifiers match; there's nothing to do.
-    } else if (!DeducedAQuals.compatiblyIncludes(AQuals)) {
+    } else if (!DeducedAQuals.compatiblyIncludes(AQuals, !S.getLangOpts().OpenCL)) {
       return Failed();
     } else {
       // Qualifiers are compatible, so have the argument type adopt the
@@ -3754,9 +3754,11 @@ static bool AdjustFunctionParmAndArgTypesForDeduction(
     //   "lvalue reference to A" is used in place of A for type deduction.
     if (isForwardingReference(QualType(ParamRefType, 0), FirstInnerIndex) &&
         Arg->isLValue()) {
+#if 0 // we don't want this
       if (S.getLangOpts().OpenCL && !ArgType.hasAddressSpace())
         ArgType = S.Context.getAddrSpaceQualType(
             ArgType, S.Context.getDefaultOpenCLPointeeAddrSpace());
+#endif
       ArgType = S.Context.getLValueReferenceType(ArgType);
     }
   } else {

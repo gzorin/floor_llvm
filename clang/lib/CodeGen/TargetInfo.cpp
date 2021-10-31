@@ -78,9 +78,16 @@ static void AssignToArrayRange(CodeGen::CGBuilderTy &Builder,
   }
 }
 
-static bool isAggregateTypeForABI(QualType T) {
+bool TargetCodeGenInfo::TCGIisAggregateTypeForABI(QualType T) {
   return !CodeGenFunction::hasScalarEvaluationKind(T) ||
          T->isMemberFunctionPointerType();
+}
+static inline bool isAggregateTypeForABI(QualType T) {
+	return TargetCodeGenInfo::TCGIisAggregateTypeForABI(T);
+}
+
+static bool isAggregateImageType(QualType T) {
+  return CodeGenFunction::hasAggregateEvaluationKind(T) && T->isAggregateImageType();
 }
 
 ABIArgInfo ABIInfo::getNaturalAlignIndirect(QualType Ty, bool ByVal,
@@ -110,6 +117,22 @@ bool ABIInfo::isPromotableIntegerTypeForABI(QualType Ty) const {
       return true;
 
   return false;
+}
+
+static ABIArgInfo classifyOpenCL(QualType Ty) {
+  if (Ty->isVoidType())
+    return ABIArgInfo::getIgnore();
+
+  if (const EnumType *EnumTy = Ty->getAs<EnumType>())
+    Ty = EnumTy->getDecl()->getIntegerType();
+
+  if (Ty->isRecordType())
+    return ABIArgInfo::getIndirect(CharUnits::Zero(), /*ByVal=*/false);
+
+  if (Ty->isPromotableIntegerType())
+    return ABIArgInfo::getExtend(Ty);
+
+  return ABIArgInfo::getDirect();
 }
 
 ABIInfo::~ABIInfo() {}
@@ -471,7 +494,7 @@ TargetCodeGenInfo::getDependentLibraryOption(llvm::StringRef Lib,
 unsigned TargetCodeGenInfo::getOpenCLKernelCallingConv() const {
   // OpenCL kernels are called via an explicit runtime API with arguments
   // set with clSetKernelArg(), not as normal sub-functions.
-  // Return SPIR_KERNEL by default as the kernel calling convention to
+  // Return FLOOR_KERNEL by default as the kernel calling convention to
   // ensure the fingerprint is fixed such way that each OpenCL argument
   // gets one matching argument in the produced kernel function argument
   // list to enable feasible implementation of clSetKernelArg() with
@@ -479,7 +502,7 @@ unsigned TargetCodeGenInfo::getOpenCLKernelCallingConv() const {
   // clSetKernelArg() might break depending on the target-specific
   // conventions; different targets might split structs passed as values
   // to multiple function arguments etc.
-  return llvm::CallingConv::SPIR_KERNEL;
+  return llvm::CallingConv::FLOOR_KERNEL;
 }
 
 llvm::Constant *TargetCodeGenInfo::getNullPointer(const CodeGen::CodeGenModule &CGM,
@@ -747,6 +770,9 @@ public:
 };
 
 ABIArgInfo DefaultABIInfo::classifyArgumentType(QualType Ty) const {
+  if (isAggregateImageType(Ty))
+    return ABIArgInfo::getExpand();
+
   Ty = useFirstFieldIfTransparentUnion(Ty);
 
   if (isAggregateTypeForABI(Ty)) {
@@ -1943,6 +1969,19 @@ ABIArgInfo X86_32ABIInfo::classifyArgumentType(QualType Ty,
 }
 
 void X86_32ABIInfo::computeInfo(CGFunctionInfo &FI) const {
+  QualType RetTy = FI.getReturnType();
+
+  if (getContext().getLangOpts().OpenCL) {
+    // Use OpenCL classify to prevent coercing
+    FI.getReturnInfo() = classifyOpenCL(RetTy);
+
+    for (CGFunctionInfo::arg_iterator it = FI.arg_begin(), ie = FI.arg_end();
+         it != ie; ++it)
+      it->info= classifyOpenCL(it->type);
+
+    return;
+  }
+
   CCState State(FI);
   if (IsMCUABI)
     State.FreeRegs = 3;
@@ -3922,6 +3961,18 @@ ABIArgInfo X86_64ABIInfo::classifyRegCallStructType(QualType Ty,
 }
 
 void X86_64ABIInfo::computeInfo(CGFunctionInfo &FI) const {
+  QualType RetTy = FI.getReturnType();
+
+  if (getContext().getLangOpts().OpenCL) {
+    // Use OpenCL classify to prevent coercing
+    FI.getReturnInfo() = classifyOpenCL(RetTy);
+
+    for (CGFunctionInfo::arg_iterator it = FI.arg_begin(), ie = FI.arg_end();
+         it != ie; ++it)
+      it->info= classifyOpenCL(it->type);
+
+    return;
+  }
 
   const unsigned CallingConv = FI.getCallingConvention();
   // It is possible to force Win64 calling convention on any x86_64 target by
@@ -4398,6 +4449,17 @@ void WinX86_64ABIInfo::computeInfo(CGFunctionInfo &FI) const {
   if (!getCXXABI().classifyReturnType(FI))
     FI.getReturnInfo() = classify(FI.getReturnType(), FreeSSERegs, true,
                                   IsVectorCall, IsRegCall);
+
+  if (getContext().getLangOpts().OpenCL) {
+    // Use OpenCL classify to prevent coercing
+    FI.getReturnInfo() = classifyOpenCL(FI.getReturnType());
+
+    for (CGFunctionInfo::arg_iterator it = FI.arg_begin(), ie = FI.arg_end();
+         it != ie; ++it)
+      it->info= classifyOpenCL(it->type);
+
+    return;
+  }
 
   if (IsVectorCall) {
     // We can use up to 6 SSE register parameters with vectorcall.
@@ -7256,7 +7318,7 @@ void NVPTXTargetCodeGenInfo::setTargetAttributes(
   if (M.getLangOpts().OpenCL) {
     // Use OpenCL function attributes to check for kernel functions
     // By default, all functions are device functions
-    if (FD->hasAttr<OpenCLKernelAttr>()) {
+    if (FD->hasAttr<ComputeKernelAttr>()) {
       // OpenCL __kernel functions get kernel metadata
       // Create !{<func-ref>, metadata !"kernel", i32 1} node
       addNVVMMetadata(F, "kernel", 1);
@@ -7270,7 +7332,7 @@ void NVPTXTargetCodeGenInfo::setTargetAttributes(
     // CUDA __global__ functions get a kernel metadata entry.  Since
     // __global__ functions cannot be called from the device, we do not
     // need to set the noinline attribute.
-    if (FD->hasAttr<CUDAGlobalAttr>()) {
+    if (FD->hasAttr<ComputeKernelAttr>()) {
       // Create !{<func-ref>, metadata !"kernel", i32 1} node
       addNVVMMetadata(F, "kernel", 1);
     }
@@ -7291,7 +7353,11 @@ void NVPTXTargetCodeGenInfo::setTargetAttributes(
           // Create !{<func-ref>, metadata !"minctasm", i32 <val>} node
           addNVVMMetadata(F, "minctasm", MinBlocks.getExtValue());
       }
-    }
+    } else if (const ReqdWorkGroupSizeAttr *reg_local_size = FD->getAttr<ReqdWorkGroupSizeAttr>()) {
+      addNVVMMetadata(F, "reqntidx", reg_local_size->getXDim());
+      addNVVMMetadata(F, "reqntidy", reg_local_size->getYDim());
+      addNVVMMetadata(F, "reqntidz", reg_local_size->getZDim());
+	}
   }
 }
 
@@ -8421,7 +8487,7 @@ void TCETargetCodeGenInfo::setTargetAttributes(
   llvm::Function *F = cast<llvm::Function>(GV);
 
   if (M.getLangOpts().OpenCL) {
-    if (FD->hasAttr<OpenCLKernelAttr>()) {
+    if (FD->hasAttr<ComputeKernelAttr>()) {
       // OpenCL C Kernel functions are not subject to inlining
       F->addFnAttr(llvm::Attribute::NoInline);
       const ReqdWorkGroupSizeAttr *Attr = FD->getAttr<ReqdWorkGroupSizeAttr>();
@@ -9286,8 +9352,8 @@ static bool requiresAMDGPUProtectedVisibility(const Decl *D,
   if (GV->getVisibility() != llvm::GlobalValue::HiddenVisibility)
     return false;
 
-  return D->hasAttr<OpenCLKernelAttr>() ||
-         (isa<FunctionDecl>(D) && D->hasAttr<CUDAGlobalAttr>()) ||
+  return D->hasAttr<ComputeKernelAttr>() ||
+         (isa<FunctionDecl>(D) && D->hasAttr<ComputeKernelAttr>()) ||
          (isa<VarDecl>(D) &&
           (D->hasAttr<CUDADeviceAttr>() || D->hasAttr<CUDAConstantAttr>() ||
            cast<VarDecl>(D)->getType()->isCUDADeviceBuiltinSurfaceType() ||
@@ -9299,8 +9365,8 @@ void AMDGPUTargetCodeGenInfo::setFunctionDeclAttributes(
   const auto *ReqdWGS =
       M.getLangOpts().OpenCL ? FD->getAttr<ReqdWorkGroupSizeAttr>() : nullptr;
   const bool IsOpenCLKernel =
-      M.getLangOpts().OpenCL && FD->hasAttr<OpenCLKernelAttr>();
-  const bool IsHIPKernel = M.getLangOpts().HIP && FD->hasAttr<CUDAGlobalAttr>();
+      M.getLangOpts().OpenCL && FD->hasAttr<ComputeKernelAttr>();
+  const bool IsHIPKernel = M.getLangOpts().HIP && FD->hasAttr<ComputeKernelAttr>();
 
   const auto *FlatWGS = FD->getAttr<AMDGPUFlatWorkGroupSizeAttr>();
   if (ReqdWGS || FlatWGS) {
@@ -9493,7 +9559,7 @@ bool AMDGPUTargetCodeGenInfo::shouldEmitStaticExternCAliases() const {
 void AMDGPUTargetCodeGenInfo::setCUDAKernelCallingConvention(
     const FunctionType *&FT) const {
   FT = getABIInfo().getContext().adjustFunctionType(
-      FT, FT->getExtInfo().withCallingConv(CC_OpenCLKernel));
+      FT, FT->getExtInfo().withCallingConv(CC_FloorKernel));
 }
 
 //===----------------------------------------------------------------------===//
@@ -10376,7 +10442,7 @@ public:
 
 void CommonSPIRABIInfo::setCCs() {
   assert(getRuntimeCC() == llvm::CallingConv::C);
-  RuntimeCC = llvm::CallingConv::SPIR_FUNC;
+  RuntimeCC = llvm::CallingConv::FLOOR_FUNC;
 }
 
 ABIArgInfo SPIRVABIInfo::classifyKernelArgumentType(QualType Ty) const {
@@ -10425,7 +10491,7 @@ void computeSPIRKernelABIInfo(CodeGenModule &CGM, CGFunctionInfo &FI) {
 }
 
 unsigned CommonSPIRTargetCodeGenInfo::getOpenCLKernelCallingConv() const {
-  return llvm::CallingConv::SPIR_KERNEL;
+  return llvm::CallingConv::FLOOR_KERNEL;
 }
 
 void SPIRVTargetCodeGenInfo::setCUDAKernelCallingConvention(
@@ -10437,6 +10503,183 @@ void SPIRVTargetCodeGenInfo::setCUDAKernelCallingConvention(
     return;
   }
 }
+
+//===----------------------------------------------------------------------===//
+// Metal/AIR ABI Implementation
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+class AIRABIInfo : public ABIInfo {
+public:
+  AIRABIInfo(CodeGenTypes &CGT) : ABIInfo(CGT) {}
+
+  ABIArgInfo classifyReturnType(QualType RetTy) const;
+  ABIArgInfo classifyArgumentType(QualType Ty) const;
+
+  void computeInfo(CGFunctionInfo &FI) const override;
+  Address EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
+                    QualType Ty) const override;
+};
+
+class AIRTargetCodeGenInfo : public TargetCodeGenInfo {
+public:
+  AIRTargetCodeGenInfo(CodeGenTypes &CGT)
+    : TargetCodeGenInfo(std::make_unique<AIRABIInfo>(CGT)) {}
+};
+
+ABIArgInfo AIRABIInfo::classifyReturnType(QualType RetTy) const {
+  if (RetTy->isVoidType())
+    return ABIArgInfo::getIgnore();
+
+  // note: this is different from default ABI
+  if (!RetTy->isScalarType())
+    return ABIArgInfo::getDirect();
+
+  // Treat an enum type as its underlying type.
+  if (const EnumType *EnumTy = RetTy->getAs<EnumType>())
+    RetTy = EnumTy->getDecl()->getIntegerType();
+
+  return (RetTy->isPromotableIntegerType() ?
+          ABIArgInfo::getExtend(RetTy) : ABIArgInfo::getDirect());
+}
+
+ABIArgInfo AIRABIInfo::classifyArgumentType(QualType Ty) const {
+  // CGT.getTarget() // TODO: native array image test
+  // direct array of images (not writable)
+  if (Ty->isArrayImageType(true))
+    return getNaturalAlignIndirect(Ty);
+
+  if (CodeGenFunction::hasAggregateEvaluationKind(Ty) &&
+      Ty->isStructureOrClassType()) {
+    return ABIArgInfo::getExpand();
+  }
+
+  // Treat an enum type as its underlying type.
+  if (const EnumType *EnumTy = Ty->getAs<EnumType>())
+    Ty = EnumTy->getDecl()->getIntegerType();
+
+  return (Ty->isPromotableIntegerType() ?
+          ABIArgInfo::getExtend(Ty) : ABIArgInfo::getDirect());
+}
+
+void AIRABIInfo::computeInfo(CGFunctionInfo &FI) const {
+  // return type should never be indirect
+  // TODO: ... if the function is a kernel/vs/fs
+  FI.getReturnInfo() = classifyReturnType(FI.getReturnType());
+
+  for (auto &I : FI.arguments())
+    I.info = classifyArgumentType(I.type);
+
+  // Always honor user-specified calling convention.
+  if (FI.getCallingConvention() != llvm::CallingConv::C)
+    return;
+
+  FI.setEffectiveCallingConvention(getRuntimeCC());
+}
+
+Address AIRABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
+                              QualType Ty) const {
+  llvm_unreachable("AIR does not support varargs");
+}
+
+}
+
+//===----------------------------------------------------------------------===//
+// Vulkan/SPIR-V ABI Implementation
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+class VulkanABIInfo : public ABIInfo {
+public:
+  VulkanABIInfo(CodeGenTypes &CGT) : ABIInfo(CGT) {}
+
+  ABIArgInfo classifyReturnType(QualType RetTy, unsigned int CC) const;
+  ABIArgInfo classifyArgumentType(QualType Ty, unsigned int CC) const;
+
+  void computeInfo(CGFunctionInfo &FI) const override;
+  Address EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
+                    QualType Ty) const override;
+};
+
+class VulkanTargetCodeGenInfo : public TargetCodeGenInfo {
+public:
+  VulkanTargetCodeGenInfo(CodeGenTypes &CGT)
+    : TargetCodeGenInfo(std::make_unique<VulkanABIInfo>(CGT)) {}
+};
+
+ABIArgInfo VulkanABIInfo::classifyReturnType(QualType RetTy, unsigned int CC) const {
+  if (RetTy->isVoidType())
+    return ABIArgInfo::getIgnore();
+
+  // note: this is different from default ABI
+  if (!RetTy->isScalarType())
+    return ABIArgInfo::getDirect();
+
+  // Treat an enum type as its underlying type.
+  if (const EnumType *EnumTy = RetTy->getAs<EnumType>())
+    RetTy = EnumTy->getDecl()->getIntegerType();
+
+  return (RetTy->isPromotableIntegerType() ?
+          ABIArgInfo::getExtend(RetTy) : ABIArgInfo::getDirect());
+}
+
+ABIArgInfo VulkanABIInfo::classifyArgumentType(QualType Ty, unsigned int CC) const {
+  // direct array of images (not writable)
+  if (Ty->isArrayImageType(true))
+    return getNaturalAlignIndirect(Ty);
+
+  // all shader inputs must either be scalar or vector types, or arrays thereof
+  // -> expand all aggregates
+  if (CodeGenFunction::hasAggregateEvaluationKind(Ty) &&
+      Ty->isStructureOrClassType() &&
+      (CC == llvm::CallingConv::FLOOR_VERTEX ||
+       CC == llvm::CallingConv::FLOOR_FRAGMENT ||
+       CC == llvm::CallingConv::FLOOR_KERNEL)) {
+    return ABIArgInfo::getExpand();
+  }
+
+  if (isAggregateTypeForABI(Ty)) {
+    // Records with non-trivial destructors/copy-constructors should not be
+    // passed by value.
+    if (CGCXXABI::RecordArgABI RAA = getRecordArgABI(Ty, getCXXABI()))
+      return getNaturalAlignIndirect(Ty, RAA == CGCXXABI::RAA_DirectInMemory);
+
+    return getNaturalAlignIndirect(Ty);
+  }
+
+  // Treat an enum type as its underlying type.
+  if (const EnumType *EnumTy = Ty->getAs<EnumType>())
+    Ty = EnumTy->getDecl()->getIntegerType();
+
+  return (Ty->isPromotableIntegerType() ?
+          ABIArgInfo::getExtend(Ty) : ABIArgInfo::getDirect());
+}
+
+void VulkanABIInfo::computeInfo(CGFunctionInfo &FI) const {
+  FI.getReturnInfo() = classifyReturnType(FI.getReturnType(), FI.getCallingConvention());
+
+  for (auto &I : FI.arguments())
+    I.info = classifyArgumentType(I.type, FI.getCallingConvention());
+
+  // Always honor user-specified calling convention.
+  if (FI.getCallingConvention() != llvm::CallingConv::C)
+    return;
+
+  FI.setEffectiveCallingConvention(getRuntimeCC());
+}
+
+Address VulkanABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
+                                 QualType Ty) const {
+  llvm_unreachable("Vulkan/SPIR-V does not support varargs");
+}
+
+}
+
+//===----------------------------------------------------------------------===//
+// END OF ABI Implementation
+//===----------------------------------------------------------------------===//
 
 static bool appendType(SmallStringEnc &Enc, QualType QType,
                        const CodeGen::CodeGenModule &CGM,
@@ -11512,9 +11755,14 @@ const TargetCodeGenInfo &CodeGenModule::getTargetCodeGenInfo() {
     return SetCGInfo(new CommonSPIRTargetCodeGenInfo(Types));
   case llvm::Triple::spirv32:
   case llvm::Triple::spirv64:
+    if(Triple.getEnvironment() == llvm::Triple::EnvironmentType::Vulkan) {
+      return SetCGInfo(new VulkanTargetCodeGenInfo(Types));
+    }
     return SetCGInfo(new SPIRVTargetCodeGenInfo(Types));
   case llvm::Triple::ve:
     return SetCGInfo(new VETargetCodeGenInfo(Types));
+  case llvm::Triple::air64:
+    return SetCGInfo(new AIRTargetCodeGenInfo(Types));
   }
 }
 

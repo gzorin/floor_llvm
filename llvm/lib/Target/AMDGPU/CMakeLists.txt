@@ -162,6 +162,7 @@ add_llvm_target(AMDGPUCodeGen
   CodeGen
   Core
   IPO
+  LibFloor
   MC
   Passes
   AMDGPUDesc

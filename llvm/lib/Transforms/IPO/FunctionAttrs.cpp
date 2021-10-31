@@ -1580,6 +1580,15 @@ static void addNoRecurseAttrs(const SCCNodeSet &SCCNodes,
   if (!F || !F->hasExactDefinition() || F->doesNotRecurse())
     return;
 
+  // set norecurse for all compute kernels and vertex/fragment shaders
+  if (F->getCallingConv() == CallingConv::FLOOR_KERNEL ||
+      F->getCallingConv() == CallingConv::FLOOR_VERTEX ||
+      F->getCallingConv() == CallingConv::FLOOR_FRAGMENT) {
+    F->setDoesNotRecurse();
+    ++NumNoRecurse;
+    return true;
+  }
+
   // If all of the calls in F are identifiable and are to norecurse functions, F
   // is norecurse. This check also detects self-recursion as F is not currently
   // marked norecurse, so any called from F to F will not be marked norecurse.

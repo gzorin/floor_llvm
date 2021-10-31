@@ -2405,7 +2405,8 @@ bool Sema::CheckAllocatedType(QualType AllocType, SourceLocation Loc,
     return Diag(Loc, diag::err_variably_modified_new_type)
              << AllocType;
   else if (AllocType.getAddressSpace() != LangAS::Default &&
-           !getLangOpts().OpenCLCPlusPlus)
+           !getLangOpts().OpenCLCPlusPlus &&
+           !(getLangOpts().OpenCL && getLangOpts().CPlusPlus))
     return Diag(Loc, diag::err_address_space_qualified_new)
       << AllocType.getUnqualifiedType()
       << AllocType.getQualifiers().getAddressSpaceAttributePrintValue();
@@ -3094,7 +3095,9 @@ void Sema::DeclareGlobalAllocationFunction(DeclarationName Name,
   else {
     // Host and device get their own declaration so each can be
     // defined or re-declared independently.
-    CreateAllocationFunctionDecl(CUDAHostAttr::CreateImplicit(Context));
+    if (!LangOpts.CUDAIsDevice) { // don't define if device-only
+      CreateAllocationFunctionDecl(CUDAHostAttr::CreateImplicit(Context));
+    }
     CreateAllocationFunctionDecl(CUDADeviceAttr::CreateImplicit(Context));
   }
 }
@@ -3556,7 +3559,8 @@ Sema::ActOnCXXDelete(SourceLocation StartLoc, bool UseGlobal,
     QualType PointeeElem = Context.getBaseElementType(Pointee);
 
     if (Pointee.getAddressSpace() != LangAS::Default &&
-        !getLangOpts().OpenCLCPlusPlus)
+        !getLangOpts().OpenCLCPlusPlus &&
+        !(getLangOpts().OpenCL && getLangOpts().CPlusPlus))
       return Diag(Ex.get()->getBeginLoc(),
                   diag::err_address_space_qualified_delete)
              << Pointee.getUnqualifiedType()
@@ -4558,9 +4562,20 @@ Sema::PerformImplicitConversion(Expr *From, QualType ToType,
   }
 
   case ICK_Zero_Event_Conversion:
-  case ICK_Zero_Queue_Conversion:
     From = ImpCastExprToType(From, ToType,
                              CK_ZeroToOCLOpaqueType,
+                             From->getValueKind()).get();
+    break;
+
+  case ICK_Zero_Queue_Conversion:
+    From = ImpCastExprToType(From, ToType,
+                             CK_ZeroToOCLQueue,
+                             From->getValueKind()).get();
+    break;
+
+  case ICK_Int_Sampler_Conversion:
+    From = ImpCastExprToType(From, ToType,
+                             CK_IntToOCLSampler,
                              From->getValueKind()).get();
     break;
 
@@ -4592,6 +4607,7 @@ Sema::PerformImplicitConversion(Expr *From, QualType ToType,
     break;
 
   case ICK_Qualification: {
+#if 0 // we don't want this
     ExprValueKind VK = From->getValueKind();
     CastKind CK = CK_NoOp;
 
@@ -4608,6 +4624,11 @@ Sema::PerformImplicitConversion(Expr *From, QualType ToType,
     From = ImpCastExprToType(From, ToType.getNonLValueExprType(Context), CK, VK,
                              /*BasePath=*/nullptr, CCK)
                .get();
+#else // old behavior
+    ExprValueKind VK = From->getValueKind();
+    From = ImpCastExprToType(From, ToType.getNonLValueExprType(Context),
+                             CK_NoOp, VK, /*BasePath=*/nullptr, CCK).get();
+#endif
 
     if (SCS.DeprecatedStringLiteralToCharPtr &&
         !getLangOpts().WritableStrings) {

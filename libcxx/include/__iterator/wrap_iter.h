@@ -52,7 +52,7 @@ public:
     {
 #if _LIBCPP_DEBUG_LEVEL == 2
       if (!__libcpp_is_constant_evaluated())
-        __get_db()->__iterator_copy(this, _VSTD::addressof(__u));
+        __get_db()->__iterator_copy(this, __builtin_addressof(__u));
 #endif
     }
 #if _LIBCPP_DEBUG_LEVEL == 2
@@ -61,15 +61,15 @@ public:
         : __i(__x.base())
     {
       if (!__libcpp_is_constant_evaluated())
-        __get_db()->__iterator_copy(this, _VSTD::addressof(__x));
+        __get_db()->__iterator_copy(this, __builtin_addressof(__x));
     }
     _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_AFTER_CXX11
     __wrap_iter& operator=(const __wrap_iter& __x)
     {
-        if (this != _VSTD::addressof(__x))
+        if (this != __builtin_addressof(__x))
         {
             if (!__libcpp_is_constant_evaluated())
-                __get_db()->__iterator_copy(this, _VSTD::addressof(__x));
+                __get_db()->__iterator_copy(this, __builtin_addressof(__x));
             __i = __x.__i;
         }
         return *this;
@@ -169,7 +169,7 @@ template <class _Iter1>
 _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_AFTER_CXX11
 bool operator<(const __wrap_iter<_Iter1>& __x, const __wrap_iter<_Iter1>& __y) _NOEXCEPT
 {
-    _LIBCPP_DEBUG_ASSERT(__get_const_db()->__less_than_comparable(_VSTD::addressof(__x), _VSTD::addressof(__y)),
+    _LIBCPP_DEBUG_ASSERT(__get_const_db()->__less_than_comparable(_VSTD::addressof(__x), __builtin_addressof(__y)),
                          "Attempted to compare incomparable iterators");
     return __x.base() < __y.base();
 }
@@ -249,7 +249,7 @@ typename __wrap_iter<_Iter1>::difference_type
 operator-(const __wrap_iter<_Iter1>& __x, const __wrap_iter<_Iter2>& __y) _NOEXCEPT
 #endif // C++03
 {
-    _LIBCPP_DEBUG_ASSERT(__get_const_db()->__less_than_comparable(_VSTD::addressof(__x), _VSTD::addressof(__y)),
+    _LIBCPP_DEBUG_ASSERT(__get_const_db()->__less_than_comparable(__builtin_addressof(__x), __builtin_addressof(__y)),
                          "Attempted to subtract incompatible iterators");
     return __x.base() - __y.base();
 }
