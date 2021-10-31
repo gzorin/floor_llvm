@@ -18,7 +18,9 @@
 #include <__utility/swap.h>
 #include <cstddef>
 #include <cstdint>
+#if 0
 #include <cstring>
+#endif
 #include <limits>
 #include <type_traits>
 
