@@ -261,6 +261,10 @@ void NVPTXTargetInfo::getTargetDefines(const LangOptions &Opts,
         return "820";
       case CudaArch::SM_86:
         return "860";
+      case CudaArch::SM_87:
+        return "870";
+      case CudaArch::SM_88:
+        return "880";
       }
       llvm_unreachable("unhandled CudaArch");
     }();

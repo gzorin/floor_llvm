@@ -192,6 +192,9 @@ CudaVersion MinVersionForCudaArch(CudaArch A) {
   case CudaArch::SM_82:
   case CudaArch::SM_86:
     return CudaVersion::CUDA_111;
+  case CudaArch::SM_87:
+  case CudaArch::SM_88:
+    return CudaVersion::CUDA_115;
   default:
     llvm_unreachable("invalid enum");
   }
