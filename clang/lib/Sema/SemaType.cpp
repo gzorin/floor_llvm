@@ -8318,32 +8318,14 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
       break;
     }
     case ParsedAttr::AT_ImageAccess:
-      attr.setUsedAsTypeAttr();
-      break;
     case ParsedAttr::AT_FloorArgBuffer:
-      attr.setUsedAsTypeAttr();
-      break;
     case ParsedAttr::AT_FloorImageDataType:
-      attr.setUsedAsTypeAttr();
-      break;
     case ParsedAttr::AT_FloorImageFlags:
-      attr.setUsedAsTypeAttr();
-      break;
     case ParsedAttr::AT_VectorCompat:
-      attr.setUsedAsTypeAttr();
-      break;
     case ParsedAttr::AT_GraphicsFBOColorLocation:
-      attr.setUsedAsTypeAttr();
-      break;
     case ParsedAttr::AT_GraphicsFBODepthType:
-      attr.setUsedAsTypeAttr();
-      break;
     case ParsedAttr::AT_GraphicsVertexPosition:
-      attr.setUsedAsTypeAttr();
-      break;
     case ParsedAttr::AT_GraphicsPointSize:
-      attr.setUsedAsTypeAttr();
-      break;
     case ParsedAttr::AT_GraphicsStageInput:
       attr.setUsedAsTypeAttr();
       break;
