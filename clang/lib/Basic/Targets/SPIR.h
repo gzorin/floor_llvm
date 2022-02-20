@@ -175,7 +175,9 @@ public:
     if (CC == CC_FloorFunction ||
         CC == CC_FloorVertex ||
         CC == CC_FloorFragment ||
-        CC == CC_FloorKernel) {
+        CC == CC_FloorKernel ||
+        CC == CC_FloorTessControl ||
+        CC == CC_FloorTessEval) {
         return CCCR_OK;
     }
     return CCCR_Warning;
@@ -350,7 +352,9 @@ public:
     if (CC == CC_FloorFunction ||
         CC == CC_FloorVertex ||
         CC == CC_FloorFragment ||
-        CC == CC_FloorKernel) {
+        CC == CC_FloorKernel ||
+        CC == CC_FloorTessControl ||
+        CC == CC_FloorTessEval) {
         return CCCR_OK;
     }
     return CCCR_Warning;
