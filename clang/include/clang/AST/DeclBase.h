@@ -1588,6 +1588,12 @@ class DeclContext {
     uint64_t IsDefaulted : 1;
     uint64_t IsExplicitlyDefaulted : 1;
     uint64_t HasDefaultedFunctionInfo : 1;
+
+    /// For member functions of complete types, whether this is an ineligible
+    /// special member function or an unselected destructor. See
+    /// [class.mem.special].
+    uint64_t IsIneligibleOrNotSelected : 1;
+
     uint64_t HasImplicitReturnZero : 1;
     uint64_t IsLateTemplateParsed : 1;
 
@@ -1623,7 +1629,7 @@ class DeclContext {
   };
 
   /// Number of non-inherited bits in FunctionDeclBitfields.
-  enum { NumFunctionDeclBits = 27 };
+  enum { NumFunctionDeclBits = 28 };
 
   /// Stores the bits used by CXXConstructorDecl. If modified
   /// NumCXXConstructorDeclBits and the accessor
@@ -1635,12 +1641,12 @@ class DeclContext {
     /// For the bits in FunctionDeclBitfields.
     uint64_t : NumFunctionDeclBits;
 
-    /// 24 bits to fit in the remaining available space.
+    /// 23 bits to fit in the remaining available space.
     /// Note that this makes CXXConstructorDeclBitfields take
     /// exactly 64 bits and thus the width of NumCtorInitializers
     /// will need to be shrunk if some bit is added to NumDeclContextBitfields,
     /// NumFunctionDeclBitfields or CXXConstructorDeclBitfields.
-    uint64_t NumCtorInitializers : 21;
+    uint64_t NumCtorInitializers : 20;
     uint64_t IsInheritingConstructor : 1;
 
     /// Whether this constructor has a trail-allocated explicit specifier.
