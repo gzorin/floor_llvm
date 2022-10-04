@@ -584,7 +584,7 @@ namespace {
 					auto GV = new GlobalVariable(*M,
 												 global_type,
 												 is_constant,
-												 GlobalVariable::InternalLinkage,
+												 GlobalVariable::ExternalWeakLinkage,
 												 initializer,
 												 var_name,
 												 nullptr,

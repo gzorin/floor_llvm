@@ -1708,8 +1708,8 @@ struct __atomic_base  // false
 };
 
 #if defined(__cpp_lib_atomic_is_always_lock_free)
-template <class _Tp, bool __b>
-_LIBCPP_CONSTEXPR bool __atomic_base<_Tp, __b>::is_always_lock_free;
+template <class _Tp, class _TpAS, bool __b>
+_LIBCPP_CONSTEXPR bool __atomic_base<_Tp, _TpAS, __b>::is_always_lock_free;
 #endif
 
 // atomic<Integral>

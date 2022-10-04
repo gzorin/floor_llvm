@@ -15,7 +15,9 @@
 #include <__config>
 #include <__utility/forward.h>
 #include <__utility/priority_tag.h>
+#if 0
 #include <cmath>
+#endif
 #include <type_traits>
 
 #ifndef _LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER
@@ -51,10 +53,10 @@ namespace __weak_order {
                 return weak_ordering::greater;
             } else {
                 // Otherwise, at least one of them is a NaN.
-                bool __t_is_nan = _VSTD::isnan(__t);
-                bool __u_is_nan = _VSTD::isnan(__u);
-                bool __t_is_negative = _VSTD::signbit(__t);
-                bool __u_is_negative = _VSTD::signbit(__u);
+                bool __t_is_nan = __builtin_isnan(__t);
+                bool __u_is_nan = __builtin_isnan(__u);
+                bool __t_is_negative = __builtin_signbit(__t);
+                bool __u_is_negative = __builtin_signbit(__u);
                 if (__t_is_nan && __u_is_nan) {
                     return (__u_is_negative <=> __t_is_negative);
                 } else if (__t_is_nan) {

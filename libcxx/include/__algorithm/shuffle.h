@@ -49,11 +49,13 @@ public:
 private:
   uint_fast64_t __state;
   uint_fast64_t __inc;
+#if !defined(_LIBCPP_DEBUG_RANDOMIZE_UNSPECIFIED_STABILITY_SEED)
+  static constant char __x;
+#endif
   _LIBCPP_HIDE_FROM_ABI static uint_fast64_t __seed() {
 #ifdef _LIBCPP_DEBUG_RANDOMIZE_UNSPECIFIED_STABILITY_SEED
     return _LIBCPP_DEBUG_RANDOMIZE_UNSPECIFIED_STABILITY_SEED;
 #else
-    static char __x;
     return reinterpret_cast<uintptr_t>(&__x);
 #endif
   }

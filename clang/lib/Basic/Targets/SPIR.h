@@ -111,11 +111,11 @@ protected:
   BaseSPIRTargetInfo(const llvm::Triple &Triple, const TargetOptions &)
       : TargetInfo(Triple), is_pure_spir(Triple.getVendorName().str() == "unknown"),
         is_vulkan(Triple.getEnvironment() == llvm::Triple::EnvironmentType::Vulkan) {
+#if 0 // nope
     assert((Triple.isSPIR() || Triple.isSPIRV()) &&
            "Invalid architecture for SPIR or SPIR-V.");
     assert(getTriple().getOS() == llvm::Triple::UnknownOS &&
            "SPIR(-V) target must use unknown OS");
-#if 0 // nope
     assert(getTriple().getEnvironment() == llvm::Triple::UnknownEnvironment &&
            "SPIR(-V) target must use unknown environment type");
 #endif
@@ -224,11 +224,11 @@ class LLVM_LIBRARY_VISIBILITY SPIRTargetInfo : public BaseSPIRTargetInfo {
 public:
   SPIRTargetInfo(const llvm::Triple &Triple, const TargetOptions &Opts)
       : BaseSPIRTargetInfo(Triple, Opts) {
+#if 0 // nope
     assert(Triple.isSPIR() && "Invalid architecture for SPIR.");
     assert(getTriple().getOS() == llvm::Triple::UnknownOS &&
            "SPIR target must use unknown OS");
-    assert(getTriple().getEnvironment() == llvm::Triple::UnknownEnvironment &&
-           "SPIR target must use unknown environment type");
+#endif
   }
 
   void getTargetDefines(const LangOptions &Opts,
@@ -280,10 +280,12 @@ public:
   SPIRVTargetInfo(const llvm::Triple &Triple, const TargetOptions &Opts)
       : BaseSPIRTargetInfo(Triple, Opts) {
     assert(Triple.isSPIRV() && "Invalid architecture for SPIR-V.");
+#if 0 // nope
     assert(getTriple().getOS() == llvm::Triple::UnknownOS &&
            "SPIR-V target must use unknown OS");
     assert(getTriple().getEnvironment() == llvm::Triple::UnknownEnvironment &&
-           "SPIR-V target must use unknown environment type");
+		   "SPIR-V target must use unknown environment type");
+#endif
   }
 
   void getTargetDefines(const LangOptions &Opts,

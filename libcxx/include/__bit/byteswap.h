@@ -13,7 +13,9 @@
 #include <__concepts/arithmetic.h>
 #include <__config>
 #include <cstdint>
+#if 0
 #include <cstdlib>
+#endif
 
 #if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
 #  pragma GCC system_header

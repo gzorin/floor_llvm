@@ -1396,10 +1396,14 @@ public:
   /// Returns the function called, or null if this is an indirect function
   /// invocation or the function signature does not match the call signature.
   Function *getCalledFunction() const {
+#if 0 // TODO/NOTE: enable this once opaque pointers are used
     if (auto *F = dyn_cast_or_null<Function>(getCalledOperand()))
       if (F->getValueType() == getFunctionType())
         return F;
     return nullptr;
+#else
+    return dyn_cast_or_null<Function>(getCalledOperand());
+#endif
   }
 
   /// Return true if the callsite is an indirect call.

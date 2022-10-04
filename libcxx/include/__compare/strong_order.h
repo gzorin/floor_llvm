@@ -15,7 +15,9 @@
 #include <__config>
 #include <__utility/forward.h>
 #include <__utility/priority_tag.h>
+#if 0
 #include <cmath>
+#endif
 #include <cstdint>
 #include <limits>
 #include <type_traits>
@@ -65,27 +67,27 @@ namespace __strong_order {
                 return strong_ordering::greater;
             } else if (__t == __u) {
                 if constexpr (numeric_limits<_Dp>::radix == 2) {
-                    return _VSTD::signbit(__u) <=> _VSTD::signbit(__t);
+                    return __builtin_signbit(__u) <=> __builtin_signbit(__t);
                 } else {
                     // This is bullet 3 of the IEEE754 algorithm, relevant
                     // only for decimal floating-point;
                     // see https://stackoverflow.com/questions/69068075/
-                    if (__t == 0 || _VSTD::isinf(__t)) {
-                        return _VSTD::signbit(__u) <=> _VSTD::signbit(__t);
+                    if (__t == 0 || __builtin_isinf(__t)) {
+                        return __builtin_signbit(__u) <=> __builtin_signbit(__t);
                     } else {
                         int __texp, __uexp;
-                        (void)_VSTD::frexp(__t, &__texp);
-                        (void)_VSTD::frexp(__u, &__uexp);
+                        (void)__builtin_frexpf(__t, &__texp);
+                        (void)__builtin_frexpf(__u, &__uexp);
                         return (__t < 0) ? (__texp <=> __uexp) : (__uexp <=> __texp);
                     }
                 }
             } else {
                 // They're unordered, so one of them must be a NAN.
                 // The order is -QNAN, -SNAN, numbers, +SNAN, +QNAN.
-                bool __t_is_nan = _VSTD::isnan(__t);
-                bool __u_is_nan = _VSTD::isnan(__u);
-                bool __t_is_negative = _VSTD::signbit(__t);
-                bool __u_is_negative = _VSTD::signbit(__u);
+                bool __t_is_nan = __builtin_isnan(__t);
+                bool __u_is_nan = __builtin_isnan(__u);
+                bool __t_is_negative = __builtin_signbit(__t);
+                bool __u_is_negative = __builtin_signbit(__u);
                 using _IntType = conditional_t<
                     sizeof(__t) == sizeof(int32_t), int32_t, conditional_t<
                     sizeof(__t) == sizeof(int64_t), int64_t, void>

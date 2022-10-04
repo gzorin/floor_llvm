@@ -42,7 +42,9 @@ public:
 */
 
 #include <__config>
+#if 0
 #include <cstdlib>
+#endif
 #include <exception>
 #include <iosfwd>  // for string forward decl
 

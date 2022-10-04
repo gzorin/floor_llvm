@@ -13,7 +13,11 @@
 #include <__chrono/duration.h>
 #include <__chrono/time_point.h>
 #include <__config>
+#if 0
 #include <ctime>
+#else
+using time_t = int64_t;
+#endif
 
 #if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
 #pragma GCC system_header

@@ -11754,10 +11754,13 @@ const TargetCodeGenInfo &CodeGenModule::getTargetCodeGenInfo() {
     return SetCGInfo(new ARCTargetCodeGenInfo(Types));
   case llvm::Triple::spir:
   case llvm::Triple::spir64:
+    if (Triple.getEnvironment() == llvm::Triple::EnvironmentType::Vulkan) {
+      return SetCGInfo(new VulkanTargetCodeGenInfo(Types));
+    }
     return SetCGInfo(new CommonSPIRTargetCodeGenInfo(Types));
   case llvm::Triple::spirv32:
   case llvm::Triple::spirv64:
-    if(Triple.getEnvironment() == llvm::Triple::EnvironmentType::Vulkan) {
+    if (Triple.getEnvironment() == llvm::Triple::EnvironmentType::Vulkan) {
       return SetCGInfo(new VulkanTargetCodeGenInfo(Types));
     }
     return SetCGInfo(new SPIRVTargetCodeGenInfo(Types));
