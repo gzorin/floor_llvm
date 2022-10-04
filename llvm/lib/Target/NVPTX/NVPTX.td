@@ -75,6 +75,10 @@ def SM87 : SubtargetFeature<"sm_87", "SmVersion", "87",
 def SM88 : SubtargetFeature<"sm_88", "SmVersion", "88",
                              "Target SM 8.8">;
 
+// Ada
+def SM89 : SubtargetFeature<"sm_89", "SmVersion", "89",
+                             "Target SM 8.9">;
+
 // Hopper
 def SM90 : SubtargetFeature<"sm_90", "SmVersion", "90",
                              "Target SM 9.0">;
@@ -120,6 +124,8 @@ def PTX76 : SubtargetFeature<"ptx76", "PTXVersion", "76",
                              "Use PTX version 7.6">;
 def PTX77 : SubtargetFeature<"ptx77", "PTXVersion", "77",
                              "Use PTX version 7.7">;
+def PTX78 : SubtargetFeature<"ptx78", "PTXVersion", "78",
+                             "Use PTX version 7.8">;
 
 //===----------------------------------------------------------------------===//
 // NVPTX supported processors.
@@ -149,7 +155,8 @@ def : Proc<"sm_82", [SM82, PTX71]>;
 def : Proc<"sm_86", [SM86, PTX71]>;
 def : Proc<"sm_87", [SM87, PTX76]>;
 def : Proc<"sm_88", [SM88, PTX76]>;
-def : Proc<"sm_90", [SM90, PTX77]>;
+def : Proc<"sm_89", [SM88, PTX78]>;
+def : Proc<"sm_90", [SM90, PTX78]>;
 
 def NVPTXInstrInfo : InstrInfo {
 }
