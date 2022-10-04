@@ -86,21 +86,21 @@ bool FloorImageBasePass::runOnFunction(Function &F) {
 	const auto triple = llvm::Triple(M->getTargetTriple());
 	if (triple.getArch() == Triple::ArchType::air64) {
 		is_metal = true;
-		uint32_t major_version = 0, minor_version = 0, micro_version = 0;
 		if (triple.getOS() == Triple::OSType::IOS) {
-			triple.getiOSVersion(major_version, minor_version, micro_version);
-			if (major_version >= 14) {
+			auto version = triple.getiOSVersion();
+			if (version.getMajor() >= 14) {
 				is_metal_2_3 = true;
 			}
-			if (major_version >= 15) {
+			if (version.getMajor() >= 15) {
 				is_metal_2_4 = true;
 			}
 		} else if (triple.getOS() == Triple::OSType::MacOSX) {
-			if (triple.getMacOSXVersion(major_version, minor_version, micro_version)) {
-				if (major_version >= 11) {
+			VersionTuple version {};
+			if (triple.getMacOSXVersion(version)) {
+				if (version.getMajor() >= 11) {
 					is_metal_2_3 = true;
 				}
-				if (major_version >= 12) {
+				if (version.getMajor() >= 12) {
 					is_metal_2_4 = true;
 				}
 			}
@@ -108,13 +108,13 @@ bool FloorImageBasePass::runOnFunction(Function &F) {
 	}
 	
 	{
-		AttrBuilder attr_builder;
+		AttrBuilder attr_builder(*ctx);
 		attr_builder.addAttribute(llvm::Attribute::NoUnwind);
 		attr_builder.addAttribute(llvm::Attribute::ReadNone);
 		nounwind_readnone_attr = AttributeList::get(*ctx, ~0, attr_builder);
 	}
 	{
-		AttrBuilder attr_builder;
+		AttrBuilder attr_builder(*ctx);
 		attr_builder.addAttribute(llvm::Attribute::NoUnwind);
 		nounwind_attr = AttributeList::get(*ctx, ~0, attr_builder);
 	}

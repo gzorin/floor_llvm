@@ -420,42 +420,43 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   Triple TT(M.getTargetTriple());
   uint32_t target_air_version = 200;
   if (TT.isiOS()) {
-    uint32_t ios_major, ios_minor, ios_micro;
-    TT.getiOSVersion(ios_major, ios_minor, ios_micro);
-    if (ios_major <= 11) {
+    auto ios_version = TT.getiOSVersion();
+    if (ios_version.getMajor() <= 11) {
       target_air_version = 200;
-    } else if (ios_major == 12) {
+    } else if (ios_version.getMajor() == 12) {
       target_air_version = 210;
-    } else if (ios_major == 13) {
+    } else if (ios_version.getMajor() == 13) {
       target_air_version = 220;
-    } else if (ios_major == 14) {
+    } else if (ios_version.getMajor() == 14) {
       target_air_version = 230;
-    } else if (ios_major == 15) {
+    } else if (ios_version.getMajor() == 15) {
       target_air_version = 240;
-    } else if (ios_major >= 16) {
+    } else if (ios_version.getMajor() >= 16) {
       target_air_version = 250;
     }
 
-    M.setSDKVersion(VersionTuple{ios_major, ios_minor});
+    auto ios_minor = ios_version.getMinor().hasValue() ? ios_version.getMinor().getValue() : 0;
+    M.setSDKVersion(VersionTuple{ios_version.getMajor(), ios_minor});
   } else {
-    uint32_t osx_major, osx_minor, osx_micro;
-    TT.getMacOSXVersion(osx_major, osx_minor, osx_micro);
-    if (osx_major == 10 && osx_minor <= 13) {
+    VersionTuple osx_version {};
+    TT.getMacOSXVersion(osx_version);
+    auto osx_minor = osx_version.getMinor().hasValue() ? osx_version.getMinor().getValue() : 0;
+    if (osx_version.getMajor() == 10 && osx_minor <= 13) {
       target_air_version = 200;
-    } else if (osx_major == 10 && osx_minor == 14) {
+    } else if (osx_version.getMajor() == 10 && osx_minor == 14) {
       target_air_version = 210;
-    } else if (osx_major == 10 && osx_minor == 15) {
+    } else if (osx_version.getMajor() == 10 && osx_minor == 15) {
       target_air_version = 220;
-    } else if ((osx_major == 11 && osx_minor >= 0) ||
-               (osx_major == 10 && osx_minor >= 16)) {
+    } else if ((osx_version.getMajor() == 11 && osx_minor >= 0) ||
+               (osx_version.getMajor() == 10 && osx_minor >= 16)) {
       target_air_version = 230;
-    } else if (osx_major == 12 && osx_minor >= 0) {
+    } else if (osx_version.getMajor() == 12 && osx_minor >= 0) {
       target_air_version = 240;
-    } else if ((osx_major == 13 && osx_minor >= 0) || osx_major > 13) {
+    } else if ((osx_version.getMajor() == 13 && osx_minor >= 0) || osx_version.getMajor() > 13) {
       target_air_version = 250;
     }
 
-    M.setSDKVersion(VersionTuple{osx_major, osx_minor});
+    M.setSDKVersion(VersionTuple{osx_version.getMajor(), osx_minor});
   }
   const auto &metal_version = *metal_versions.find(target_air_version);
 
@@ -1070,25 +1071,25 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       .is_stub = false,  // never stub
       .is_64_bit = true, // always 64-bit
   };
-  uint32_t platform_major = 0, platform_minor = 0, platform_update = 0;
+  VersionTuple platform_version;
   if (TT.isMacOSX()) {
     header.platform = 1u;
-    TT.getMacOSXVersion(platform_major, platform_minor, platform_update);
+    TT.getMacOSXVersion(platform_version);
   } else if (TT.isiOS()) {
     header.platform = 2u;
-    TT.getiOSVersion(platform_major, platform_minor, platform_update);
+    platform_version = TT.getiOSVersion();
   } else if (TT.isTvOS()) {
     header.platform = 3u;
-    TT.getiOSVersion(platform_major, platform_minor, platform_update);
+    platform_version = TT.getiOSVersion();
   } else if (TT.isWatchOS()) {
     header.platform = 4u;
-    TT.getWatchOSVersion(platform_major, platform_minor, platform_update);
+    platform_version = TT.getWatchOSVersion();
   } else {
     header.platform = 0u;
   }
-  header.platform_version_major = platform_major;
-  header.platform_version_minor = platform_minor;
-  header.platform_version_update = platform_update;
+  header.platform_version_major = platform_version.getMajor();
+  header.platform_version_minor = platform_version.getMinor().hasValue() ? platform_version.getMinor().getValue() : 0;
+  header.platform_version_update = platform_version.getSubminor().hasValue() ? platform_version.getSubminor().getValue() : 0;
 
   OS.write((const char *)&header, sizeof(metallib_version));
 

@@ -132,9 +132,6 @@ protected:
   }
 
 public:
-  void getTargetDefines(const LangOptions &Opts,
-                        MacroBuilder &Builder) const override;
-
   bool hasFeature(StringRef Feature) const override {
     return Feature == "spir";
   }

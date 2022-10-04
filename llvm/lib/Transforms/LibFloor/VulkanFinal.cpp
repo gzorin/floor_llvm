@@ -1017,7 +1017,7 @@ namespace {
 				ConstantInt* rhs_const = dyn_cast_or_null<ConstantInt>(rhs);
 				if(lhs_const != nullptr && rhs_const != nullptr) {
 					// both are constant -> simply fold them
-					return folder.CreateAdd(lhs_const, rhs_const);
+					return folder.FoldAdd(lhs_const, rhs_const);
 				}
 				else if(lhs_const != nullptr && lhs_const->getZExtValue() == 0) {
 					// lhs idx is 0

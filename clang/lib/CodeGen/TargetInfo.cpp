@@ -9455,7 +9455,7 @@ void AMDGPUTargetCodeGenInfo::setTargetAttributes(
     setFunctionDeclAttributes(FD, F, M);
 
   const bool IsHIPKernel =
-      M.getLangOpts().HIP && FD && FD->hasAttr<CUDAGlobalAttr>();
+      M.getLangOpts().HIP && FD && FD->hasAttr<ComputeKernelAttr>();
 
   if (IsHIPKernel)
     F->addFnAttr("uniform-work-group-size", "true");
@@ -10471,7 +10471,7 @@ void SPIRVABIInfo::computeInfo(CGFunctionInfo &FI) const {
     FI.getReturnInfo() = classifyReturnType(FI.getReturnType());
 
   for (auto &I : FI.arguments()) {
-    if (CC == llvm::CallingConv::SPIR_KERNEL) {
+    if (CC == llvm::CallingConv::FLOOR_KERNEL) {
       I.info = classifyKernelArgumentType(I.type);
     } else {
       I.info = classifyArgumentType(I.type);
@@ -10499,7 +10499,7 @@ void SPIRVTargetCodeGenInfo::setCUDAKernelCallingConvention(
   // Convert HIP kernels to SPIR-V kernels.
   if (getABIInfo().getContext().getLangOpts().HIP) {
     FT = getABIInfo().getContext().adjustFunctionType(
-        FT, FT->getExtInfo().withCallingConv(CC_OpenCLKernel));
+        FT, FT->getExtInfo().withCallingConv(CC_FloorKernel));
     return;
   }
 }

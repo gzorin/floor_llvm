@@ -964,11 +964,11 @@ void MicrosoftCXXNameMangler::mangleUnqualifiedName(GlobalDecl GD,
       if (const IdentifierInfo *II = Name.getAsIdentifierInfo()) {
         bool IsDeviceStub =
             ND &&
-            ((isa<FunctionDecl>(ND) && ND->hasAttr<CUDAGlobalAttr>()) ||
+            ((isa<FunctionDecl>(ND) && ND->hasAttr<ComputeKernelAttr>()) ||
              (isa<FunctionTemplateDecl>(ND) &&
               cast<FunctionTemplateDecl>(ND)
                   ->getTemplatedDecl()
-                  ->hasAttr<CUDAGlobalAttr>())) &&
+                  ->hasAttr<ComputeKernelAttr>())) &&
             GD.getKernelReferenceKind() == KernelReferenceKind::Stub;
         if (IsDeviceStub)
           mangleSourceName(

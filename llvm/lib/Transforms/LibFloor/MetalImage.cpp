@@ -463,7 +463,7 @@ namespace {
 			
 			read_func_name += '.' + dtype;
 			
-			AttrBuilder attr_builder;
+			AttrBuilder attr_builder(*ctx);
 			attr_builder.addAttribute(llvm::Attribute::Convergent);
 			attr_builder.addAttribute(llvm::Attribute::ArgMemOnly);
 			attr_builder.addAttribute(llvm::Attribute::NoUnwind);
@@ -681,7 +681,7 @@ namespace {
 				// -> build get func name
 				const std::string get_func_name = "air.get_" + query_name + '_' + geom;
 				
-				AttrBuilder attr_builder;
+				AttrBuilder attr_builder(*ctx);
 				attr_builder.addAttribute(llvm::Attribute::Convergent);
 				attr_builder.addAttribute(llvm::Attribute::ArgMemOnly);
 				attr_builder.addAttribute(llvm::Attribute::NoUnwind);

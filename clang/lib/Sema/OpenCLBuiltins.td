@@ -1228,6 +1228,7 @@ foreach VSize1 = [2, 4, 8, 16] in {
 //--------------------------------------------------------------------
 // OpenCL v1.1 s6.11.3, v1.2 s6.12.14, v2.0 s6.13.14: Image Read and Write Functions
 // OpenCL Extension v2.0 s5.1.8 and s6.1.8: Image Read and Write Functions
+// NOTE: ImageCube* types are handled here as well for completness, but aren't necessarily functional
 // --- Table 22: Image Read Functions with Samplers ---
 foreach imgTy = [Image1d] in {
   foreach coordTy = [Int, Float] in {
@@ -1243,7 +1244,7 @@ foreach imgTy = [Image2d, Image1dArray] in {
     def : Builtin<"read_imageui", [VectorType<UInt, 4>, ImageType<imgTy, "RO">, Sampler, VectorType<coordTy, 2>], Attr.Pure>;
   }
 }
-foreach imgTy = [Image3d, Image2dArray] in {
+foreach imgTy = [Image3d, Image2dArray, ImageCube, ImageCubeArray] in {
   foreach coordTy = [Int, Float] in {
     def : Builtin<"read_imagef", [VectorType<Float, 4>, ImageType<imgTy, "RO">, Sampler, VectorType<coordTy, 4>], Attr.Pure>;
     def : Builtin<"read_imagei", [VectorType<Int, 4>, ImageType<imgTy, "RO">, Sampler, VectorType<coordTy, 4>], Attr.Pure>;
@@ -1253,6 +1254,8 @@ foreach imgTy = [Image3d, Image2dArray] in {
 foreach coordTy = [Int, Float] in {
   def : Builtin<"read_imagef", [Float, ImageType<Image2dDepth, "RO">, Sampler, VectorType<coordTy, 2>], Attr.Pure>;
   def : Builtin<"read_imagef", [Float, ImageType<Image2dArrayDepth, "RO">, Sampler, VectorType<coordTy, 4>], Attr.Pure>;
+  def : Builtin<"read_imagef", [Float, ImageType<ImageCubeDepth, "RO">, Sampler, VectorType<coordTy, 4>], Attr.Pure>;
+  def : Builtin<"read_imagef", [Float, ImageType<ImageCubeArrayDepth, "RO">, Sampler, VectorType<coordTy, 4>], Attr.Pure>;
 }
 
 // --- Table 23: Sampler-less Read Functions ---
@@ -1262,7 +1265,7 @@ multiclass ImageReadSamplerless<string aQual> {
     def : Builtin<"read_imagei", [VectorType<Int, 4>, ImageType<imgTy, aQual>, VectorType<Int, 2>], Attr.Pure>;
     def : Builtin<"read_imageui", [VectorType<UInt, 4>, ImageType<imgTy, aQual>, VectorType<Int, 2>], Attr.Pure>;
   }
-  foreach imgTy = [Image3d, Image2dArray] in {
+  foreach imgTy = [Image3d, Image2dArray, ImageCube, ImageCubeArray] in {
     def : Builtin<"read_imagef", [VectorType<Float, 4>, ImageType<imgTy, aQual>, VectorType<Int, 4>], Attr.Pure>;
     def : Builtin<"read_imagei", [VectorType<Int, 4>, ImageType<imgTy, aQual>, VectorType<Int, 4>], Attr.Pure>;
     def : Builtin<"read_imageui", [VectorType<UInt, 4>, ImageType<imgTy, aQual>, VectorType<Int, 4>], Attr.Pure>;
@@ -1274,6 +1277,8 @@ multiclass ImageReadSamplerless<string aQual> {
   }
   def : Builtin<"read_imagef", [Float, ImageType<Image2dDepth, aQual>, VectorType<Int, 2>], Attr.Pure>;
   def : Builtin<"read_imagef", [Float, ImageType<Image2dArrayDepth, aQual>, VectorType<Int, 4>], Attr.Pure>;
+  def : Builtin<"read_imagef", [Float, ImageType<ImageCubeDepth, aQual>, VectorType<Int, 4>], Attr.Pure>;
+  def : Builtin<"read_imagef", [Float, ImageType<ImageCubeArrayDepth, aQual>, VectorType<Int, 4>], Attr.Pure>;
 }
 
 let MinVersion = CL12 in {
@@ -1305,13 +1310,15 @@ multiclass ImageWrite<string aQual> {
     def : Builtin<"write_imagei", [Void, ImageType<imgTy, aQual>, VectorType<Int, 2>, VectorType<Int, 4>]>;
     def : Builtin<"write_imageui", [Void, ImageType<imgTy, aQual>, VectorType<Int, 2>, VectorType<UInt, 4>]>;
   }
-  foreach imgTy = [Image3d] in {
+  foreach imgTy = [Image3d, ImageCube, ImageCubeArray] in {
     def : Builtin<"write_imagef", [Void, ImageType<imgTy, aQual>, VectorType<Int, 4>, VectorType<Float, 4>]>;
     def : Builtin<"write_imagei", [Void, ImageType<imgTy, aQual>, VectorType<Int, 4>, VectorType<Int, 4>]>;
     def : Builtin<"write_imageui", [Void, ImageType<imgTy, aQual>, VectorType<Int, 4>, VectorType<UInt, 4>]>;
   }
   def : Builtin<"write_imagef", [Void, ImageType<Image2dDepth, aQual>, VectorType<Int, 2>, Float]>;
   def : Builtin<"write_imagef", [Void, ImageType<Image2dArrayDepth, aQual>, VectorType<Int, 4>, Float]>;
+  def : Builtin<"write_imagef", [Void, ImageType<ImageCubeDepth, aQual>, VectorType<Int, 4>, Float]>;
+  def : Builtin<"write_imagef", [Void, ImageType<ImageCubeArrayDepth, aQual>, VectorType<Int, 4>, Float]>;
 }
 
 defm : ImageWrite<"WO">;
@@ -1584,7 +1591,7 @@ let Extension = FuncExtKhrMipmapImage in {
 
 // Added to section 6.13.14.5
 multiclass ImageQueryNumMipLevels<string aQual> {
-  foreach imgTy = [Image1d, Image2d, Image3d, Image1dArray, Image2dArray, Image2dDepth, Image2dArrayDepth] in {
+  foreach imgTy = [Image1d, Image2d, Image3d, Image1dArray, Image2dArray, Image2dDepth, Image2dArrayDepth, ImageCube, ImageCubeArray, ImageCubeDepth, ImageCubeArrayDepth] in {
     def : Builtin<"get_image_num_mip_levels", [Int, ImageType<imgTy, aQual>]>;
   }
 }

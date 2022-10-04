@@ -3988,8 +3988,8 @@ static CallingConv getCCForDeclaratorChunk(
     if (Triple.getArch() == llvm::Triple::spirv32 ||
         Triple.getArch() == llvm::Triple::spirv64) {
       for (const ParsedAttr &AL : D.getDeclSpec().getAttributes()) {
-        if (AL.getKind() == ParsedAttr::AT_CUDAGlobal) {
-          CC = CC_OpenCLKernel;
+        if (AL.getKind() == ParsedAttr::AT_ComputeKernel) {
+          CC = CC_FloorKernel;
           break;
         }
       }

@@ -3133,7 +3133,7 @@ void Verifier::visitCallBase(CallBase &Call) {
     Assert(Call.getArgOperand(i)->getType() == FTy->getParamType(i) ||
            (Call.getArgOperand(i)->getType()->isPointerTy() &&
             FTy->getParamType(i)->isPointerTy() &&
-            PointerType::get(cast<PointerType>(Call.getArgOperand(i)->getType())->getElementType(),
+            PointerType::get(Call.getArgOperand(i)->getType()->getPointerElementType(),
                              FTy->getParamType(i)->getPointerAddressSpace()) ==
             FTy->getParamType(i)),
            "Call parameter type does not match function signature!",

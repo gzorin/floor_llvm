@@ -1588,7 +1588,7 @@ static void addNoRecurseAttrs(const SCCNodeSet &SCCNodes,
       F->getCallingConv() == CallingConv::FLOOR_TESS_EVAL) {
     F->setDoesNotRecurse();
     ++NumNoRecurse;
-    return true;
+    return;
   }
 
   // If all of the calls in F are identifiable and are to norecurse functions, F

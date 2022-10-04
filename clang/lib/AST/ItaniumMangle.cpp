@@ -2887,8 +2887,8 @@ void CXXNameMangler::mangleNameOrStandardSubstitution(const NamedDecl *ND) {
 }
 
 void CXXNameMangler::mangleMetalFieldName(const FieldDecl *D, const CXXRecordDecl* RD) {
-	const DeclContext *DC = IgnoreLinkageSpecDecls(getEffectiveDeclContext(D));
-	const DeclContext *PDC = IgnoreLinkageSpecDecls(getEffectiveDeclContext(RD));
+	const DeclContext *DC = Context.getEffectiveDeclContext(D);
+	const DeclContext *PDC = Context.getEffectiveDeclContext(RD);
 	
 	if(const auto II = D->getIdentifier()) {
 		// TODO: need actual parent field entry for all nested types
