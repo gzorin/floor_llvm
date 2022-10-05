@@ -2970,6 +2970,7 @@ Sema::PerformObjectMemberConversion(Expr *From,
       DestType = DestRecordType;
     }
 
+#if 0 // we don't want this
     LangAS FromAS = FromRecordType.getAddressSpace();
     LangAS DestAS = DestRecordType.getAddressSpace();
     if (FromAS != DestAS) {
@@ -2983,6 +2984,7 @@ Sema::PerformObjectMemberConversion(Expr *From,
                                CK_AddressSpaceConversion, From->getValueKind())
                  .get();
     }
+#endif
   } else {
     // No conversion necessary.
     return From;

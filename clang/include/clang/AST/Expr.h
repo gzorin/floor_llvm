@@ -3500,6 +3500,10 @@ protected:
     setDependence(computeDependence(this));
     assert(CastConsistency());
     CastExprBits.HasFPFeatures = HasFPFeatures;
+    // we generally do not want to emit address space casts,
+    // since there are many targets that don't support this
+    assert(kind != CastKind::CK_AddressSpaceConversion &&
+           "address space cast is not supported");
   }
 
   /// Construct an empty cast.

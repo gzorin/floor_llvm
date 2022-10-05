@@ -3408,7 +3408,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 	// https://developer.apple.com/metal/limits/
 	const bool is_osx = (getModule().getTargetTriple().find("macosx") != std::string::npos);
 	const uint32_t buf_limit = 31;
-	const uint32_t tex_limit = (is_osx ? 128 : 31);
+	const uint32_t tex_limit = (is_osx || getLangOpts().MetalVersion >= 300 ? 128 : 31);
 	if (buffer_idx > buf_limit) {
 		Error(FD->getSourceRange().getBegin(),
 			  StringRef("can't use more than " + std::to_string(buf_limit) + " buffers per function"));
@@ -3445,7 +3445,8 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		add_id_arg("__metal__group_id__", "air.threadgroup_position_in_grid", "uint3");
 		add_id_arg("__metal__group_size__", "air.threadgroups_per_grid", "uint3");
 		
-		if (getTriple().getOS() == llvm::Triple::OSType::MacOSX) {
+		if (getTriple().getOS() == llvm::Triple::OSType::MacOSX ||
+			getLangOpts().MetalVersion >= 300) {
 			add_id_arg("__metal__sub_group_id__", "air.simdgroup_index_in_threadgroup", "uint");
 			add_id_arg("__metal__sub_group_local_id__", "air.thread_index_in_simdgroup", "uint");
 			add_id_arg("__metal__sub_group_size__", "air.threads_per_simdgroup", "uint");

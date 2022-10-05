@@ -476,6 +476,10 @@ namespace {
 			if (triple.getArch() == Triple::ArchType::air64) {
 				if (triple.getOS() == Triple::OSType::MacOSX) {
 					has_sub_group_support = true;
+				} else if (triple.getOS() == Triple::OSType::IOS &&
+						   triple.getiOSVersion().getMajor() >= 16) {
+					// supported since Metal 3.0+ (requiring an Apple6+ GPU)
+					has_sub_group_support = true;
 				}
 			}
 			
