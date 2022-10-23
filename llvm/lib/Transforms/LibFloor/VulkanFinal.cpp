@@ -784,6 +784,7 @@ namespace {
 										auto new_result_type = result_type->getPointerElementType()->getPointerTo(SPIRAS_PhysicalStorageBuffer);
 										auto new_gep_type = PointerType::get(new_result_type, SPIRAS_StorageBuffer);
 										GEP->mutateType(new_gep_type);
+										GEP->setSourceElementType(adj_struct_type);
 										GEP->setResultElementType(new_result_type);
 										
 										// fix GEP users

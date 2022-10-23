@@ -945,11 +945,13 @@ Instruction *InstCombinerImpl::visitTrunc(TruncInst &Trunc) {
                                          : VecOpIdx * TruncRatio;
       assert(BitCastNumElts <= std::numeric_limits<uint32_t>::max() &&
              "overflow 32-bits");
-
-      auto *BitCastTo =
+      // don't allow bitcasts to more than 4 elements in Vulkan
+      if (!isVulkan || (isVulkan && BitCastNumElts <= 4)) {
+        auto *BitCastTo =
           VectorType::get(DestTy, BitCastNumElts, VecElts.isScalable());
-      Value *BitCast = Builder.CreateBitCast(VecOp, BitCastTo);
-      return ExtractElementInst::Create(BitCast, Builder.getInt32(NewIdx));
+        Value *BitCast = Builder.CreateBitCast(VecOp, BitCastTo);
+        return ExtractElementInst::Create(BitCast, Builder.getInt32(NewIdx));
+      }
     }
   }
 

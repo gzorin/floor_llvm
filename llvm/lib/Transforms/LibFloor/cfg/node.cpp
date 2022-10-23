@@ -1,25 +1,31 @@
-/*
- * Copyright 2019-2021 Hans-Kristian Arntzen for Valve Corporation
+/* Copyright (c) 2019-2022 Hans-Kristian Arntzen for Valve Corporation
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * SPDX-License-Identifier: MIT
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 //==-----------------------------------------------------------------------===//
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ 189cc855b471591763d9951d63e51c72649037ab
+// @ b77e81a6eb020018dde3171568add9d9ccf6eec9
 //
 //===----------------------------------------------------------------------===//
 
@@ -75,6 +81,16 @@ void CFGNode::add_unique_fake_succ(CFGNode *node) {
 unsigned CFGNode::num_forward_preds() const { return unsigned(pred.size()); }
 
 bool CFGNode::has_pred_back_edges() const { return pred_back_edge != nullptr; }
+
+bool CFGNode::reaches_domination_frontier_before_merge(
+    const CFGNode *merge) const {
+  for (auto *frontier : dominance_frontier) {
+    if (merge != frontier && merge->post_dominates(frontier)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 bool CFGNode::dominates(const CFGNode *other) const {
   // Follow immediate dominator graph. Either we end up at this, or entry block.
@@ -134,37 +150,50 @@ bool CFGNode::can_backtrace_to(const CFGNode *parent) const {
   return can_backtrace_to(parent, node_cache);
 }
 
-const CFGNode *
-CFGNode::get_innermost_loop_header_for(const CFGNode *other) const {
-  while (this != other) {
-    // Entry block case.
-    if (other->pred.empty())
-      break;
+bool CFGNode::post_dominates_any_work(
+    const CFGNode *parent,
+    std::unordered_set<const CFGNode *> &node_cache) const {
+  // If we reached this node before and didn't terminate, it must have returned
+  // false.
+  if (node_cache.count(parent)) {
+    return false;
+  }
+  node_cache.insert(parent);
 
-    // Found a loop header. This better be the one.
-    if (other->pred_back_edge)
-      break;
-
-    assert(other->immediate_dominator);
-    other = other->immediate_dominator;
+  // This is not a dummy block, we have an answer.
+  if (!parent->ir.operations.empty() || !parent->ir.phi.empty()) {
+    return post_dominates(parent);
   }
 
-  return other;
-}
-
-bool CFGNode::is_innermost_loop_header_for(const CFGNode *other) const {
-  return this == get_innermost_loop_header_for(other);
-}
-
-bool CFGNode::branchless_path_to(const CFGNode *to) const {
-  const auto *node = this;
-  while (node != to) {
-    if (node->succ.size() != 1 || node->succ_back_edge)
-      return false;
-    node = node->succ.front();
+  for (auto *p : parent->pred) {
+    if (post_dominates_any_work(p, node_cache)) {
+      return true;
+    }
   }
 
-  return true;
+  return false;
+}
+
+bool CFGNode::post_dominates_any_work() const {
+  auto *start_node = this;
+  // Trivial back-trace as far as we can go.
+  while (start_node->pred.size() == 1 && start_node->ir.operations.empty() &&
+         start_node->ir.phi.empty() &&
+         start_node->post_dominates(start_node->pred.front())) {
+    start_node = start_node->pred.front();
+  }
+
+  if (!start_node->ir.operations.empty() || !start_node->ir.phi.empty()) {
+    return true;
+  }
+
+  std::unordered_set<const CFGNode *> node_cache;
+  for (auto *p : start_node->pred) {
+    if (start_node->post_dominates_any_work(p, node_cache)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool CFGNode::post_dominates(const CFGNode *start_node) const {
@@ -177,6 +206,19 @@ bool CFGNode::post_dominates(const CFGNode *start_node) const {
   }
 
   return this == start_node;
+}
+
+bool CFGNode::post_dominates_perfect_structured_construct() const {
+  if (!post_dominates(immediate_dominator)) {
+    return false;
+  }
+
+  for (auto *p : pred) {
+    if (!post_dominates(p)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool CFGNode::dominates_all_reachable_exits(
@@ -381,8 +423,6 @@ void CFGNode::retarget_branch(CFGNode *to_prev, CFGNode *to_next) {
     ir.terminator.true_block = to_next;
   if (ir.terminator.false_block == to_prev)
     ir.terminator.false_block = to_next;
-  if (ir.terminator.default_node == to_prev)
-    ir.terminator.default_node = to_next;
   for (auto &c : ir.terminator.cases)
     if (c.node == to_prev)
       c.node = to_next;
@@ -423,13 +463,6 @@ void CFGNode::fixup_merge_info_after_branch_rewrite(CFGNode *from,
     if (loop_ladder_block == from)
       loop_ladder_block = to;
   }
-}
-
-void CFGNode::traverse_dominated_blocks_and_rewrite_branch(CFGNode *from,
-                                                           CFGNode *to) {
-  traverse_dominated_blocks_and_rewrite_branch(
-      *this, from, to, [](const CFGNode *node) -> bool { return true; });
-  fixup_merge_info_after_branch_rewrite(from, to);
 }
 
 void CFGNode::recompute_immediate_dominator() {
@@ -511,6 +544,19 @@ CFGNode *CFGNode::get_outer_header_dominator() {
   }
 
   return node;
+}
+
+bool CFGNode::block_is_jump_thread_ladder() const {
+  if (!ir.operations.empty() ||
+      ir.terminator.type != Terminator::Type::Condition || ir.phi.size() != 1) {
+    return false;
+  }
+
+  auto &phi = ir.phi.front();
+
+  // Detect a jump thread block. If the branch target directly depends on the
+  // incoming blocks, we have this scenario.
+  return ir.terminator.condition == (llvm::Value *)phi.phi;
 }
 
 } // namespace llvm

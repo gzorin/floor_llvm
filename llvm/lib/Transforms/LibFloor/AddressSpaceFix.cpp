@@ -147,6 +147,7 @@ namespace {
 		template <bool fix_call_instrs = true>
 		static void fix_users(AddressSpaceFix* asfix_pass, LLVMContext& ctx, Instruction* instr, Value* parent, const uint32_t address_space, std::vector<ReturnInst*>& returns) {
 			// fix instruction
+			bool need_users_update = true;
 			switch(instr->getOpcode()) {
 				case Instruction::GetElementPtr: {
 					auto GEP = cast<GetElementPtrInst>(instr);
@@ -168,6 +169,9 @@ namespace {
 						DBG(errs() << " -> " << *BC->getType() << "\n";)
 					}
 					// else: can't do anything (TODO: warn/error?)
+					else {
+						need_users_update = false;
+					}
 					break;
 				}
 				case Instruction::Call: {
@@ -217,6 +221,8 @@ namespace {
 						DBG(errs() << ">> PHI: " << *phi->getType();)
 						phi->mutateType(new_ptr_type);
 						DBG(errs() << " -> " << *phi->getType() << "\n";)
+					} else {
+						need_users_update = false;
 					}
 					break;
 				}
@@ -231,6 +237,11 @@ namespace {
 				default:
 					// nothing has changed, bail out
 					return;
+			}
+			
+			// don't recurse if instruction users don't need to be updated
+			if (!need_users_update) {
+				return;
 			}
 			
 			// recursively fix all users

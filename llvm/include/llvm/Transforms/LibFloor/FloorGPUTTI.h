@@ -159,7 +159,10 @@ public:
 		const auto max_bit_width = getLoadStoreVecRegBitWidth(0);
 		const auto VecRegBitWidth = VF * LoadSize;
 		if (VecRegBitWidth > max_bit_width && VecTy->getScalarSizeInBits() < 32) {
-			return max_bit_width / LoadSize;
+			VF = max_bit_width / LoadSize;
+		}
+		if (is_vulkan) {
+			return std::min(VF, 4u);
 		}
 		return VF;
 	}
@@ -169,7 +172,10 @@ public:
 		const auto max_bit_width = getLoadStoreVecRegBitWidth(0);
 		const auto VecRegBitWidth = VF * StoreSize;
 		if (VecRegBitWidth > max_bit_width) {
-			return max_bit_width / StoreSize;
+			VF = max_bit_width / StoreSize;
+		}
+		if (is_vulkan) {
+			return std::min(VF, 4u);
 		}
 		return VF;
 	}
@@ -204,6 +210,10 @@ public:
 	}
 	
 	InstructionCost getVectorInstrCost(unsigned Opcode, Type *ValTy, unsigned Index) {
+		if (is_vulkan && ValTy->isVectorTy() && cast<FixedVectorType>(ValTy)->getElementCount().getFixedValue() > 4) {
+			// Vulkan: last resort to prevent vector types with more than 4 components
+			return 0xFFFFFF;
+		}
 		if (Index == 0 && (Opcode == Instruction::ExtractElement ||
 						   Opcode == Instruction::InsertElement)) {
 			return 0;
@@ -236,6 +246,25 @@ public:
 		return crtp_base_class::getArithmeticReductionCost(Opcode, Ty, FMF, CostKind) * 1024;
 	}
 	
+	InstructionCost
+	getCastInstrCost(unsigned Opcode, Type *Dst, Type *Src,
+					 TTI::CastContextHint CCH,
+					 TTI::TargetCostKind CostKind = TTI::TCK_SizeAndLatency,
+					 const Instruction *I = nullptr) const {
+		if (is_vulkan) {
+			// try to prevent vector types with more than 4 components
+			if (auto dst_vec_type = dyn_cast_or_null<FixedVectorType>(Dst);
+				dst_vec_type && dst_vec_type->getElementCount().getFixedValue() > 4) {
+				return 0xFFFFFF;
+			}
+			if (auto src_vec_type = dyn_cast_or_null<FixedVectorType>(Src);
+				src_vec_type && src_vec_type->getElementCount().getFixedValue() > 4) {
+				return 0xFFFFFF;
+			}
+		}
+		return crtp_base_class::getCastInstrCost(Opcode, Dst, Src, CCH, CostKind, I);
+	}
+
 protected:
 	const clang::CodeGenOptions& CodeGenOpts;
 	const clang::TargetOptions& TargetOpts;

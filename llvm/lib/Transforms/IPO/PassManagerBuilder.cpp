@@ -917,7 +917,7 @@ void PassManagerBuilder::populateModulePassManager(
     MPM.add(createGVNPass());
     MPM.add(createAggressiveDCEPass());
     MPM.add(createCFGSimplificationPass());
-    MPM.add(createInstructionCombiningPass());
+    MPM.add(createInstructionCombiningPass(EnableVulkanPasses));
     addExtensionsToPM(EP_Peephole, MPM);
   }
 
@@ -1142,7 +1142,7 @@ void PassManagerBuilder::populateModulePassManager(
     // want to change the CFG or introduce "invalid" instructions
     MPM.add(createFMACombinerPass());
     MPM.add(createTailCallEliminationPass());
-    MPM.add(createInstructionCombiningPass(true, true /* Vulkan */));
+    MPM.add(createInstructionCombiningPass(true /* Vulkan */));
     // NOTE: use new GVN here, b/c it doesn't change basic blocks
     MPM.add(createNewGVNPass());
     MPM.add(createAggressiveDCEPass(false /* don't allow CFG removal */));

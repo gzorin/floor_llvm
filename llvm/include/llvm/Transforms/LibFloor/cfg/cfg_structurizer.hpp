@@ -1,25 +1,31 @@
-/*
- * Copyright 2019-2021 Hans-Kristian Arntzen for Valve Corporation
+/* Copyright (c) 2019-2022 Hans-Kristian Arntzen for Valve Corporation
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * SPDX-License-Identifier: MIT
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 //==-----------------------------------------------------------------------===//
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ 189cc855b471591763d9951d63e51c72649037ab
+// @ b77e81a6eb020018dde3171568add9d9ccf6eec9
 //
 //===----------------------------------------------------------------------===//
 
@@ -83,19 +89,66 @@ private:
   bool query_reachability(const CFGNode &from, const CFGNode &to) const;
   void structurize(unsigned pass);
   void find_loops();
+  bool rewrite_transposed_loops();
+
+  struct LoopAnalysis {
+    std::vector<CFGNode *> direct_exits;
+    std::vector<CFGNode *> inner_direct_exits;
+    std::vector<CFGNode *> dominated_exit;
+    std::vector<CFGNode *> inner_dominated_exit;
+    std::vector<CFGNode *> non_dominated_exit;
+    std::vector<CFGNode *> dominated_continue_exit;
+  };
+  LoopAnalysis analyze_loop(CFGNode *node) const;
+
+  struct LoopMergeAnalysis {
+    CFGNode *merge;
+    CFGNode *dominated_merge;
+    CFGNode *infinite_continue_ladder;
+  };
+  LoopMergeAnalysis analyze_loop_merge(CFGNode *node,
+                                       const LoopAnalysis &analysis);
+  void rewrite_transposed_loop_inner(CFGNode *node,
+                                     CFGNode *impossible_merge_target,
+                                     const LoopMergeAnalysis &analysis);
+  void rewrite_transposed_loop_outer(CFGNode *node,
+                                     CFGNode *impossible_merge_target,
+                                     const LoopMergeAnalysis &analysis);
+
+  static bool is_ordered(const CFGNode *a, const CFGNode *b, const CFGNode *c);
+  bool serialize_interleaved_merge_scopes();
   void split_merge_scopes();
   void eliminate_degenerate_blocks();
+  static bool ladder_chain_has_phi_dependencies(const CFGNode *chain,
+                                                const CFGNode *incoming);
+  void duplicate_impossible_merge_constructs();
+  void duplicate_node(CFGNode *node);
+  static bool can_duplicate_phis(const CFGNode *node);
+  Instruction *duplicate_op(Instruction *op,
+                            std::unordered_map<Value *, Value *> &id_remap,
+                            CFGNode &new_node);
   void update_structured_loop_merge_targets();
   void find_selection_merges(unsigned pass);
-  static bool
+  bool
   header_and_merge_block_have_entry_exit_relationship(CFGNode *header,
-                                                      CFGNode *merge);
+                                                      CFGNode *merge) const;
   void fixup_broken_selection_merges(unsigned pass);
   bool find_switch_blocks(unsigned pass);
+  CFGNode *create_switch_merge_ladder(CFGNode *header, CFGNode *merge);
+  CFGNode *find_natural_switch_merge_block(CFGNode *node,
+                                           CFGNode *post_dominator) const;
+  const CFGNode *get_innermost_loop_header_for(const CFGNode *node) const;
+  const CFGNode *get_innermost_loop_header_for(const CFGNode *header,
+                                               const CFGNode *node) const;
+  bool loop_exit_supports_infinite_loop(const CFGNode *header,
+                                        const CFGNode *loop_exit) const;
 
   void split_merge_blocks();
-  static CFGNode *get_target_break_block_for_inner_header(const CFGNode *node,
-                                                          size_t header_index);
+  bool merge_candidate_is_on_breaking_path(const CFGNode *node) const;
+  bool continue_block_can_merge(CFGNode *node) const;
+  static bool block_is_plain_continue(const CFGNode *node);
+  CFGNode *get_target_break_block_for_inner_header(const CFGNode *node,
+                                                   size_t header_index);
   CFGNode *get_or_create_ladder_block(CFGNode *node, size_t header_index);
   CFGNode *build_enclosing_break_target_for_loop_ladder(CFGNode *&node,
                                                         CFGNode *loop_ladder);
@@ -112,6 +165,8 @@ private:
                                                      CFGNode *merge);
   bool control_flow_is_escaping(const CFGNode *node,
                                 const CFGNode *merge) const;
+  bool control_flow_is_escaping_from_loop(const CFGNode *node,
+                                          const CFGNode *merge) const;
   bool block_is_load_bearing(const CFGNode *node, const CFGNode *merge) const;
   static std::vector<CFGNode *> isolate_structured_sorted(const CFGNode *header,
                                                           const CFGNode *merge);
@@ -128,6 +183,7 @@ private:
     Exit,
     Merge,
     Escape,
+    MergeToInfiniteLoop,
     InnerLoopExit,
     InnerLoopMerge,
     InnerLoopFalsePositive
@@ -137,7 +193,7 @@ private:
   CFGNode *create_helper_pred_block(CFGNode *node);
   CFGNode *create_helper_succ_block(CFGNode *node);
   void reset_traversal();
-  void validate_structured();
+  bool rewrite_invalid_loop_breaks();
   void recompute_cfg();
   void compute_dominance_frontier();
   void compute_post_dominance_frontier();
@@ -185,5 +241,16 @@ private:
   bool phi_frontier_makes_forward_progress(const PHI &phi,
                                            const CFGNode *frontier,
                                            const CFGNode *end_node) const;
+
+  void traverse_dominated_blocks_and_rewrite_branch(CFGNode *dominator,
+                                                    CFGNode *from, CFGNode *to);
+  template <typename Op>
+  void traverse_dominated_blocks_and_rewrite_branch(CFGNode *dominator,
+                                                    CFGNode *from, CFGNode *to,
+                                                    const Op &op);
+  template <typename Op>
+  void traverse_dominated_blocks_and_rewrite_branch(
+      const CFGNode *dominator, CFGNode *candidate, CFGNode *from, CFGNode *to,
+      const Op &op, std::unordered_set<const CFGNode *> &visitation_cache);
 };
 } // namespace llvm

@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 Florian Ziesche
+ * Copyright 2021 - 2022 Florian Ziesche
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -123,13 +123,18 @@ void cfg_translator::translate_bb(CFGNode &node) {
         break;
       case Terminator::Type::Switch: {
         auto sw = dyn_cast<SwitchInst>(&instr);
-        node.ir.terminator.default_node = bb_map.at(sw->getDefaultDest());
         node.ir.terminator.condition = sw->getCondition();
-        node.add_branch(node.ir.terminator.default_node);
+        node.ir.terminator.cases.emplace_back(Terminator::Case{
+            .node = bb_map.at(sw->getDefaultDest()),
+            .value = nullptr,
+            .is_default = true,
+        });
+        node.add_branch(bb_map.at(sw->getDefaultDest()));
         for (auto &cs : sw->cases()) {
           node.ir.terminator.cases.emplace_back(Terminator::Case{
               .node = bb_map.at(cs.getCaseSuccessor()),
               .value = cs.getCaseValue(),
+              .is_default = false,
           });
           node.add_branch(node.ir.terminator.cases.back().node);
         }
@@ -196,9 +201,21 @@ void cfg_translator::add_or_update_terminator(CFGNode &node) {
     new UnreachableInst(ctx, &node.BB);
     break;
   case Terminator::Type::Switch: {
-    auto sw = SwitchInst::Create(term.condition, &term.default_node->BB,
-                                 term.cases.size(), &node.BB);
+    BasicBlock *default_bb = nullptr;
     for (auto &cs : term.cases) {
+      if (cs.is_default) {
+        default_bb = &cs.node->BB;
+        break;
+      }
+    }
+    assert(default_bb != nullptr && "no default case in switch");
+
+    auto sw = SwitchInst::Create(term.condition, default_bb, term.cases.size(),
+                                 &node.BB);
+    for (auto &cs : term.cases) {
+      if (cs.is_default) {
+        continue;
+      }
       sw->addCase(cs.value, &cs.node->BB);
     }
     break;
@@ -264,7 +281,15 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
           break;
         case Terminator::Type::Switch: {
           auto sw = dyn_cast<SwitchInst>(terminator);
-          if (sw->getDefaultDest() != &node.ir.terminator.default_node->BB ||
+          BasicBlock *default_bb = nullptr;
+          for (auto &cs : node.ir.terminator.cases) {
+            if (cs.is_default) {
+              default_bb = &cs.node->BB;
+              break;
+            }
+          }
+          assert(default_bb != nullptr && "no default case in switch");
+          if (sw->getDefaultDest() != default_bb ||
               sw->getCondition() != node.ir.terminator.condition ||
               sw->getNumCases() != node.ir.terminator.cases.size()) {
             add_or_update_terminator(node);

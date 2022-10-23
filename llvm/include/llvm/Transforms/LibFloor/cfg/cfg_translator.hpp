@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 Florian Ziesche
+ * Copyright 2021 - 2022 Florian Ziesche
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public

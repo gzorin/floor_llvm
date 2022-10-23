@@ -1,25 +1,31 @@
-/*
- * Copyright 2019-2021 Hans-Kristian Arntzen for Valve Corporation
+/* Copyright (c) 2019-2022 Hans-Kristian Arntzen for Valve Corporation
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
+ * SPDX-License-Identifier: MIT
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 //==-----------------------------------------------------------------------===//
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ 189cc855b471591763d9951d63e51c72649037ab
+// @ b77e81a6eb020018dde3171568add9d9ccf6eec9
 //
 //===----------------------------------------------------------------------===//
 
@@ -36,10 +42,10 @@
 // rewrites of blocks, PHI nodes in particular.
 
 namespace llvm {
-class ConstantInt;
 
 enum class MergeType { None, Loop, Selection };
 
+class ConstantInt;
 struct CFGNode;
 
 struct MergeInfo {
@@ -55,6 +61,7 @@ struct IncomingValue {
 
 struct PHI {
   PHINode *phi = nullptr;
+  bool relaxed = false;
   std::vector<IncomingValue> incoming;
 };
 
@@ -81,9 +88,9 @@ struct Terminator {
     CFGNode *node = nullptr;
     uint64_t global_order = 0;
     ConstantInt *value = nullptr;
+    bool is_default = false;
   };
   std::vector<Case> cases;
-  CFGNode *default_node = nullptr;
 
   // Return
   Value *return_value = nullptr;
