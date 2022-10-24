@@ -12,8 +12,6 @@ add_llvm_component_library(LLVMLibFloor
   PropagateRangeInfo.cpp
   SPIRFinal.cpp
   SPIRImage.cpp
-  StructuralAnalysis.cpp
-  StructuralTransform.cpp
   VulkanFinal.cpp
   VulkanImage.cpp
   

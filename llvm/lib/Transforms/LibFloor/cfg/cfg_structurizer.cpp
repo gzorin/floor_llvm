@@ -520,7 +520,7 @@ static bool block_is_control_dependent(const CFGNode *node) {
     // check implicit LOD image function names
     // NOTE/TODO: LOD query, gather and sparse-gather not emitted yet by
     // frontend
-    if (!func_name.starts_with("_Z11read_image")) {
+    if (func_name.find("_Z11read_image") != 0) {
       continue;
     }
     assert(call->arg_size() >= 4 && "invalid arg count");
