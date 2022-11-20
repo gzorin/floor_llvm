@@ -2397,6 +2397,27 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 			if (parm->getAttr<FloorArgBufferAttr>() != nullptr) {
 				// tag as argument buffer
 				arg_iter->addAttr(llvm::Attribute::get(getLLVMContext(), "vulkan_arg_buffer"));
+				
+				// validate argument buffer types: currently, images are not supported
+				const auto clang_pointee_type = clang_type->getPointeeType();
+				const auto type_rdecl = clang_pointee_type->getAsCXXRecordDecl();
+				if (!type_rdecl) {
+					auto err_diagID = getDiags().getCustomDiagID(DiagnosticsEngine::Fatal, "%0");
+					getDiags().Report(parm->getSourceRange().getBegin(), err_diagID) << "expected a C++ record declaration";
+				}
+				// struct -> recursively check fields
+				const auto fields = get_aggregate_fields(type_rdecl);
+				for (const auto& field : fields) {
+					auto field_type = field->getType();
+					if (field_type->isImageType() ||
+						field_type->isArrayImageType(true) ||
+						field_type->isAggregateImageType()) {
+						auto err_diagID = getDiags().getCustomDiagID(DiagnosticsEngine::Error, "%0");
+						getDiags().Report(field->getSourceRange().getBegin(), err_diagID) << "image types are not supported in argument buffers with Vulkan";
+						auto fatal_diagID = getDiags().getCustomDiagID(DiagnosticsEngine::Fatal, "%0");
+						getDiags().Report(parm->getSourceRange().getBegin(), fatal_diagID) << "unsupported argument buffer content";
+					}
+				}
 			}
 		}
 		

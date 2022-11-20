@@ -40,6 +40,7 @@ namespace llvm {
 	                           Instruction &instr,
 	                           Value &parent,
 	                           const uint32_t address_space,
+	                           const bool fix_inner_ptr,
 	                           std::vector<ReturnInst *> &returns);
 } // namespace llvm
 

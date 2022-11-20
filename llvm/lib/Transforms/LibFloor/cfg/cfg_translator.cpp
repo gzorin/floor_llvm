@@ -488,7 +488,6 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
           assert(false && "invalid terminator");
         }
 
-        assert(node.selection_merge_block != nullptr);
         if (node.ir.terminator.type == Terminator::Type::Condition ||
             node.ir.terminator.type == Terminator::Type::Switch) {
           if (node.ir.terminator.type == Terminator::Type::Condition) {
@@ -500,7 +499,17 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
             assert(sw != nullptr);
             assert(sw->getNumSuccessors() > 0);
           }
-          create_selection_merge(term, &node.selection_merge_block->BB);
+          if (node.selection_merge_block) {
+            create_selection_merge(term, &node.selection_merge_block->BB);
+          } else {
+            // no selection merge block exists
+            // -> create a fake unreachable one
+            assert(node.ir.terminator.type == Terminator::Type::Condition);
+            auto fake_merge = BasicBlock::Create(
+                ctx, node.name + ".fake_merge", &F, &node.BB);
+            new UnreachableInst(ctx, fake_merge);
+            create_selection_merge(term, fake_merge);
+          }
         } else {
           llvm_unreachable("invalid selection merge");
         }

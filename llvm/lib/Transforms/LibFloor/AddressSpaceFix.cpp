@@ -145,17 +145,20 @@ namespace {
 		}
 
 		template <bool fix_call_instrs = true>
-		static void fix_users(AddressSpaceFix* asfix_pass, LLVMContext& ctx, Instruction* instr, Value* parent, const uint32_t address_space, std::vector<ReturnInst*>& returns) {
+		static void fix_users(AddressSpaceFix* asfix_pass, LLVMContext& ctx, Instruction* instr, Value* parent, const uint32_t address_space,
+							  const bool fix_inner_ptr, std::vector<ReturnInst*>& returns) {
 			// fix instruction
 			bool need_users_update = true;
 			switch(instr->getOpcode()) {
 				case Instruction::GetElementPtr: {
 					auto GEP = cast<GetElementPtrInst>(instr);
-					if(GEP->getType()->isPointerTy()) {
-						auto new_ptr_type = PointerType::get(GEP->getType()->getPointerElementType(), address_space);
-						DBG(errs() << ">> GEP: " << *GEP->getType();)
-						GEP->mutateType(new_ptr_type);
-						DBG(errs() << " -> " << *GEP->getType() << "\n";)
+					if (auto *GEP_ptr_type = dyn_cast<PointerType>(GEP->getType()); GEP_ptr_type) {
+						if (GEP->getAddressSpace() != GEP_ptr_type->getAddressSpace()) {
+							auto new_ptr_type = PointerType::get(GEP_ptr_type->getPointerElementType(), address_space);
+							DBG(errs() << ">> GEP: " << *GEP << ", type: " << *GEP->getType();)
+							GEP->mutateType(new_ptr_type);
+							DBG(errs() << " -> " << *GEP->getType() << "\n";)
+						}
 					}
 					// else: can't happen?
 					break;
@@ -164,7 +167,7 @@ namespace {
 					auto BC = cast<BitCastInst>(instr);
 					if(BC->getDestTy()->isPointerTy()) {
 						auto new_ptr_type = PointerType::get(BC->getDestTy()->getPointerElementType(), address_space);
-						DBG(errs() << ">> BC: " << *BC->getType() << " -> ";)
+						DBG(errs() << ">> BC: " << *BC << ", type: " << *BC->getType();)
 						BC->mutateType(new_ptr_type);
 						DBG(errs() << " -> " << *BC->getType() << "\n";)
 					}
@@ -198,7 +201,7 @@ namespace {
 					}
 					if(LD->getType()->isPointerTy()) {
 						auto new_ptr_type = PointerType::get(LD->getType()->getPointerElementType(), address_space);
-						DBG(errs() << ">> LD: " << *LD->getType() << " -> ";)
+						DBG(errs() << ">> LD: " << *LD << ", type: " << *LD->getType();)
 						LD->mutateType(new_ptr_type);
 						DBG(errs() << " -> " << *LD->getType() << "\n";)
 					}
@@ -208,7 +211,7 @@ namespace {
 					auto ST = cast<StoreInst>(instr);
 					if(ST->getType()->isPointerTy()) {
 						auto new_ptr_type = PointerType::get(ST->getType()->getPointerElementType(), address_space);
-						DBG(errs() << ">> ST: " << *ST->getType() << " -> ";)
+						DBG(errs() << ">> ST: " << *ST << ", type: " << *ST->getType();)
 						ST->mutateType(new_ptr_type);
 						DBG(errs() << " -> " << *ST->getType() << "\n";)
 					}
@@ -217,8 +220,18 @@ namespace {
 				case Instruction::PHI: {
 					auto phi = cast<PHINode>(instr);
 					if(phi->getType()->isPointerTy()) {
-						auto new_ptr_type = PointerType::get(phi->getType()->getPointerElementType(), address_space);
-						DBG(errs() << ">> PHI: " << *phi->getType();)
+						PointerType* new_ptr_type = nullptr;
+						if (fix_inner_ptr) {
+							auto inner_ptr = phi->getType()->getPointerElementType();
+							if (inner_ptr->isPointerTy()) {
+								new_ptr_type = PointerType::get(PointerType::get(inner_ptr->getPointerElementType(), address_space),
+																phi->getType()->getPointerAddressSpace());
+							}
+						}
+						if (!new_ptr_type) {
+							new_ptr_type = PointerType::get(phi->getType()->getPointerElementType(), address_space);
+						}
+						DBG(errs() << ">> PHI: " << *phi << ", type: " << *phi->getType();)
 						phi->mutateType(new_ptr_type);
 						DBG(errs() << " -> " << *phi->getType() << "\n";)
 					} else {
@@ -246,7 +259,7 @@ namespace {
 			
 			// recursively fix all users
 			for(auto user : instr->users()) {
-				DBG(errs() << ">> replacing rec use: " << *user << "\n";)
+				DBG(errs() << ">> replacing rec use: " << *user << " -> as: " << address_space << "\n";)
 				if(auto user_instr = dyn_cast<Instruction>(user)) {
 					switch(user_instr->getOpcode()) {
 						case Instruction::GetElementPtr:
@@ -256,7 +269,7 @@ namespace {
 						case Instruction::Load:
 						case Instruction::Store:
 						case Instruction::PHI:
-							fix_users<fix_call_instrs>(asfix_pass, ctx, user_instr, instr, address_space, returns);
+							fix_users<fix_call_instrs>(asfix_pass, ctx, user_instr, instr, address_space, fix_inner_ptr, returns);
 							break;
 						case Instruction::AddrSpaceCast:
 						case Instruction::Invoke:
@@ -276,7 +289,7 @@ namespace {
 		};
 		
 		// returns true if the return type changed
-		void fix_function(llvm::Function* func, const std::vector<as_fix_arg_info>& args, const bool is_top_call) {
+		void fix_function(llvm::Function* func, const std::vector<as_fix_arg_info>& args, const bool is_top_call, const bool fix_inner_ptr) {
 			std::vector<ReturnInst*> returns; // returns to fix
 			for(const auto& arg : args) {
 				if(arg.read_only_fix) continue;
@@ -285,7 +298,7 @@ namespace {
 				for(auto user : func_arg.users()) {
 					DBG(errs() << ">> replacing use: " << *user << "\n";)
 					if(auto instr = dyn_cast<Instruction>(user)) {
-						fix_users(this, *ctx, instr, &func_arg, arg.address_space, returns);
+						fix_users(this, *ctx, instr, &func_arg, arg.address_space, fix_inner_ptr, returns);
 					}
 					else {
 						DBG(errs() << "   not an instruction\n";)
@@ -447,7 +460,7 @@ namespace {
 					DBG(errs() << "\n>> before <<\n" << *cloned_func);
 					
 					//
-					fix_function(cloned_func, args, is_top_call);
+					fix_function(cloned_func, args, is_top_call, false);
 					CI.setCalledFunction(cloned_func, true);
 					CI.mutateType(cloned_func->getReturnType());
 					
@@ -614,9 +627,10 @@ namespace llvm {
 	                           Instruction &instr,
 	                           Value &parent,
 	                           const uint32_t address_space,
+	                           const bool fix_inner_ptr,
 	                           std::vector<ReturnInst *> &returns) {
 		// NOTE: we can't fix call instructions here
-		AddressSpaceFix::fix_users<false>(nullptr, ctx, &instr, &parent, address_space, returns);
+		AddressSpaceFix::fix_users<false>(nullptr, ctx, &instr, &parent, address_space, fix_inner_ptr, returns);
 	}
 }
 

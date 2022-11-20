@@ -718,7 +718,7 @@ namespace {
 							std::vector<ReturnInst*> returns; // returns to fix -> there shouldn't be any here
 							for (auto& user : users) {
 								if (auto instr = dyn_cast<Instruction>(user)) {
-									fix_instruction_users(*ctx, *instr, arg, storage_class, returns);
+									fix_instruction_users(*ctx, *instr, arg, storage_class, false, returns);
 								}
 							}
 							assert(returns.empty() && "unexpected return type change");
@@ -780,12 +780,28 @@ namespace {
 											continue;
 										}
 										
+										// ignore non-pointer/array types (i.e. those that we didn't replace)
+										const auto struct_field_idx = (GEP->idx_begin() + 1)->get();
+										const auto struct_field_type = GEP->getTypeAtIndex(GEP->getSourceElementType(), struct_field_idx);
+										if (!struct_field_type->isPointerTy() && !struct_field_type->isArrayTy()) {
+											continue;
+										}
+										
+										DBG(errs() << ">> adjusting GEP from SB to PSB: " << *GEP << "\n";)
+										DBG(errs() << "\t> type: " << *GEP->getType() << "\n";)
+										DBG(errs() << "\t> src type: " << *GEP->getSourceElementType() << "\n";)
+										DBG(errs() << "\t> res type: " << *GEP->getResultElementType() << "\n";)
+										
 										// modify GEP types to use the correct address spaces
 										auto new_result_type = result_type->getPointerElementType()->getPointerTo(SPIRAS_PhysicalStorageBuffer);
 										auto new_gep_type = PointerType::get(new_result_type, SPIRAS_StorageBuffer);
 										GEP->mutateType(new_gep_type);
 										GEP->setSourceElementType(adj_struct_type);
 										GEP->setResultElementType(new_result_type);
+										
+										DBG(errs() << "\t> new type: " << *new_gep_type << "\n";)
+										DBG(errs() << "\t> new src type: " << *adj_struct_type << "\n";)
+										DBG(errs() << "\t> new res type: " << *new_result_type << "\n";)
 										
 										// fix GEP users
 										std::vector<User*> gep_users;
@@ -795,7 +811,7 @@ namespace {
 										for (auto& gep_user : gep_users) {
 											if (auto gep_user_instr = dyn_cast<Instruction>(gep_user)) {
 												std::vector<ReturnInst*> returns; // returns to fix -> there shouldn't be any here
-												fix_instruction_users(*ctx, *gep_user_instr, *GEP, SPIRAS_PhysicalStorageBuffer, returns);
+												fix_instruction_users(*ctx, *gep_user_instr, *GEP, SPIRAS_PhysicalStorageBuffer, true, returns);
 												assert(returns.empty() && "unexpected return type change");
 											}
 										}
