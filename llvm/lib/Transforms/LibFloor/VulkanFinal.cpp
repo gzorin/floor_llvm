@@ -117,7 +117,7 @@ namespace {
 		Argument* local_id { nullptr };
 		Argument* group_id { nullptr };
 		Argument* group_size { nullptr };
-		GlobalVariable* workgroup_size { nullptr };
+		GlobalVariable* local_size { nullptr };
 		
 		// added general shader function args
 		Argument* view_index { nullptr };
@@ -295,19 +295,19 @@ namespace {
 				}
 			}
 			
-			// emit work-group size variable for this function (initialized externally at "run-time" / SPIR-V spec)
+			// emit local size variable for this function (initialized externally at "run-time" / SPIR-V spec)
 			if(is_kernel_func) {
-				auto workgroup_size_type = llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 3);
-				workgroup_size = new GlobalVariable(*M,
-													workgroup_size_type,
-													true,
-													GlobalVariable::ExternalLinkage,
-													nullptr,
-													F.getName().str() + ".vulkan_constant.workgroup_size",
-													nullptr,
-													GlobalValue::NotThreadLocal,
-													0,
-													true);
+				auto local_size_type = llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 3);
+				local_size = new GlobalVariable(*M,
+												local_size_type,
+												true,
+												GlobalVariable::ExternalLinkage,
+												nullptr,
+												F.getName().str() + ".vulkan_constant.local_size",
+												nullptr,
+												GlobalValue::NotThreadLocal,
+												0,
+												true);
 			}
 			
 			// visit everything in this function
@@ -348,7 +348,7 @@ namespace {
 			}
 			else if(func_name == "floor.builtin.local_size.i32") {
 				// this doesn't have a direct built-in equivalent, but must be loaded from the WorkgroupSize constant
-				I.replaceAllUsesWith(builder->CreateExtractElement(builder->CreateLoad(workgroup_size->getType()->getPointerElementType(), workgroup_size), I.getOperand(0)));
+				I.replaceAllUsesWith(builder->CreateExtractElement(builder->CreateLoad(local_size->getType()->getPointerElementType(), local_size), I.getOperand(0)));
 				I.eraseFromParent();
 				return;
 			}
@@ -356,7 +356,7 @@ namespace {
 				// this doesn't have a direct built-in equivalent, but must be computed from the WorkgroupSize constant
 				// TODO/NOTE: this might need some more work on the spir-v side, right now this is always constant folded
 				auto dim_idx = I.getOperand(0);
-				auto wg_size_dim = builder->CreateExtractElement(builder->CreateLoad(workgroup_size->getType()->getPointerElementType(), workgroup_size), dim_idx);
+				auto wg_size_dim = builder->CreateExtractElement(builder->CreateLoad(local_size->getType()->getPointerElementType(), local_size), dim_idx);
 				auto grp_count_dim = builder->CreateExtractElement(builder->CreateLoad(group_size->getType()->getPointerElementType(), group_size), dim_idx);
 				auto global_size_dim = builder->CreateMul(wg_size_dim, grp_count_dim);
 				I.replaceAllUsesWith(global_size_dim);

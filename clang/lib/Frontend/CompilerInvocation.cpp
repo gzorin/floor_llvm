@@ -3174,7 +3174,7 @@ void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
       LangStd = LangStandard::lang_metal20;
       break;
     case Language::Vulkan:
-      LangStd = LangStandard::lang_vulkan12;
+      LangStd = LangStandard::lang_vulkan13;
       break;
     case Language::CUDA:
       LangStd = LangStandard::lang_cuda;
@@ -3281,14 +3281,14 @@ void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
   }
 
   // as Vulkan is largely compiled as OpenCL, also enable + init opencl
-  if (LangStd == LangStandard::lang_vulkan12 ||
+  if (LangStd == LangStandard::lang_vulkan13 ||
       IK.getLanguage() == Language::Vulkan) {
     Opts.Vulkan = 1;
     Opts.OpenCL = 1;
     Opts.OpenCLVersion = 200;
 
-    if (LangStd == LangStandard::lang_vulkan12)
-      Opts.VulkanVersion = 120;
+    if (LangStd == LangStandard::lang_vulkan13)
+      Opts.VulkanVersion = 130;
   }
 
   // OpenCL has some additional defaults.

@@ -15,10 +15,12 @@
 #define _GCC_LIMITS_H_
 #endif
 
+#if 0 // NOTE: we do not want to include system files
 /* System headers include a number of constants from POSIX in <limits.h>.
    Include it if we're hosted. */
 #if __STDC_HOSTED__ && __has_include_next(<limits.h>)
 #include_next <limits.h>
+#endif
 #endif
 
 /* Many system headers try to "help us out" by defining these.  No really, we
