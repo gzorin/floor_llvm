@@ -3796,12 +3796,15 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 	}
 	info << ",";
 	// #3: function flags
+	uint32_t func_flags = 0;
 	if ((getLangOpts().Metal && CGM.getCodeGenOpts().MetalSoftPrintf > 0) ||
 		(getLangOpts().Vulkan && CGM.getCodeGenOpts().VulkanSoftPrintf > 0)) {
-		info << "1,";
-	} else {
-		info << "0,";
+		func_flags |= (1u << 0u);
 	}
+	if (getLangOpts().Vulkan && CGM.getCodeGenOpts().VulkanDescriptorBufferSupport) {
+		func_flags |= (1u << 1u);
+	}
+	info << func_flags << ",";
 	// #4,5,6: local size/dim
 	if (const ReqdWorkGroupSizeAttr *reg_local_size = FD->getAttr<ReqdWorkGroupSizeAttr>()) {
 		info << reg_local_size->getXDim() << ",";

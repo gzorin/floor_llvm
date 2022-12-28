@@ -694,6 +694,11 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
     CGM.getModule().getOrInsertNamedMetadata("floor.barycentric_coord");
   }
 
+  // add Vulkan descriptor buffer info
+  if (CGM.getCodeGenOpts().VulkanDescriptorBufferSupport > 0) {
+    CGM.getModule().getOrInsertNamedMetadata("floor.vulkan_descriptor_buffer");
+  }
+
   // additional air info
   if (CGM.getLangOpts().Metal) {
 	  // only do this once
