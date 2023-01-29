@@ -1006,7 +1006,8 @@ CodeGenTypes::ComputeRecordLayout(const RecordDecl *D, llvm::StructType *Ty) {
 }
 
 void CodeGenTypes::create_flattened_cg_layout(const CXXRecordDecl* D, llvm::StructType* Ty,
-											  const std::vector<ASTContext::aggregate_scalar_entry>& fields) {
+											  const std::vector<ASTContext::aggregate_scalar_entry>& fields,
+											  const bool is_floor_arg_buffer) {
 	bool zero_init = true;
 	for(const auto& field : fields) {
 		// vector types (or replaced vector types) are always zero initializable
@@ -1039,7 +1040,11 @@ void CodeGenTypes::create_flattened_cg_layout(const CXXRecordDecl* D, llvm::Stru
 	}
 	
 	FlattenedCGRecordLayouts.insert({ Ty, RL });
-	FlattenedRecords.insert({ D, Ty });
+	if (is_floor_arg_buffer) {
+		FlattenedFloorArgBufferRecords.insert({ D, Ty });
+	} else {
+		FlattenedRecords.insert({ D, Ty });
+	}
 }
 
 void CGRecordLayout::print(raw_ostream &OS) const {

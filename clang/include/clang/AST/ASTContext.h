@@ -3322,6 +3322,7 @@ public:
     std::vector<const CXXRecordDecl*> parents;
     bool compat_vector;
     bool is_in_base;
+    bool is_array;
     
     template <typename SpecificAttr>
     bool hasAttr() const {
@@ -3339,14 +3340,21 @@ public:
   /// Will recurse through the specified class/struct decl, its base classes,
   /// all its contained class/struct/union decls, all its contained arrays,
   /// returning a vector of all contained/scalarized fields + info.
+  /// "ignore_root_vec_compat" will not consider [[vector_compat]] at the first root decl
+  /// "ignore_vec_compat" will not consider [[vector_compat]] at any level, but keep vector-compat structs instead
+  /// "ignore_bases" will not consider/include any bases classes
+  /// "expand_array_image" will expand image arrays into individual images
+  /// "merge_parent_field_decl" will merge the parent field with the child field if there is a singular child
   /// NOTE: for unions, only the first field will be considered
   /// NOTE: this also transform/converts [[vector_compat]] types to clang vector types
   std::vector<aggregate_scalar_entry> get_aggregate_scalar_fields(const CXXRecordDecl* root_decl,
                                                                   const CXXRecordDecl* decl,
                                                                   MangleContext* MC = nullptr,
                                                                   const bool ignore_root_vec_compat = false,
+                                                                  const bool ignore_vec_compat = false,
                                                                   const bool ignore_bases = false,
-                                                                  const bool expand_array_image = true) const;
+                                                                  const bool expand_array_image = true,
+                                                                  const bool merge_parent_field_decl = false) const;
 
   /// Returns the corresponding clang vector type for a [[vector_compat]] aggregate.
   clang::QualType get_compat_vector_type(const CXXRecordDecl* decl) const;
@@ -3366,6 +3374,7 @@ private:
                                          const FieldDecl* parent_field_decl,
                                          const std::string& name,
                                          const bool expand_array_image,
+                                         const bool merge_parent_field_decl,
                                          MangleContext* MC,
                                          std::vector<ASTContext::aggregate_scalar_entry>& ret) const;
 

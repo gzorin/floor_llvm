@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ b77e81a6eb020018dde3171568add9d9ccf6eec9
+// @ 1e0e56dda30b3c53a84a5ea63eaa58c551d2b98c
 //
 //===----------------------------------------------------------------------===//
 
@@ -1147,18 +1147,63 @@ std::vector<IncomingValue>::const_iterator CFGStructurizer::find_incoming_value(
   return candidate;
 }
 
+static IncomingValue *
+phi_incoming_blocks_find_block(std::vector<IncomingValue> &incomings,
+                               const CFGNode *block) {
+  for (auto &incoming : incomings) {
+    if (incoming.block == block) {
+      return &incoming;
+    }
+  }
+  return nullptr;
+}
+
+static bool value_is_generated_by_block(const CFGNode *block,
+                                        llvm::Value *value) {
+  for (const auto &op : block->ir.operations) {
+    if (op == value) {
+      return true;
+    }
+  }
+
+  for (const auto &phi : block->ir.phi) {
+    if (phi.phi == value) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static void retarget_phi_incoming_block(PHI &phi, CFGNode *from, CFGNode *to) {
+  auto *value = phi_incoming_blocks_find_block(phi.incoming, from);
+  if (value) {
+    value->block = to;
+  }
+}
+
 void CFGStructurizer::fixup_phi(PHINode &node) {
   // We want to move any incoming block to where the ID was created.
   // This avoids some problematic cases of crossing edges when using ladders.
+  auto &incomings = node.block->ir.phi[node.phi_index].incoming;
 
-  for (auto &incoming : node.block->ir.phi[node.phi_index].incoming) {
+  for (auto &incoming : incomings) {
     auto itr = value_id_to_block.find(incoming.value);
     if (itr == end(value_id_to_block)) {
       // This is a global.
       continue;
     }
 
-    if (!itr->second->dominates(incoming.block)) {
+    auto *source_block = itr->second;
+
+    // Only hoist PHI inputs if there used to be a dominance relationship in the
+    // original CFG, but there no longer is.
+    if (!source_block->dominates(incoming.block)) {
+      if (phi_incoming_blocks_find_block(incomings, source_block) != nullptr) {
+        // Sanity check. This would create ambiguity.
+        continue;
+      }
+
 #ifdef PHI_DEBUG
       LOGI("For node %s, move incoming node %s to %s.\n",
            node.block->name.c_str(), incoming.block->name.c_str(),
@@ -1415,6 +1460,13 @@ void CFGStructurizer::insert_phi(PHINode &node) {
     size_t num_alive_incoming_values = incoming_values.size();
     for (size_t i = 0; i < num_alive_incoming_values;) {
       auto *incoming_block = incoming_values[i].block;
+
+      // This is fundamentally ambiguous and should never happen.
+      if (incoming_block == frontier) {
+        LOGE("Invalid PHI collapse detected!\n");
+      }
+      assert(incoming_block != frontier);
+
       if (!exists_path_in_cfg_without_intermediate_node(incoming_block,
                                                         node.block, frontier)) {
 #ifdef PHI_DEBUG
@@ -2974,18 +3026,7 @@ CFGNode *CFGStructurizer::create_switch_merge_ladder(CFGNode *header,
   // We might be in a situation where the switch block is trying to merge to a
   // block which is already being merged to. Create a ladder which the switch
   // block could merge to.
-  auto *ladder = pool.create_node(merge->name + ".switch-merge");
-  ladder->add_branch(merge);
-  ladder->ir.terminator.type = Terminator::Type::Branch;
-  ladder->ir.terminator.direct_block = merge;
-  ladder->immediate_post_dominator = merge;
-  ladder->immediate_dominator = merge->immediate_dominator;
-  ladder->dominance_frontier.push_back(merge);
-  ladder->forward_post_visit_order = merge->forward_post_visit_order;
-  ladder->backward_post_visit_order = merge->backward_post_visit_order;
-  traverse_dominated_blocks_and_rewrite_branch(header, merge, ladder);
-
-  return ladder;
+  return create_ladder_block(header, merge, ".switch-merge");
 }
 
 bool CFGStructurizer::find_switch_blocks(unsigned pass) {
@@ -3749,7 +3790,8 @@ bool CFGStructurizer::rewrite_transposed_loops() {
       // they break out to different scopes. One of these might require a
       // similar impossible merge. Common post dominator analysis would not
       // catch this. What we're looking for is a node which:
-      // - Is dominated by loop header
+      // - Is dominated by loop header (or is in the domination frontier of loop
+      //   header)
       // - Is reachable, but not dominated by dominated_merge.
       // - Post dominates one of the non_dominated_exits.
       // This means the node is in a twilight zone where the node is kinda in
@@ -3768,16 +3810,31 @@ bool CFGStructurizer::rewrite_transposed_loops() {
            i < n && !impossible_merge_target; i++) {
         auto *candidate = result.non_dominated_exit[i];
 
-        while (node->dominates(candidate) && !impossible_merge_target &&
-               candidate != merge && candidate != dominated_merge) {
-          if (node->dominates(candidate) &&
-              query_reachability(*dominated_merge, *candidate) &&
+        while (candidate != merge && candidate != dominated_merge) {
+          if (query_reachability(*dominated_merge, *candidate) &&
               !dominated_merge->dominates(candidate)) {
             // Merge block attempts to branch back into its own loop construct
             // (yikes).
             impossible_merge_target = candidate;
-          } else
+
+            // If we don't dominate the merge target, i.e. we're in the
+            // domination frontier, we have to synthesize a fake impossible
+            // merge target first since the rewrite algorithm depends on node
+            // dominating the merge target.
+            if (!node->dominates(impossible_merge_target)) {
+              impossible_merge_target = create_ladder_block(
+                  node, impossible_merge_target, ".impossible-ladder");
+            }
+            break;
+          } else if (node->dominates(candidate) &&
+                     candidate != candidate->immediate_post_dominator) {
             candidate = candidate->immediate_post_dominator;
+          } else {
+            // We will be able to select a candidate in the domination frontier
+            // once. If we failed to find a candidate in the domination
+            // frontier, we're done checking.
+            break;
+          }
         }
       }
     }
@@ -4177,6 +4234,23 @@ CFGStructurizer::get_target_break_block_for_inner_header(const CFGNode *node,
   return target_header;
 }
 
+CFGNode *CFGStructurizer::create_ladder_block(CFGNode *header, CFGNode *node,
+                                              const char *tag) {
+  auto *ladder = pool.create_node(node->name + ".merge");
+  ladder->add_branch(node);
+  ladder->ir.terminator.type = Terminator::Type::Branch;
+  ladder->ir.terminator.direct_block = node;
+  ladder->immediate_post_dominator = node;
+  ladder->forward_post_visit_order = node->forward_post_visit_order;
+  ladder->backward_post_visit_order = node->backward_post_visit_order;
+  ladder->dominance_frontier.push_back(node);
+
+  traverse_dominated_blocks_and_rewrite_branch(header, node, ladder);
+  ladder->recompute_immediate_dominator();
+
+  return ladder;
+}
+
 CFGNode *CFGStructurizer::get_or_create_ladder_block(CFGNode *node,
                                                      size_t header_index) {
   auto *header = node->headers[header_index];
@@ -4186,17 +4260,8 @@ CFGNode *CFGStructurizer::get_or_create_ladder_block(CFGNode *node,
     // We don't have a ladder, because the loop merged to an outer scope, so we
     // need to fake a ladder. If we hit this case, we did not hit the simpler
     // case in find_loops().
-    auto *ladder = pool.create_node(node->name + ".merge");
-    ladder->add_branch(node);
-    ladder->ir.terminator.type = Terminator::Type::Branch;
-    ladder->ir.terminator.direct_block = node;
-    ladder->immediate_post_dominator = node;
-    ladder->forward_post_visit_order = node->forward_post_visit_order;
-    ladder->backward_post_visit_order = node->backward_post_visit_order;
-
-    traverse_dominated_blocks_and_rewrite_branch(header, node, ladder);
+    auto *ladder = create_ladder_block(header, node, ".merge");
     header->loop_ladder_block = ladder;
-    ladder->recompute_immediate_dominator();
 
     // If this is the second outermost scope, we don't need to deal with
     // ladders. ladder is a dummy branch straight out to the outer merge point.
@@ -4215,6 +4280,73 @@ CFGNode *CFGStructurizer::build_enclosing_break_target_for_loop_ladder(
 
   bool ladder_to_merge_is_trivial =
       loop_ladder->succ.size() == 1 && loop_ladder->succ.front() == node;
+
+  if (ladder_to_merge_is_trivial) {
+    auto *succ = loop_ladder->succ.front();
+
+    // Chase through dummy ladders until we find something tangible that is
+    // actually PHI sensitive.
+    while (succ->ir.phi.empty() && succ->succ.size() == 1) {
+      succ = succ->succ.front();
+    }
+
+    IncomingValue *incoming_from_ladder = nullptr;
+    if (!succ->ir.phi.empty()) {
+      // All PHIs are fundamentally the same w.r.t. input blocks.
+      auto &phi = succ->ir.phi.front();
+      incoming_from_ladder =
+          phi_incoming_blocks_find_block(phi.incoming, loop_ladder);
+    }
+
+    CFGNode *retarget_idom = nullptr;
+    if (incoming_from_ladder != nullptr) {
+      // If succ takes this ladder as a PHI input, we have to be careful.
+      // We can only treat this merge as trivial if we can trivially hoist the
+      // input to the idom. Hoisting to idom only works if that idom is not
+      // already a PHI input for succ, and that idom dominates the input value.
+      retarget_idom = loop_ladder->immediate_dominator;
+
+      bool can_hoist_incoming_value =
+          (retarget_idom && retarget_idom != loop_ladder &&
+           !phi_incoming_blocks_find_block(succ->ir.phi.front().incoming,
+                                           retarget_idom));
+
+      if (!can_hoist_incoming_value) {
+        retarget_idom = nullptr;
+      }
+    }
+
+    if (retarget_idom) {
+      bool is_generated = false;
+
+      // We have no opcodes in loop ladder, but theoretically,
+      // we can have some PHI values that are being depended on.
+      for (auto &override_phi : succ->ir.phi) {
+        auto *incoming =
+            phi_incoming_blocks_find_block(override_phi.incoming, loop_ladder);
+        if (!incoming) {
+          continue;
+        }
+
+        if (value_is_generated_by_block(loop_ladder, incoming->value)) {
+          is_generated = true;
+          break;
+        }
+      }
+
+      if (!is_generated) {
+        // If we don't generate the ID ourselves and idom dominates this block
+        // we can prove that idom is a valid incoming value.
+        for (auto &override_phi : succ->ir.phi) {
+          retarget_phi_incoming_block(override_phi, loop_ladder, retarget_idom);
+        }
+      } else {
+        // It's not a trivial merge after all :(
+        ladder_to_merge_is_trivial = false;
+      }
+    }
+  }
+
   CFGNode *full_break_target = nullptr;
 
   // We have to break somewhere, turn the outer selection construct into

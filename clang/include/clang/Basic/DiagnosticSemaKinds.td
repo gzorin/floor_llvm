@@ -10246,6 +10246,12 @@ def ext_opencl_ext_vector_type_rgba_selector: ExtWarn<
 def err_openclcxx_placement_new : Error<
   "use of placement new requires explicit declaration">;
 
+// libfloor error
+def err_libfloor_direct_arg_buffer_in_non_entry_point : Error<
+  "arg_buffer<> must be used as a single-level reference or pointer in a non-entry-point function">;
+def err_libfloor_indirect_arg_buffer_in_entry_point : Error<
+  "arg_buffer<> must not be used by-reference or by-pointer in an entry-point function">;
+
 // MIG routine annotations.
 def warn_mig_server_routine_does_not_return_kern_return_t : Warning<
   "'mig_server_routine' attribute only applies to routines that return a kern_return_t">,

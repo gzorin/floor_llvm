@@ -224,7 +224,7 @@ CodeGenFunction::GetAddressOfDirectBaseInCompleteClass(Address This,
   // NOTE: element type might be flattend/packed, so if ConvertType() fails,
   //       check if it is the corresponding flattened record type
   assert(This.getElementType() == ConvertType(Derived) ||
-         This.getElementType() == CGM.getTypes().getFlattenedRecordType(Derived));
+         This.getElementType() == CGM.getTypes().getAnyFlattenedType(Derived));
 
   // Compute the offset of the virtual base.
   CharUnits Offset;

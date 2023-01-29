@@ -3809,6 +3809,9 @@ bool CompilerInvocation::ParseLangArgs(LangOptions &Opts, ArgList &Args,
   if (Args.hasArg(OPT_vulkan_soft_printf)) {
     Opts.vulkan_soft_printf = true;
   }
+  if (Args.hasArg(OPT_vulkan_descriptor_buffer_support)) {
+    Opts.VulkanDescriptorBufferSupport = true;
+  }
 
   // These need to be parsed now. They are used to set OpenCL defaults.
   Opts.IncludeDefaultHeader = Args.hasArg(OPT_finclude_default_header);

@@ -1,7 +1,7 @@
 //===- VulkanFinal.cpp - Vulkan final pass --------------------------------===//
 //
 //  Flo's Open libRary (floor)
-//  Copyright (C) 2004 - 2022 Florian Ziesche
+//  Copyright (C) 2004 - 2023 Florian Ziesche
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -93,7 +93,7 @@ namespace {
 	//static const uint32_t SPIRAS_Input = 6;
 	static const uint32_t SPIRAS_Output = 7;
 	static const uint32_t SPIRAS_StorageBuffer = 12;
-	static const uint32_t SPIRAS_PhysicalStorageBuffer = 5349;
+	//static const uint32_t SPIRAS_PhysicalStorageBuffer = 5349;
 
 	// VulkanBuiltinParamHandling
 	struct VulkanBuiltinParamHandling : public FunctionPass, InstVisitor<VulkanBuiltinParamHandling> {
@@ -647,19 +647,8 @@ namespace {
 							}
 						)
 						
-						// handle arg buffers
-						const auto ab_attr = F.getAttributeAtIndex(llvm::AttributeList::FirstArgIndex + arg_idx, "vulkan_arg_buffer");
-						const auto is_arg_buffer = (ab_attr.getRawPointer() != nullptr);
-						DBG(
-							if (is_arg_buffer) {
-								errs() << " (arg-buffer)";
-							}
-						)
-						assert(!(is_arg_buffer && is_iub) && "IUB and AB are mutually exclusive");
-						assert(!is_arg_buffer || (is_arg_buffer && elem_type->isStructTy()) && "AB element type must be a struct");
-						
 						// since there is a limit on how many IUBs we can have and how large they can be, some arguments might fall back to using SSBOs
-						const auto is_ssbo_uniform = (!is_iub && !is_arg_buffer && arg.onlyReadsMemory() &&
+						const auto is_ssbo_uniform = (!is_iub && arg.onlyReadsMemory() &&
 													  (arg.hasAttribute(Attribute::Dereferenceable) ||
 													   arg.hasAttribute(Attribute::DereferenceableOrNull)));
 						
@@ -695,6 +684,20 @@ namespace {
 										repl_instr->setDebugLoc(instr->getDebugLoc());
 										instr->replaceAllUsesWith(repl_instr);
 										instr->eraseFromParent();
+									} else if (auto GEP = dyn_cast_or_null<GetElementPtrInst>(instr); GEP) {
+										// copy/create new GEP with "0" index at the front
+										SmallVector<Value*, 8> indices { idx_list[0] };
+										for (auto& idx : GEP->indices()) {
+											indices.emplace_back(idx);
+										}
+										auto pointee_type = GEP->getOperand(0)->getType()->getPointerElementType();
+										auto repl_instr = llvm::GetElementPtrInst::Create(pointee_type, &arg, indices, "", instr);
+										if (GEP->isInBounds()) {
+											repl_instr->setIsInBounds();
+										}
+										repl_instr->setDebugLoc(instr->getDebugLoc());
+										instr->replaceAllUsesWith(repl_instr, true /* allow address space change */);
+										instr->eraseFromParent();
 									} else {
 										DBG(errs() << "\nunhandled arg user: " << *instr << "\n";)
 										DBG(errs().flush();)
@@ -723,107 +726,6 @@ namespace {
 							}
 							assert(returns.empty() && "unexpected return type change");
 						}
-
-						// transform argument buffer struct and uses
-						if (is_arg_buffer) {
-							// note that we only need to cover the pointers at the top-level of the struct (i.e. either direct pointers or array of pointers)
-							auto elem_struct_type = dyn_cast<llvm::StructType>(elem_type);
-							std::vector<Type*> adj_struct_member_types;
-							bool struct_needs_adjustment = false;
-							for (auto& member_type : elem_struct_type->elements()) {
-								if (member_type->isPointerTy()) {
-									auto member_ptr_type = dyn_cast<llvm::PointerType>(member_type);
-									if (member_ptr_type->getAddressSpace() != SPIRAS_StorageBuffer) {
-										ctx->emitError("unsupported pointer address space in argument buffer of function " + func->getName().str());
-										return false;
-									}
-									
-									member_ptr_type = member_ptr_type->getElementType()->getPointerTo(SPIRAS_PhysicalStorageBuffer);
-									adj_struct_member_types.emplace_back(member_ptr_type);
-									struct_needs_adjustment = true;
-								} else if (member_type->isArrayTy()) {
-									auto arr_elem_type = member_type->getArrayElementType();
-									if (!arr_elem_type->isPointerTy()) {
-										adj_struct_member_types.emplace_back(member_type);
-										continue;
-									}
-									
-									auto arr_elem_ptr_type = dyn_cast<llvm::PointerType>(arr_elem_type);
-									if (arr_elem_ptr_type->getAddressSpace() != SPIRAS_StorageBuffer) {
-										ctx->emitError("unsupported pointer address space in buffer array in argument buffer of function " + func->getName().str());
-										return false;
-									}
-									
-									arr_elem_ptr_type = arr_elem_ptr_type->getElementType()->getPointerTo(SPIRAS_PhysicalStorageBuffer);
-									arr_elem_type = llvm::ArrayType::get(arr_elem_ptr_type, member_type->getArrayNumElements());
-									adj_struct_member_types.emplace_back(arr_elem_type);
-									struct_needs_adjustment = true;
-								} else {
-									adj_struct_member_types.emplace_back(member_type);
-								}
-							}
-							if (struct_needs_adjustment) {
-								auto adj_struct_type = llvm::StructType::create(*ctx, adj_struct_member_types, elem_struct_type->getName().str() + ".adj");
-								arg_type = adj_struct_type->getPointerTo(storage_class);
-								arg.mutateType(arg_type);
-								
-								// update users
-								std::vector<User*> users;
-								for (auto* user : arg.users()) {
-									users.emplace_back(user);
-								}
-								for (auto& user : users) {
-									// all users should just be GEPs
-									if (auto GEP = dyn_cast<GetElementPtrInst>(user)) {
-										const auto result_type = GEP->getResultElementType();
-										if (!result_type->isPointerTy() || result_type->getPointerAddressSpace() != SPIRAS_StorageBuffer) {
-											continue;
-										}
-										
-										// ignore non-pointer/array types (i.e. those that we didn't replace)
-										const auto struct_field_idx = (GEP->idx_begin() + 1)->get();
-										const auto struct_field_type = GEP->getTypeAtIndex(GEP->getSourceElementType(), struct_field_idx);
-										if (!struct_field_type->isPointerTy() && !struct_field_type->isArrayTy()) {
-											continue;
-										}
-										
-										DBG(errs() << ">> adjusting GEP from SB to PSB: " << *GEP << "\n";)
-										DBG(errs() << "\t> type: " << *GEP->getType() << "\n";)
-										DBG(errs() << "\t> src type: " << *GEP->getSourceElementType() << "\n";)
-										DBG(errs() << "\t> res type: " << *GEP->getResultElementType() << "\n";)
-										
-										// modify GEP types to use the correct address spaces
-										auto new_result_type = result_type->getPointerElementType()->getPointerTo(SPIRAS_PhysicalStorageBuffer);
-										auto new_gep_type = PointerType::get(new_result_type, SPIRAS_StorageBuffer);
-										GEP->mutateType(new_gep_type);
-										GEP->setSourceElementType(adj_struct_type);
-										GEP->setResultElementType(new_result_type);
-										
-										DBG(errs() << "\t> new type: " << *new_gep_type << "\n";)
-										DBG(errs() << "\t> new src type: " << *adj_struct_type << "\n";)
-										DBG(errs() << "\t> new res type: " << *new_result_type << "\n";)
-										
-										// fix GEP users
-										std::vector<User*> gep_users;
-										for (auto* gep_user : GEP->users()) {
-											gep_users.emplace_back(gep_user);
-										}
-										for (auto& gep_user : gep_users) {
-											if (auto gep_user_instr = dyn_cast<Instruction>(gep_user)) {
-												std::vector<ReturnInst*> returns; // returns to fix -> there shouldn't be any here
-												fix_instruction_users(*ctx, *gep_user_instr, *GEP, SPIRAS_PhysicalStorageBuffer, true, returns);
-												assert(returns.empty() && "unexpected return type change");
-											}
-										}
-									} else {
-										DBG(errs() << "\nunhandled AB user: " << *user << "\n";)
-										DBG(errs().flush();)
-										assert(false && "unhandled AB user");
-									}
-								}
-							}
-						}
-
 						DBG(errs() << " -> " << *arg_type;)
 					}
 					DBG(errs() << "\n";)

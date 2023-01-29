@@ -8968,7 +8968,8 @@ static void checkIsValidOpenCLKernelParameter(
   Declarator &D,
   ParmVarDecl *Param,
   llvm::SmallPtrSetImpl<const Type *> &ValidTypes,
-  const bool is_metal) {
+  const bool is_metal,
+  const bool is_vulkan_with_arg_buffer) {
   QualType PT = Param->getType();
 
   // Cache the valid types we encounter to avoid rechecking structs that are
@@ -9105,6 +9106,13 @@ static void checkIsValidOpenCLKernelParameter(
 
       if (ParamType == RecordKernelParam) {
         VisitStack.push_back(FD);
+        continue;
+      }
+
+      if (is_vulkan_with_arg_buffer &&
+          (ParamType == PtrKernelParam || ParamType == PtrPtrKernelParam)) {
+        // ignore this when we have argument/descriptor buffer support
+        // NOTE: since this is a weird stack based recursive check, we can't do proper arg buffer checks
         continue;
       }
 
@@ -10154,7 +10162,17 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
     if (getLangOpts().OpenCL) {
       llvm::SmallPtrSet<const Type *, 16> ValidTypes;
       for (auto Param : NewFD->parameters())
-        checkIsValidOpenCLKernelParameter(*this, D, Param, ValidTypes, getLangOpts().Metal);
+        checkIsValidOpenCLKernelParameter(*this, D, Param, ValidTypes, getLangOpts().Metal,
+										  getLangOpts().Vulkan && getLangOpts().VulkanDescriptorBufferSupport);
+	}
+
+	// arg_buffer<> must only be used directly
+	for (auto Param : NewFD->parameters()) {
+	  if (Param->hasAttr<FloorArgBufferAttr>() &&
+	      !Param->getType()->isStructureOrClassType()) {
+	    Diag(Param->getLocation(), diag::err_libfloor_indirect_arg_buffer_in_entry_point);
+	    D.setInvalidType();
+	  }
 	}
 
     if (getLangOpts().OpenCLCPlusPlus) {
@@ -10164,6 +10182,21 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
       }
       if (FunctionTemplate) {
         Diag(D.getIdentifierLoc(), diag::err_template_kernel);
+        D.setInvalidType();
+      }
+    }
+  } else if (getLangOpts().OpenCL) {
+    for (auto Param : NewFD->parameters()) {
+      if (!Param->hasAttr<FloorArgBufferAttr>()) {
+        continue;
+      }
+      // arg_buffer<> must be a single-level reference or pointer
+      if (!Param->getType()->isLValueReferenceType() &&
+          !Param->getType()->isPointerType()) {
+        Diag(Param->getLocation(), diag::err_libfloor_direct_arg_buffer_in_non_entry_point);
+        D.setInvalidType();
+      } else if (!Param->getType()->getPointeeType()->isStructureOrClassType()) {
+        Diag(Param->getLocation(), diag::err_libfloor_direct_arg_buffer_in_non_entry_point);
         D.setInvalidType();
       }
     }

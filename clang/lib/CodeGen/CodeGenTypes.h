@@ -78,6 +78,7 @@ class CodeGenTypes {
 
   /// This maps CXX record decls to their special flattend llvm struct types
   llvm::DenseMap<const CXXRecordDecl*, llvm::Type*> FlattenedRecords;
+  llvm::DenseMap<const CXXRecordDecl*, llvm::Type*> FlattenedFloorArgBufferRecords;
 
   /// Contains the LLVM IR type for any converted RecordDecl.
   llvm::DenseMap<const Type*, llvm::StructType *> RecordDeclTypes;
@@ -132,7 +133,10 @@ public:
   /// ConvertType - Convert type T into a llvm::Type.
   /// "convert_array_image_type" signals if we want to directly convert struct
   /// types containing image arrays to native LLVM arrays (default).
-  llvm::Type *ConvertType(QualType T, bool convert_array_image_type = true);
+  /// "single_field_array_image_only" signals that only single field array
+  /// images should be convertable to an array image type.
+  llvm::Type *ConvertType(QualType T, bool convert_array_image_type = true,
+                          bool single_field_array_image_only = true);
 
   /// ConvertTypeForMem - Convert type T into a llvm::Type.  This differs from
   /// ConvertType in that it is used to convert to the memory representation for
@@ -140,8 +144,15 @@ public:
   /// memory representation is usually i8 or i32, depending on the target.
   /// "ForRecordField" signals if this should be converted for a field type
   /// within a record/struct.
+  /// "single_field_array_image_only" signals that only single field array
+  /// images should be convertable to an array image type.
   llvm::Type *ConvertTypeForMem(QualType T, bool ForBitField = false,
-                                bool ForRecordField = false);
+                                bool ForRecordField = false,
+                                bool single_field_array_image_only = true);
+
+  /// helper function to convert "Ty" into a graphics I/O type if it is one (returns nullptr otherwise),
+  /// if "indirect_io_type_conversion" is true, this will also convert pointers/references to graphics I/O types
+  llvm::Type* convert_io_type_or_null(QualType Ty, bool indirect_io_type_conversion);
 
   /// GetFunctionType - Get the LLVM function type for \arg Info.
   llvm::FunctionType *GetFunctionType(const CGFunctionInfo &Info);
@@ -169,7 +180,9 @@ public:
 
   /// Returns the flattend LLVM type of the specified CXX record decl,
   /// or nullptr if no flattened type exists.
+  llvm::Type *getAnyFlattenedType(const CXXRecordDecl* D, const bool prefer_arg_buffer_type = false) const;
   llvm::Type *getFlattenedRecordType(const CXXRecordDecl* D) const;
+  llvm::Type *getFlattenedFloorArgBufferType(const CXXRecordDecl* D) const;
 
   /// UpdateCompletedType - When we find the full definition for a TagDecl,
   /// replace the 'opaque' type we previously made for it if applicable.
@@ -295,18 +308,26 @@ public:
   // will recurse through the specified class/struct decl, its base classes,
   // all its contained class/struct/union decls, all its contained arrays,
   // returning a vector of all contained/scalarized fields + info
+  /// "ignore_root_vec_compat" will not consider [[vector_compat]] at the first root decl
+  /// "ignore_vec_compat" will not consider [[vector_compat]] at any level, but keep vector-compat structs instead
+  /// "ignore_bases" will not consider/include any bases classes
+  /// "expand_array_image" will expand image arrays into individual images
+  /// "merge_parent_field_decl" will merge the parent field with the child field if there is a singular child
   // NOTE: for unions, only the first field will be considered
   // NOTE: this also transform/converts [[vector_compat]] types to clang vector types
   std::vector<ASTContext::aggregate_scalar_entry>
   get_aggregate_scalar_fields(const CXXRecordDecl* root_decl,
                               const CXXRecordDecl* decl,
                               const bool ignore_root_vec_compat = false,
+							  const bool ignore_vec_compat = false,
                               const bool ignore_bases = false,
-                              const bool expand_array_image = true) const;
+                              const bool expand_array_image = true,
+							  const bool merge_parent_field_decl = false) const;
 
   //
   void create_flattened_cg_layout(const CXXRecordDecl* decl, llvm::StructType* type,
-								  const std::vector<ASTContext::aggregate_scalar_entry>& fields);
+								  const std::vector<ASTContext::aggregate_scalar_entry>& fields,
+								  const bool is_floor_arg_buffer);
 
   // for all entry functions/points: handle the function type -> add implicit internal args
   // "FTy" is optional and if specified will update the function type
@@ -332,7 +353,8 @@ public:  // These are internal details of CGT that shouldn't be used externally.
   /// argument types it would be passed as. See ABIArgInfo::Expand.
   void getExpandedTypes(QualType Ty,
                         SmallVectorImpl<llvm::Type *>::iterator &TI,
-                        const CallingConv CC);
+                        const CallingConv CC,
+                        const bool is_floor_arg_buffer);
 
   /// IsZeroInitializable - Return whether a type can be
   /// zero-initialized (in the C++ sense) with an LLVM zeroinitializer.

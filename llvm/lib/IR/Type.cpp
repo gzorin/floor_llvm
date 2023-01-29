@@ -304,6 +304,47 @@ PointerType *Type::getInt64PtrTy(LLVMContext &C, unsigned AS) {
   return getInt64Ty(C)->getPointerTo(AS);
 }
 
+bool Type::isImageType() const {
+  if (!isPointerTy()) {
+    return false;
+  }
+
+  auto ptr_elem_type = getPointerElementType();
+  if (getPointerAddressSpace() != 0 &&
+	  ptr_elem_type->isStructTy() &&
+	  ptr_elem_type->getStructName().startswith("opencl.image")) {
+	return true;
+  }
+  return false;
+}
+
+bool Type::isImageArrayType() const {
+  if (!isArrayTy()) {
+	return false;
+  }
+
+  const auto elem_type = getArrayElementType();
+  if (!elem_type->isPointerTy()) {
+	return false;
+  }
+
+  auto ptr_type = cast<llvm::PointerType>(elem_type);
+  auto ptr_elem_type = ptr_type->getPointerElementType();
+  if (ptr_type->getPointerAddressSpace() != 0 &&
+	  ptr_elem_type->isStructTy() &&
+	  ptr_elem_type->getStructName().startswith("opencl.image")) {
+	return true;
+  }
+  return false;
+}
+
+bool Type::isFlattenedFloorArgBufferType() const {
+  if (!isStructTy()) {
+    return false;
+  }
+  return getStructName().startswith("struct.floor.flat.arg_buffer.");
+}
+
 //===----------------------------------------------------------------------===//
 //                       IntegerType Implementation
 //===----------------------------------------------------------------------===//

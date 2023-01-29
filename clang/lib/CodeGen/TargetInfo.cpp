@@ -269,6 +269,13 @@ LLVM_DUMP_METHOD void ABIArgInfo::dump() const {
     else
       OS << "null";
     break;
+  case DirectFloorArgBuffer:
+    OS << "DirectFloorArgBuffer=";
+    if (llvm::Type *Ty = getCoerceToType())
+      Ty->print(OS);
+    else
+      OS << "null";
+    break;
   case Extend:
     OS << "Extend";
     break;
@@ -290,6 +297,9 @@ LLVM_DUMP_METHOD void ABIArgInfo::dump() const {
     break;
   case Expand:
     OS << "Expand";
+    break;
+  case ExpandFloorArgBuffer:
+    OS << "ExpandFloorArgBuffer";
     break;
   case CoerceAndExpand:
     OS << "CoerceAndExpand Type=";
@@ -2084,9 +2094,11 @@ static bool isArgInAlloca(const ABIArgInfo &Info) {
     return false;
   case ABIArgInfo::Indirect:
   case ABIArgInfo::Direct:
+  case ABIArgInfo::DirectFloorArgBuffer:
   case ABIArgInfo::Extend:
     return !Info.getInReg();
   case ABIArgInfo::Expand:
+  case ABIArgInfo::ExpandFloorArgBuffer:
   case ABIArgInfo::CoerceAndExpand:
     // These are aggregate types which are never passed in registers when
     // inalloca is involved.
@@ -9843,6 +9855,7 @@ Address SparcV9ABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
   CharUnits Stride;
   switch (AI.getKind()) {
   case ABIArgInfo::Expand:
+  case ABIArgInfo::ExpandFloorArgBuffer:
   case ABIArgInfo::CoerceAndExpand:
   case ABIArgInfo::InAlloca:
     llvm_unreachable("Unsupported ABI kind for va_arg");
@@ -9854,7 +9867,8 @@ Address SparcV9ABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
     break;
   }
 
-  case ABIArgInfo::Direct: {
+  case ABIArgInfo::Direct:
+  case ABIArgInfo::DirectFloorArgBuffer: {
     auto AllocSize = getDataLayout().getTypeAllocSize(AI.getCoerceToType());
     Stride = CharUnits::fromQuantity(AllocSize).alignTo(SlotSize);
     ArgAddr = Addr;
@@ -10225,6 +10239,7 @@ Address XCoreABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
   CharUnits ArgSize = CharUnits::Zero();
   switch (AI.getKind()) {
   case ABIArgInfo::Expand:
+  case ABIArgInfo::ExpandFloorArgBuffer:
   case ABIArgInfo::CoerceAndExpand:
   case ABIArgInfo::InAlloca:
     llvm_unreachable("Unsupported ABI kind for va_arg");
@@ -10234,6 +10249,7 @@ Address XCoreABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
     break;
   case ABIArgInfo::Extend:
   case ABIArgInfo::Direct:
+  case ABIArgInfo::DirectFloorArgBuffer:
     Val = Builder.CreateBitCast(AP, ArgPtrTy);
     ArgSize = CharUnits::fromQuantity(
                        getDataLayout().getTypeAllocSize(AI.getCoerceToType()));
@@ -10596,7 +10612,8 @@ public:
   VulkanABIInfo(CodeGenTypes &CGT) : ABIInfo(CGT) {}
 
   ABIArgInfo classifyReturnType(QualType RetTy, unsigned int CC) const;
-  ABIArgInfo classifyArgumentType(QualType Ty, unsigned int CC) const;
+  ABIArgInfo classifyArgumentType(QualType Ty, unsigned int CC,
+                                  FunctionProtoType::ExtParameterInfo ext_info) const;
 
   void computeInfo(CGFunctionInfo &FI) const override;
   Address EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
@@ -10625,7 +10642,23 @@ ABIArgInfo VulkanABIInfo::classifyReturnType(QualType RetTy, unsigned int CC) co
           ABIArgInfo::getExtend(RetTy) : ABIArgInfo::getDirect());
 }
 
-ABIArgInfo VulkanABIInfo::classifyArgumentType(QualType Ty, unsigned int CC) const {
+ABIArgInfo VulkanABIInfo::classifyArgumentType(QualType Ty, unsigned int CC,
+                                               FunctionProtoType::ExtParameterInfo ext_info) const {
+  if (ext_info.isFloorArgBuffer()) {
+    if (CC == llvm::CallingConv::FLOOR_VERTEX ||
+        CC == llvm::CallingConv::FLOOR_FRAGMENT ||
+        CC == llvm::CallingConv::FLOOR_KERNEL ||
+        CC == llvm::CallingConv::FLOOR_TESS_CONTROL ||
+        CC == llvm::CallingConv::FLOOR_TESS_EVAL) {
+      // for entry points: use expand with argument buffer specific handling
+      return ABIArgInfo::getExpandFloorArgBuffer();
+    } else if (CC == llvm::CallingConv::FLOOR_FUNC &&
+               (Ty->isPointerType() || Ty->isReferenceType())) {
+      // for functions: use direct with argument buffer specific handling
+      return ABIArgInfo::getDirectFloorArgBuffer();
+    }
+  }
+
   // direct array of images (not writable)
   if (Ty->isArrayImageType(true))
     return getNaturalAlignIndirect(Ty);
@@ -10662,8 +10695,10 @@ ABIArgInfo VulkanABIInfo::classifyArgumentType(QualType Ty, unsigned int CC) con
 void VulkanABIInfo::computeInfo(CGFunctionInfo &FI) const {
   FI.getReturnInfo() = classifyReturnType(FI.getReturnType(), FI.getCallingConvention());
 
-  for (auto &I : FI.arguments())
-    I.info = classifyArgumentType(I.type, FI.getCallingConvention());
+  for (uint32_t arg_idx = 0, arg_count = FI.arg_size(); arg_idx < arg_count; ++arg_idx) {
+    auto& I = FI.arguments()[arg_idx];
+    I.info = classifyArgumentType(I.type, FI.getCallingConvention(), FI.getExtParameterInfo(arg_idx));
+  }
 
   // Always honor user-specified calling convention.
   if (FI.getCallingConvention() != llvm::CallingConv::C)

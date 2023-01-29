@@ -2445,9 +2445,23 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, ParamValue Arg,
   assert((isa<ParmVarDecl>(D) || isa<ImplicitParamDecl>(D)) &&
          "Invalid argument to EmitParmDecl");
 
-  Arg.getAnyValue()->setName(D.getName());
+  // only set arg name if "D" actually has a name or Arg has no name yet at all
+  // NOTE: this prevents overwriting existing arg names with empty ones
+  if (!D.getName().empty() || Arg.getAnyValue()->getName().empty()) {
+    Arg.getAnyValue()->setName(D.getName());
+  }
 
   QualType Ty = D.getType();
+
+  // handle argument buffer pointer/reference params (used directly without intermediate alloca)
+  if (!Arg.isIndirect()) {
+    if (is_floor_indirect_arg_buffer_argument(Arg.getDirectValue())) {
+      Address arg_addr(Arg.getDirectValue(), Arg.getDirectValue()->getType()->getPointerElementType(),
+                       CharUnits::fromQuantity(8u /* ptr */));
+      setAddrOfLocalVar(&D, arg_addr);
+      return;
+    }
+  }
 
   // Use better IR generation for certain implicit parameters.
   if (auto IPD = dyn_cast<ImplicitParamDecl>(&D)) {
@@ -2469,11 +2483,14 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, ParamValue Arg,
   // If we already have a pointer to the argument, reuse the input pointer.
   if (Arg.isIndirect()) {
     DeclPtr = Arg.getIndirectAddress();
-    // If we have a prettier pointer type at this point, bitcast to that.
-    unsigned AS = DeclPtr.getType()->getAddressSpace();
-    llvm::Type *IRTy = ConvertTypeForMem(Ty)->getPointerTo(AS);
-    if (DeclPtr.getType() != IRTy)
-      DeclPtr = Builder.CreateBitCast(DeclPtr, IRTy, D.getName());
+    // keep Vulkan argument buffer args as-is
+    if (!(getLangOpts().Vulkan && D.hasAttr<FloorArgBufferAttr>())) {
+      // If we have a prettier pointer type at this point, bitcast to that.
+      unsigned AS = DeclPtr.getType()->getAddressSpace();
+      llvm::Type *IRTy = ConvertTypeForMem(Ty)->getPointerTo(AS);
+      if (DeclPtr.getType() != IRTy)
+        DeclPtr = Builder.CreateBitCast(DeclPtr, IRTy, D.getName());
+    }
     // Indirect argument is in alloca address space, which may be different
     // from the default address space.
     auto AllocaAS = CGM.getASTAllocaAddressSpace();

@@ -133,18 +133,19 @@ Address CodeGenFunction::CreateIRTemp(QualType Ty, const Twine &Name) {
 }
 
 Address CodeGenFunction::CreateMemTemp(QualType Ty, const Twine &Name,
-                                       Address *Alloca) {
+                                       Address *Alloca,
+                                       bool indirect_io_type_conversion) {
   // FIXME: Should we prefer the preferred type alignment here?
-  return CreateMemTemp(Ty, getContext().getTypeAlignInChars(Ty), Name, Alloca);
+  return CreateMemTemp(Ty, getContext().getTypeAlignInChars(Ty), Name, Alloca, indirect_io_type_conversion);
 }
 
 Address CodeGenFunction::CreateMemTemp(QualType Ty, CharUnits Align,
-                                       const Twine &Name, Address *Alloca) {
-  // if "Ty" has a flattened struct record, use that instead of the default LLVM type
-  llvm::Type* llvm_type = nullptr;
-  if (const auto cxx_rdecl = Ty->getAsCXXRecordDecl(); cxx_rdecl) {
-    llvm_type = getTypes().getFlattenedRecordType(cxx_rdecl);
-  }
+                                       const Twine &Name, Address *Alloca,
+                                       bool indirect_io_type_conversion) {
+  // if "Ty" has a flattened struct record or pointer to one (if indirect_io_type_conversion),
+  // use that instead of the default LLVM type
+  llvm::Type* llvm_type = getTypes().convert_io_type_or_null(Ty, indirect_io_type_conversion);
+  // otherwise, use the normal type conversion
   if (!llvm_type) {
     llvm_type = ConvertTypeForMem(Ty);
   }
@@ -164,14 +165,20 @@ Address CodeGenFunction::CreateMemTemp(QualType Ty, CharUnits Align,
 }
 
 Address CodeGenFunction::CreateMemTempWithoutCast(QualType Ty, CharUnits Align,
-                                                  const Twine &Name) {
-  return CreateTempAllocaWithoutCast(ConvertTypeForMem(Ty), Align, Name);
+                                                  const Twine &Name,
+                                                  bool with_io_type_conversion) {
+  llvm::Type* llvm_type = (with_io_type_conversion ? getTypes().convert_io_type_or_null(Ty, true) : nullptr);
+  if (!llvm_type) {
+    llvm_type = ConvertTypeForMem(Ty);
+  }
+  return CreateTempAllocaWithoutCast(llvm_type, Align, Name);
 }
 
 Address CodeGenFunction::CreateMemTempWithoutCast(QualType Ty,
-                                                  const Twine &Name) {
+                                                  const Twine &Name,
+                                                  bool with_io_type_conversion) {
   return CreateMemTempWithoutCast(Ty, getContext().getTypeAlignInChars(Ty),
-                                  Name);
+                                  Name, with_io_type_conversion);
 }
 
 /// EvaluateExprAsBool - Perform the usual unary conversions on the specified
@@ -2486,6 +2493,11 @@ Address
 CodeGenFunction::EmitLoadOfReference(LValue RefLVal,
                                      LValueBaseInfo *PointeeBaseInfo,
                                      TBAAAccessInfo *PointeeTBAAInfo) {
+  if (is_floor_indirect_arg_buffer_argument(RefLVal.getPointer(*this))) {
+    // argument buffer arg is used directly
+    return RefLVal.getAddress(*this);
+  }
+
   llvm::LoadInst *Load =
       Builder.CreateLoad(RefLVal.getAddress(*this), RefLVal.isVolatile());
   CGM.DecorateInstructionWithTBAA(Load, RefLVal.getTBAAInfo());
@@ -4314,7 +4326,8 @@ static bool hasAnyVptr(const QualType Type, const ASTContext &Context) {
 }
 
 LValue CodeGenFunction::EmitLValueForField(LValue base,
-                                           const FieldDecl *field) {
+                                           const FieldDecl *field,
+                                           const bool is_floor_arg_buffer) {
   LValueBaseInfo BaseInfo = base.getBaseInfo();
   Address Addr = base.getAddress(*this);
   llvm::Type* elem_type = Addr.getType()->getPointerElementType();
@@ -4467,8 +4480,63 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
   // for both unions and structs.  A union needs a bitcast, a struct element
   // will need a bitcast if the LLVM type laid out doesn't match the desired
   // type.
-  addr = Builder.CreateElementBitCast(
-      addr, CGM.getTypes().ConvertTypeForMem(FieldType), field->getName());
+  const auto is_vk_arg_buffer = (is_floor_arg_buffer && getLangOpts().Vulkan);
+  auto llvm_elem_type = CGM.getTypes().ConvertTypeForMem(FieldType, false, false, !is_vk_arg_buffer);
+  // for expanded Vulkan argument buffers, we need to take care of additional type/value conversion/handling
+  if (getLangOpts().Vulkan) {
+	  bool is_base_load = false;
+	  do {
+		  // need to check the base of this to figure out if this originates from an argument buffer
+		  auto base_ptr = base.getPointer(*this);
+		  if (auto base_alloca = dyn_cast_or_null<llvm::AllocaInst>(base_ptr); base_alloca) {
+			  auto annotation_md = base_alloca->getMetadata(llvm::LLVMContext::MD_annotation);
+			  if (!annotation_md || annotation_md->getNumOperands() == 0) {
+				  break;
+			  }
+			  auto annotation_str = dyn_cast_or_null<llvm::MDString>(annotation_md->getOperand(0));
+			  if (!annotation_str || !annotation_str->getString().equals("vulkan_arg_buffer")) {
+				  break;
+			  }
+		  } else if (auto base_arg = dyn_cast_or_null<llvm::Argument>(base_ptr); base_arg) {
+			  if (!is_floor_indirect_arg_buffer_argument(base_arg)) {
+				  break;
+			  }
+		  } else if (auto base_ld = dyn_cast_or_null<llvm::LoadInst>(base_ptr); base_ld) {
+			  if (!base_ld->getType()->getPointerElementType()->isFlattenedFloorArgBufferType()) {
+				  break;
+			  }
+			  is_base_load = true;
+		  } else {
+			  break;
+		  }
+		  
+		  if (llvm_elem_type->isImageArrayType()) {
+			  if (is_floor_arg_buffer) {
+				  // add indirection
+				  llvm_elem_type = llvm::PointerType::get(llvm_elem_type, 0u);
+			  } else {
+				  // load from indirection
+				  addr = Address(Builder.CreateLoad(addr), addr.getAlignment());
+			  }
+		  } else if (FieldType->isAggregateImageType()) {
+			  // only need to change this if the base is a load and the type doesn't match
+			  if (is_base_load && llvm_elem_type != addr.getElementType()) {
+				  // use the original address element type instead of the converted type
+				  llvm_elem_type = addr.getElementType();
+			  }
+			  // otherwise: keep as-is (already a proper pointer / struct with a proper pointer)
+		  } else if (!llvm_elem_type->isPointerTy()) {
+			  if (is_floor_arg_buffer) {
+				  // add indirection
+				  llvm_elem_type = llvm::PointerType::get(llvm_elem_type, getContext().getTargetAddressSpace(LangAS::opencl_constant));
+			  } else {
+				  // load from indirection
+				  addr = Address(Builder.CreateLoad(addr), addr.getAlignment());
+			  }
+		  }
+	  } while (false);
+  }
+  addr = Builder.CreateElementBitCast(addr, llvm_elem_type, field->getName());
 
   if (field->hasAttr<AnnotateAttr>())
     addr = EmitFieldAnnotations(field, addr);
@@ -4485,11 +4553,12 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
 
 LValue
 CodeGenFunction::EmitLValueForFieldInitialization(LValue Base,
-                                                  const FieldDecl *Field) {
+                                                  const FieldDecl *Field,
+                                                  const bool is_floor_arg_buffer) {
   QualType FieldType = Field->getType();
 
   if (!FieldType->isReferenceType())
-    return EmitLValueForField(Base, Field);
+    return EmitLValueForField(Base, Field, is_floor_arg_buffer);
 
   llvm::Type* elem_type = Base.getAddress(*this).getType()->getPointerElementType();
   Address V = emitAddrOfFieldStorage(*this, Base.getAddress(*this), Field, elem_type);

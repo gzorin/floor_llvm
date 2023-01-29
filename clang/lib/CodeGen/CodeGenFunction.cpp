@@ -2945,3 +2945,14 @@ CodeGenFunction::emitCondLikelihoodViaExpectIntrinsic(llvm::Value *Cond,
   }
   llvm_unreachable("Unknown Likelihood");
 }
+
+bool CodeGenFunction::is_floor_indirect_arg_buffer_argument(llvm::Value* val) {
+	if (auto arg = dyn_cast_or_null<llvm::Argument>(val);
+		arg && arg->getType()->isPointerTy() && arg->getParent() != nullptr) {
+		const auto arg_buf_attr = arg->getParent()->getAttributeAtIndex(llvm::AttributeList::FirstArgIndex + arg->getArgNo(), "vulkan_arg_buffer");
+		if (arg_buf_attr.getRawPointer()) {
+			return true;
+		}
+	}
+	return false;
+}

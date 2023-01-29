@@ -534,6 +534,7 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       ft_args.emplace_back(param);
     }
   }
+  const auto orig_arg_count = ft_args.size();
 
   // adds an implicit argument
   uint32_t added_args_count = 0; // for sanity checking
@@ -648,6 +649,21 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
   // create new function type and update FTy
   if (FTy) {
     FunctionProtoType::ExtProtoInfo EPI = FPT->getExtProtoInfo();
+
+    // if this function has extra parameter infos, we need to allocate a new info object and append info of our added parameters
+    // NOTE: we only need to hold onto the memory of this until Ctx.getFunctionTyp() has been called
+    std::unique_ptr<FunctionType::ExtParameterInfo[]> ext_param_info_storage;
+    if (EPI.ExtParameterInfos) {
+      ext_param_info_storage = std::make_unique<FunctionType::ExtParameterInfo[]>(ft_args.size());
+      for (uint32_t i = 0; i < orig_arg_count; ++i) {
+        ext_param_info_storage[i] = EPI.ExtParameterInfos[i];
+      }
+      for (uint32_t i = orig_arg_count, updated_arg_count = ft_args.size(); i < updated_arg_count; ++i) {
+        ext_param_info_storage[i] = {};
+      }
+      EPI.ExtParameterInfos = &ext_param_info_storage[0];
+    }
+
     QualType NewFT = Ctx.getFunctionType(FPT->getReturnType(), ft_args, EPI);
     *FTy = NewFT.getTypePtr()->getCanonicalTypeUnqualified();
   }
@@ -1068,9 +1084,9 @@ CGFunctionInfo *CGFunctionInfo::create(unsigned llvmCC,
 /***/
 
 namespace {
-// ABIArgInfo::Expand implementation.
+// ABIArgInfo::Expand/ExpandFloorArgBuffer implementation.
 
-// Specifies the way QualType passed as ABIArgInfo::Expand is expanded.
+// Specifies the way QualType passed as ABIArgInfo::Expand/ExpandFloorArgBuffer is expanded.
 struct TypeExpansion {
   enum TypeExpansionKind {
     // Elements of constant arrays are expanded recursively.
@@ -1163,7 +1179,8 @@ struct NoExpansion : TypeExpansion {
 
 static std::unique_ptr<TypeExpansion>
 getTypeExpansion(QualType Ty, const ASTContext &Context,
-                 const CodeGenTypes& CGT, const CallingConv CC) {
+                 const CodeGenTypes& CGT, const CallingConv CC,
+                 const bool is_floor_arg_buffer) {
   if (const ConstantArrayType *AT = Context.getAsConstantArrayType(Ty)) {
     return std::make_unique<ConstantArrayExpansion>(
         AT->getElementType(), AT->getSize().getZExtValue());
@@ -1187,7 +1204,7 @@ getTypeExpansion(QualType Ty, const ASTContext &Context,
     }
     // libfloor aggregate expansion:
     // * any aggregate image type
-    // * any aggregate if calling a Metal shader function
+    // * any aggregate if calling a Metal/Vulkan shader function
     // similar to (non-union) record expansion below, but also stores some additional information
     if ((Ty->isAggregateImageType() ||
          ((Context.getLangOpts().Metal && (CC == CallingConv::CC_FloorVertex ||
@@ -1218,9 +1235,11 @@ getTypeExpansion(QualType Ty, const ASTContext &Context,
         field_decls.push_back(FD);
       }
 
-      auto fields = CGT.get_aggregate_scalar_fields(cxx_rdecl, cxx_rdecl, false, false,
+      const auto is_vk_floor_arg_buffer = (is_floor_arg_buffer && Context.getLangOpts().Vulkan);
+      auto fields = CGT.get_aggregate_scalar_fields(cxx_rdecl, cxx_rdecl, false, is_vk_floor_arg_buffer, false,
                                                     !(Context.getLangOpts().Vulkan ||
-                                                      Context.getLangOpts().Metal));
+                                                      Context.getLangOpts().Metal),
+                                                    is_vk_floor_arg_buffer);
       return std::make_unique<FloorAggregateExpansion>(std::move(bases), std::move(field_decls), std::move(fields));
     }
   }
@@ -1275,10 +1294,11 @@ getTypeExpansion(QualType Ty, const ASTContext &Context,
 }
 
 static int getExpansionSize(QualType Ty, const ASTContext &Context,
-                            const CodeGenTypes& CGT, const CallingConv CC) {
-  auto Exp = getTypeExpansion(Ty, Context, CGT, CC);
+                            const CodeGenTypes& CGT, const CallingConv CC,
+                            const bool is_floor_arg_buffer) {
+  auto Exp = getTypeExpansion(Ty, Context, CGT, CC, is_floor_arg_buffer);
   if (auto CAExp = dyn_cast<ConstantArrayExpansion>(Exp.get())) {
-    return CAExp->NumElts * getExpansionSize(CAExp->EltTy, Context, CGT, CC);
+    return CAExp->NumElts * getExpansionSize(CAExp->EltTy, Context, CGT, CC, is_floor_arg_buffer);
   }
   if (isa<FloorVectorCompatExpansion>(Exp.get())) {
     return 1;
@@ -1289,9 +1309,9 @@ static int getExpansionSize(QualType Ty, const ASTContext &Context,
   if (auto RExp = dyn_cast<RecordExpansion>(Exp.get())) {
     int Res = 0;
     for (auto BS : RExp->Bases)
-      Res += getExpansionSize(BS->getType(), Context, CGT, CC);
+      Res += getExpansionSize(BS->getType(), Context, CGT, CC, is_floor_arg_buffer);
     for (auto FD : RExp->Fields)
-      Res += getExpansionSize(FD->getType(), Context, CGT, CC);
+      Res += getExpansionSize(FD->getType(), Context, CGT, CC, is_floor_arg_buffer);
     return Res;
   }
   if (isa<ComplexExpansion>(Exp.get()))
@@ -1303,29 +1323,32 @@ static int getExpansionSize(QualType Ty, const ASTContext &Context,
 void
 CodeGenTypes::getExpandedTypes(QualType Ty,
                                SmallVectorImpl<llvm::Type *>::iterator &TI,
-                               const CallingConv CC) {
-  auto Exp = getTypeExpansion(Ty, Context, *this, CC);
+                               const CallingConv CC,
+                               const bool is_floor_arg_buffer) {
+  auto Exp = getTypeExpansion(Ty, Context, *this, CC, is_floor_arg_buffer);
   if (auto CAExp = dyn_cast<ConstantArrayExpansion>(Exp.get())) {
     for (int i = 0, n = CAExp->NumElts; i < n; i++) {
-      getExpandedTypes(CAExp->EltTy, TI, CC);
+      getExpandedTypes(CAExp->EltTy, TI, CC, false);
     }
   } else if (auto FVCExp = dyn_cast<FloorVectorCompatExpansion>(Exp.get())) {
     *TI++ = ConvertType(FVCExp->vector_type);
   } else if (auto FAExp = dyn_cast<FloorAggregateExpansion>(Exp.get())) {
+    const auto is_vk_floor_arg_buffer = (is_floor_arg_buffer && Context.getLangOpts().Vulkan);
     for(const auto& field : FAExp->fields) {
-      auto conv_type = ConvertType(field.type);;
+      auto conv_type = ConvertType(field.type, true, !is_floor_arg_buffer);
       if (field.type->isArrayImageType(false)) {
-        *TI++ = (!conv_type->isPointerTy() ?
-                  llvm::PointerType::get(conv_type, 0) : conv_type);
+        *TI++ = (!conv_type->isPointerTy() ? llvm::PointerType::get(conv_type, 0) : conv_type);
+      } else if (!conv_type->isPointerTy() && !field.type->isAggregateImageType() && is_vk_floor_arg_buffer) {
+        *TI++ = llvm::PointerType::get(conv_type, getContext().getTargetAddressSpace(LangAS::opencl_constant));
       } else {
         *TI++ = conv_type;
       }
     }
   } else if (auto RExp = dyn_cast<RecordExpansion>(Exp.get())) {
     for (auto BS : RExp->Bases)
-      getExpandedTypes(BS->getType(), TI, CC);
+      getExpandedTypes(BS->getType(), TI, CC, false);
     for (auto FD : RExp->Fields)
-      getExpandedTypes(FD->getType(), TI, CC);
+      getExpandedTypes(FD->getType(), TI, CC, false);
   } else if (auto CExp = dyn_cast<ComplexExpansion>(Exp.get())) {
     llvm::Type *EltTy = ConvertType(CExp->EltTy);
     *TI++ = EltTy;
@@ -1353,27 +1376,28 @@ static void forConstantArrayExpansion(CodeGenFunction &CGF,
 
 void CodeGenFunction::ExpandTypeFromArgs(QualType Ty, LValue LV,
                                          llvm::Function::arg_iterator &AI,
-                                         const CallingConv CC) {
+                                         const CallingConv CC,
+                                         const bool is_floor_arg_buffer) {
   assert(LV.isSimple() &&
          "Unexpected non-simple lvalue during struct expansion.");
 
-  auto Exp = getTypeExpansion(Ty, getContext(), getTypes(), CC);
+  auto Exp = getTypeExpansion(Ty, getContext(), getTypes(), CC, is_floor_arg_buffer);
   if (auto CAExp = dyn_cast<ConstantArrayExpansion>(Exp.get())) {
     forConstantArrayExpansion(
         *this, CAExp, LV.getAddress(*this), [&](Address EltAddr) {
           LValue LV = MakeAddrLValue(EltAddr, CAExp->EltTy);
-          ExpandTypeFromArgs(CAExp->EltTy, LV, AI, CC);
+          ExpandTypeFromArgs(CAExp->EltTy, LV, AI, CC, is_floor_arg_buffer);
         });
   } else if (auto FVCExp = dyn_cast<FloorVectorCompatExpansion>(Exp.get())) {
     LValue VecLV = MakeAddrLValue(LV.getAddress(*this), FVCExp->vector_type);
-    ExpandTypeFromArgs(FVCExp->vector_type, VecLV, AI, CC);
+    ExpandTypeFromArgs(FVCExp->vector_type, VecLV, AI, CC, is_floor_arg_buffer);
   } else if (auto FAExp = dyn_cast<FloorAggregateExpansion>(Exp.get())) {
     // TODO: should this recurse into bases with ExpandTypeFromArgs or do this manually?
     Address This = LV.getAddress(*this);
     const auto cxx_rdecl = Ty->getAsCXXRecordDecl();
     llvm::Type* flattened_rdecl = nullptr;
     if (cxx_rdecl) {
-      flattened_rdecl = getTypes().getFlattenedRecordType(cxx_rdecl);
+      flattened_rdecl = getTypes().getAnyFlattenedType(cxx_rdecl, is_floor_arg_buffer);
     }
     if (flattened_rdecl) {
       // -> handle as flat struct/rdecl
@@ -1382,13 +1406,13 @@ void CodeGenFunction::ExpandTypeFromArgs(QualType Ty, LValue LV,
         if (field.field_decl) {
           // array of images
           if (field.type->isArrayImageType(false)) {
-            LValue SubLV = EmitLValueForField(LV, field.field_decl);
+            LValue SubLV = EmitLValueForField(LV, field.field_decl, is_floor_arg_buffer);
             Builder.CreateStore(&*AI++, SubLV.getAddress(*this));
           }
           // all else
           else {
-            LValue SubLV = EmitLValueForFieldInitialization(LV, field.field_decl);
-            ExpandTypeFromArgs(SubLV.getType(), SubLV, AI, CC);
+            LValue SubLV = EmitLValueForFieldInitialization(LV, field.field_decl, is_floor_arg_buffer);
+            ExpandTypeFromArgs(SubLV.getType(), SubLV, AI, CC, is_floor_arg_buffer);
           }
         } else {
           // will probably fail, but still try -> TODO above
@@ -1404,7 +1428,7 @@ void CodeGenFunction::ExpandTypeFromArgs(QualType Ty, LValue LV,
         LValue SubLV = MakeAddrLValue(Base, BS->getType());
         
         // Recurse onto bases.
-        ExpandTypeFromArgs(BS->getType(), SubLV, AI, CC);
+        ExpandTypeFromArgs(BS->getType(), SubLV, AI, CC, false);
       }
       
       for(const auto& field : FAExp->fields) {
@@ -1419,7 +1443,7 @@ void CodeGenFunction::ExpandTypeFromArgs(QualType Ty, LValue LV,
           // all else
           else {
             LValue SubLV = EmitLValueForFieldInitialization(LV, field.field_decl);
-            ExpandTypeFromArgs(SubLV.getType(), SubLV, AI, CC);
+            ExpandTypeFromArgs(SubLV.getType(), SubLV, AI, CC, false);
           }
         } else {
           // will probably fail, but still try -> TODO above
@@ -1437,12 +1461,12 @@ void CodeGenFunction::ExpandTypeFromArgs(QualType Ty, LValue LV,
       LValue SubLV = MakeAddrLValue(Base, BS->getType());
 
       // Recurse onto bases.
-      ExpandTypeFromArgs(BS->getType(), SubLV, AI, CC);
+      ExpandTypeFromArgs(BS->getType(), SubLV, AI, CC, false);
     }
     for (auto FD : RExp->Fields) {
       // FIXME: What are the right qualifiers here?
       LValue SubLV = EmitLValueForFieldInitialization(LV, FD);
-      ExpandTypeFromArgs(FD->getType(), SubLV, AI, CC);
+      ExpandTypeFromArgs(FD->getType(), SubLV, AI, CC, false);
     }
   } else if (isa<ComplexExpansion>(Exp.get())) {
     auto realValue = &*AI++;
@@ -1471,8 +1495,8 @@ void CodeGenFunction::ExpandTypeFromArgs(QualType Ty, LValue LV,
 void CodeGenFunction::ExpandTypeToArgs(
     QualType Ty, CallArg Arg, llvm::FunctionType *IRFuncTy,
     SmallVectorImpl<llvm::Value *> &IRCallArgs, unsigned &IRCallArgPos,
-    const CallingConv CC) {
-  auto Exp = getTypeExpansion(Ty, getContext(), getTypes(), CC);
+    const CallingConv CC, const bool is_floor_arg_buffer) {
+  auto Exp = getTypeExpansion(Ty, getContext(), getTypes(), CC, is_floor_arg_buffer);
   if (auto CAExp = dyn_cast<ConstantArrayExpansion>(Exp.get())) {
     Address Addr = Arg.hasLValue() ? Arg.getKnownLValue().getAddress(*this)
                                    : Arg.getKnownRValue().getAggregateAddress();
@@ -1482,7 +1506,7 @@ void CodeGenFunction::ExpandTypeToArgs(
               convertTempToRValue(EltAddr, CAExp->EltTy, SourceLocation()),
               CAExp->EltTy);
           ExpandTypeToArgs(CAExp->EltTy, EltArg, IRFuncTy, IRCallArgs,
-                           IRCallArgPos, CC);
+                           IRCallArgPos, CC, is_floor_arg_buffer);
         });
   } else if (auto FVCExp = dyn_cast<FloorVectorCompatExpansion>(Exp.get())) {
     const auto llvm_vec_type = getTypes().ConvertType(FVCExp->vector_type);
@@ -1506,7 +1530,7 @@ void CodeGenFunction::ExpandTypeToArgs(
 
       // Recurse onto bases.
       ExpandTypeToArgs(BS->getType(), BaseArg, IRFuncTy, IRCallArgs,
-                       IRCallArgPos, CC);
+                       IRCallArgPos, CC, is_floor_arg_buffer);
     }
 
     LValue LV = MakeAddrLValue(This, Ty);
@@ -1515,7 +1539,7 @@ void CodeGenFunction::ExpandTypeToArgs(
       // TODO: arrays -> these have no FD
       CallArg FldArg = CallArg(EmitRValueForField(LV, field.field_decl, SourceLocation()),
                                field.field_decl->getType());
-      ExpandTypeToArgs(field.field_decl->getType(), FldArg, IRFuncTy, IRCallArgs, IRCallArgPos, CC);
+      ExpandTypeToArgs(field.field_decl->getType(), FldArg, IRFuncTy, IRCallArgs, IRCallArgPos, CC, is_floor_arg_buffer);
     }
   } else if (auto RExp = dyn_cast<RecordExpansion>(Exp.get())) {
     Address This = Arg.hasLValue() ? Arg.getKnownLValue().getAddress(*this)
@@ -1529,7 +1553,7 @@ void CodeGenFunction::ExpandTypeToArgs(
 
       // Recurse onto bases.
       ExpandTypeToArgs(BS->getType(), BaseArg, IRFuncTy, IRCallArgs,
-                       IRCallArgPos, CC);
+                       IRCallArgPos, CC, is_floor_arg_buffer);
     }
 
     LValue LV = MakeAddrLValue(This, Ty);
@@ -1537,7 +1561,7 @@ void CodeGenFunction::ExpandTypeToArgs(
       CallArg FldArg =
           CallArg(EmitRValueForField(LV, FD, SourceLocation()), FD->getType());
       ExpandTypeToArgs(FD->getType(), FldArg, IRFuncTy, IRCallArgs,
-                       IRCallArgPos, CC);
+                       IRCallArgPos, CC, is_floor_arg_buffer);
     }
   } else if (isa<ComplexExpansion>(Exp.get())) {
     ComplexPairTy CV = Arg.getKnownRValue().getComplexVal();
@@ -1961,7 +1985,8 @@ void ClangToLLVMArgMapping::construct(const ASTContext &Context,
 
     switch (AI.getKind()) {
     case ABIArgInfo::Extend:
-    case ABIArgInfo::Direct: {
+    case ABIArgInfo::Direct:
+    case ABIArgInfo::DirectFloorArgBuffer: {
       // FIXME: handle sseregparm someday...
       llvm::StructType *STy = dyn_cast<llvm::StructType>(AI.getCoerceToType());
       if (AI.isDirect() && AI.getCanBeFlattened() && STy) {
@@ -1984,7 +2009,8 @@ void ClangToLLVMArgMapping::construct(const ASTContext &Context,
       IRArgs.NumberOfArgs = AI.getCoerceAndExpandTypeSequence().size();
       break;
     case ABIArgInfo::Expand:
-      IRArgs.NumberOfArgs = getExpansionSize(ArgType, Context, CGT, FI.getASTCallingConvention());
+    case ABIArgInfo::ExpandFloorArgBuffer:
+      IRArgs.NumberOfArgs = getExpansionSize(ArgType, Context, CGT, FI.getASTCallingConvention(), FI.getExtParameterInfo(ArgNo).isFloorArgBuffer());
       break;
     }
 
@@ -2063,11 +2089,13 @@ CodeGenTypes::GetFunctionType(const CGFunctionInfo &FI) {
   const ABIArgInfo &retAI = FI.getReturnInfo();
   switch (retAI.getKind()) {
   case ABIArgInfo::Expand:
+  case ABIArgInfo::ExpandFloorArgBuffer:
   case ABIArgInfo::IndirectAliased:
     llvm_unreachable("Invalid ABI kind for return argument");
 
   case ABIArgInfo::Extend:
   case ABIArgInfo::Direct:
+  case ABIArgInfo::DirectFloorArgBuffer:
     resultType = retAI.getCoerceToType();
     break;
 
@@ -2118,6 +2146,7 @@ CodeGenTypes::GetFunctionType(const CGFunctionInfo &FI) {
                                      ie = it + FI.getNumRequiredArgs();
   for (; it != ie; ++it, ++ArgNo) {
     const ABIArgInfo &ArgInfo = it->info;
+    const bool is_floor_arg_buffer = FI.getExtParameterInfo(ArgNo).isFloorArgBuffer();
 
     // Insert a padding type to ensure proper alignment.
     if (IRFunctionArgs.hasPaddingArg(ArgNo))
@@ -2163,6 +2192,14 @@ CodeGenTypes::GetFunctionType(const CGFunctionInfo &FI) {
       }
       break;
     }
+    case ABIArgInfo::DirectFloorArgBuffer: {
+      assert(CGM.getLangOpts().Vulkan && is_floor_arg_buffer);
+      assert(NumIRArgs == 1);
+      auto arg_type = convert_io_type_or_null(it->type, true);
+      assert(arg_type);
+      ArgTypes[FirstIRArg] = arg_type;
+      break;
+    }
 
     case ABIArgInfo::CoerceAndExpand: {
       auto ArgTypesIter = ArgTypes.begin() + FirstIRArg;
@@ -2174,8 +2211,9 @@ CodeGenTypes::GetFunctionType(const CGFunctionInfo &FI) {
     }
 
     case ABIArgInfo::Expand:
+    case ABIArgInfo::ExpandFloorArgBuffer:
       auto ArgTypesIter = ArgTypes.begin() + FirstIRArg;
-      getExpandedTypes(it->type, ArgTypesIter, FI.getASTCallingConvention());
+      getExpandedTypes(it->type, ArgTypesIter, FI.getASTCallingConvention(), is_floor_arg_buffer);
       assert(ArgTypesIter == ArgTypes.begin() + FirstIRArg + NumIRArgs);
       break;
     }
@@ -2719,6 +2757,7 @@ void CodeGenModule::ConstructAttributeList(StringRef Name,
       RetAttrs.addAttribute(llvm::Attribute::ZExt);
     LLVM_FALLTHROUGH;
   case ABIArgInfo::Direct:
+  case ABIArgInfo::DirectFloorArgBuffer:
     if (RetAI.getInReg())
       RetAttrs.addAttribute(llvm::Attribute::InReg);
     break;
@@ -2737,6 +2776,7 @@ void CodeGenModule::ConstructAttributeList(StringRef Name,
     break;
 
   case ABIArgInfo::Expand:
+  case ABIArgInfo::ExpandFloorArgBuffer:
   case ABIArgInfo::IndirectAliased:
     llvm_unreachable("Invalid ABI kind for return argument");
   }
@@ -2855,6 +2895,7 @@ void CodeGenModule::ConstructAttributeList(StringRef Name,
         Attrs.addAttribute(llvm::Attribute::ZExt);
       LLVM_FALLTHROUGH;
     case ABIArgInfo::Direct:
+    case ABIArgInfo::DirectFloorArgBuffer:
       if (ArgNo == 0 && FI.isChainCall())
         Attrs.addAttribute(llvm::Attribute::Nest);
       else if (AI.getInReg())
@@ -2912,6 +2953,7 @@ void CodeGenModule::ConstructAttributeList(StringRef Name,
     }
     case ABIArgInfo::Ignore:
     case ABIArgInfo::Expand:
+    case ABIArgInfo::ExpandFloorArgBuffer:
     case ABIArgInfo::CoerceAndExpand:
       break;
 
@@ -3110,6 +3152,8 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
          "Mismatch between function signature & arguments.");
   unsigned ArgNo = 0;
   CGFunctionInfo::const_arg_iterator info_it = FI.arg_begin();
+  FunctionArgList Args_for_param_decl_emission;
+  Args_for_param_decl_emission.reserve(Args.size());
   for (FunctionArgList::const_iterator i = Args.begin(), e = Args.end();
        i != e; ++i, ++info_it, ++ArgNo) {
     const VarDecl *Arg = *i;
@@ -3399,6 +3443,16 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
       break;
     }
 
+    case ABIArgInfo::DirectFloorArgBuffer: {
+      assert(getLangOpts().Vulkan && Arg->hasAttr<FloorArgBufferAttr>());
+      auto AI = Fn->getArg(FirstIRArg);
+      AI->addAttr(llvm::Attribute::get(getLLVMContext(), "vulkan_arg_buffer"));
+      auto param_addr_type = getTypes().convert_io_type_or_null(Ty, true);
+      assert(param_addr_type && AI->getType() == param_addr_type);
+      ArgVals.push_back(ParamValue::forDirect(AI));
+      break;
+    }
+
     case ABIArgInfo::CoerceAndExpand: {
       // Reconstruct into a temporary.
       Address alloca = CreateMemTemp(Ty, getContext().getDeclAlign(Arg));
@@ -3430,13 +3484,56 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
       ArgVals.push_back(ParamValue::forIndirect(Alloca));
 
       auto FnArgIter = Fn->arg_begin() + FirstIRArg;
-      ExpandTypeFromArgs(Ty, LV, FnArgIter, FI.getASTCallingConvention());
+      ExpandTypeFromArgs(Ty, LV, FnArgIter, FI.getASTCallingConvention(), FI.getExtParameterInfo(ArgNo).isFloorArgBuffer());
       assert(FnArgIter == Fn->arg_begin() + FirstIRArg + NumIRArgs);
       for (unsigned i = 0, e = NumIRArgs; i != e; ++i) {
         auto AI = Fn->getArg(FirstIRArg + i);
         AI->setName(Arg->getName() + "." + Twine(i));
       }
       break;
+    }
+
+    case ABIArgInfo::ExpandFloorArgBuffer: {
+		// must always be a floor argument buffer
+		assert(FI.getExtParameterInfo(ArgNo).isFloorArgBuffer());
+		
+		auto Exp = getTypeExpansion(Ty, getContext(), getTypes(), FI.getASTCallingConvention(), true);
+		auto FAExp = dyn_cast<FloorAggregateExpansion>(Exp.get());
+		// must always be a floor aggregate expansion
+		assert(FAExp);
+		
+		const auto cxx_rdecl = Ty->getAsCXXRecordDecl();
+		const auto flattened_rdecl = getTypes().getFlattenedFloorArgBufferType(cxx_rdecl);
+		// must always be a flattened record type (GraphicsIO type)
+		assert(flattened_rdecl);
+		
+		Address Alloca = CreateTempAlloca(flattened_rdecl, getContext().getDeclAlign(Arg), Arg->getName());
+		((llvm::Instruction*)Alloca.getPointer())->addAnnotationMetadata("vulkan_arg_buffer");
+		LValue LV = MakeAddrLValue(Alloca, Ty);
+		ArgVals.push_back(ParamValue::forIndirect(Alloca));
+		Args_for_param_decl_emission.push_back(Arg);
+		
+		uint32_t arg_idx = 0;
+		for (const auto& field : FAExp->fields) {
+			auto AI = Fn->getArg(FirstIRArg + arg_idx);
+			AI->setName(Arg->getName() + "." + Twine(arg_idx) + "_" + field.name);
+			
+			if (field.field_decl) {
+				// array of images and singular images
+				if (field.type->isArrayImageType(false)) {
+					LValue SubLV = EmitLValueForField(LV, field.field_decl, true);
+					Builder.CreateStore(&*AI, SubLV.getAddress(*this));
+				} else { // all else
+					LValue SubLV = EmitLValueForFieldInitialization(LV, field.field_decl, true);
+					ExpandTypeFromArgs(SubLV.getType(), SubLV, AI, FI.getASTCallingConvention(), true);
+				}
+			} else {
+				EmitStoreThroughLValue(RValue::get(&*AI), LV);
+			}
+			
+			++arg_idx;
+		}
+		break;
     }
 
     case ABIArgInfo::Ignore:
@@ -3450,14 +3547,21 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
       }
       break;
     }
+
+    // in most cases "Args_for_param_decl_emission" is just a copy of "Args",
+    // except for argument buffers (ExpandFloorArgBuffer) where we change the number and types of arguments
+    if (ArgI.getKind() != ABIArgInfo::ExpandFloorArgBuffer) {
+      Args_for_param_decl_emission.push_back(Arg);
+    }
   }
 
+  assert(Args_for_param_decl_emission.size() == ArgVals.size());
   if (getTarget().getCXXABI().areArgsDestroyedLeftToRightInCallee()) {
-    for (int I = Args.size() - 1; I >= 0; --I)
+    for (int I = Args_for_param_decl_emission.size() - 1; I >= 0; --I)
       EmitParmDecl(*Args[I], ArgVals[I], I + 1);
   } else {
-    for (unsigned I = 0, E = Args.size(); I != E; ++I)
-      EmitParmDecl(*Args[I], ArgVals[I], I + 1);
+    for (unsigned I = 0, E = Args_for_param_decl_emission.size(); I != E; ++I)
+      EmitParmDecl(*Args_for_param_decl_emission[I], ArgVals[I], I + 1);
   }
 }
 
@@ -3950,6 +4054,7 @@ void CodeGenFunction::EmitFunctionEpilog(const CGFunctionInfo &FI,
 
   case ABIArgInfo::Extend:
   case ABIArgInfo::Direct:
+  case ABIArgInfo::DirectFloorArgBuffer:
     if (RetAI.getCoerceToType() == ConvertType(RetTy) &&
         RetAI.getDirectOffset() == 0) {
       // The internal return value temp always will have pointer-to-return-type
@@ -4043,6 +4148,7 @@ void CodeGenFunction::EmitFunctionEpilog(const CGFunctionInfo &FI,
     break;
   }
   case ABIArgInfo::Expand:
+  case ABIArgInfo::ExpandFloorArgBuffer:
   case ABIArgInfo::IndirectAliased:
     llvm_unreachable("Invalid ABI kind for return argument");
   }
@@ -5463,6 +5569,23 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
       break;
     }
 
+    case ABIArgInfo::DirectFloorArgBuffer: {
+      assert(getLangOpts().Vulkan && CallInfo.getExtParameterInfo(ArgNo).isFloorArgBuffer());
+      if (I->hasLValue()) {
+        IRCallArgs[FirstIRArg] = I->getKnownLValue().getAddress(*this).getPointer();
+      } else {
+        const auto& RV = I->getKnownRValue();
+        if (RV.isScalar()) {
+          IRCallArgs[FirstIRArg] = RV.getScalarVal();
+        } else if (RV.isAggregate()) {
+          IRCallArgs[FirstIRArg] = RV.getAggregateAddress().getPointer();
+        } else {
+          assert(false && "should not be here");
+        }
+      }
+      break;
+    }
+
     case ABIArgInfo::CoerceAndExpand: {
       auto coercionType = ArgInfo.getCoerceAndExpandType();
       auto layout = CGM.getDataLayout().getStructLayout(coercionType);
@@ -5513,10 +5636,11 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
       break;
     }
 
-    case ABIArgInfo::Expand: {
+    case ABIArgInfo::Expand:
+    case ABIArgInfo::ExpandFloorArgBuffer: {
       unsigned IRArgPos = FirstIRArg;
       ExpandTypeToArgs(I->Ty, *I, IRFuncTy, IRCallArgs, IRArgPos,
-                       CallInfo.getASTCallingConvention());
+                       CallInfo.getASTCallingConvention(), CallInfo.getExtParameterInfo(ArgNo).isFloorArgBuffer());
       assert(IRArgPos == FirstIRArg + NumIRArgs);
       break;
     }
@@ -5911,7 +6035,8 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
       return GetUndefRValue(RetTy);
 
     case ABIArgInfo::Extend:
-    case ABIArgInfo::Direct: {
+    case ABIArgInfo::Direct:
+    case ABIArgInfo::DirectFloorArgBuffer: {
       llvm::Type *RetIRTy = ConvertType(RetTy);
       if (RetAI.getCoerceToType() == RetIRTy && RetAI.getDirectOffset() == 0) {
         switch (getEvaluationKind(RetTy)) {
@@ -5966,6 +6091,7 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
     }
 
     case ABIArgInfo::Expand:
+    case ABIArgInfo::ExpandFloorArgBuffer:
     case ABIArgInfo::IndirectAliased:
       llvm_unreachable("Invalid ABI kind for return argument");
     }

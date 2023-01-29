@@ -1892,6 +1892,33 @@ static FloorImageFlagsAttr* getFloorImageFlagsAttribute(const NamedDecl* decl_, 
 	return nullptr;
 }
 
+//! index handler to properly handle the cases where LLVM arg idx != logical arg idx
+struct arg_idx_handler_t {
+private:
+	//! actual LLVM argument index
+	uint32_t llvm_arg_idx { 0u };
+	//! internal logical argument index
+	uint32_t logical_arg_idx { 0u };
+	
+public:
+	void next(const uint32_t amount = 1u) {
+		llvm_arg_idx += amount;
+		logical_arg_idx += amount;
+	}
+	
+	void inc_llvm_arg_idx(const uint32_t amount) {
+		llvm_arg_idx += amount;
+	}
+	
+	auto get_llvm_arg_idx() const {
+		return llvm_arg_idx;
+	}
+	
+	auto get_logical_arg_idx() const {
+		return logical_arg_idx;
+	}
+};
+
 void CodeGenModule::GenOpenCLArgMetadata(llvm::Function *Fn,
 										 const FunctionDecl *FD,
 										 CodeGenFunction *CGF,
@@ -2158,19 +2185,35 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 	[[maybe_unused]] const bool is_tess_control = FD->hasAttr<GraphicsTessellationControlShaderAttr>(); // TODO: implement this!
 	[[maybe_unused]] const bool is_tess_eval = FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>(); // TODO: implement this!
 	
+	// define max argument buffer limits per stage
+	// NOTE: we require a minimum of 16 descriptor sets for argument buffer support (in kernels and shaders)
+	//! kernels only use 2 fixed sets
+	static constexpr const uint32_t max_argument_buffers_kernel { 14u };
+	//! with vertex, fragment, tess-control and tess-eval we a maximum of 4 shader stages that can be used simultaneously
+	//! -> 4 sets + immutable samplers set = 5 fixed sets
+	//! -> can use 16 - 5 = 11 sets by the use for argument buffers
+	//! -> allow 4 each for vertex and fragment, but only 3 for tess-eval (tess-control can not be user-defined)
+	static constexpr const uint32_t max_argument_buffers_vertex_fragment_shader { 4u };
+	static constexpr const uint32_t max_argument_buffers_tess_eval_shader { 3u };
+	const auto max_argument_buffers = (is_kernel ? max_argument_buffers_kernel :
+									   (is_vertex || is_fragment ? max_argument_buffers_vertex_fragment_shader :
+										max_argument_buffers_tess_eval_shader));
+	
 	SmallVector<llvm::Metadata*, 8> stage_infos;
 	stage_infos.push_back(llvm::MDString::get(VMContext, FD->getName()));
 	
 	static const std::string prefix_builtin = "builtin:";
 	static const std::string prefix_stage = "stage:";
 	static const std::string prefix_arg = "arg:";
+	static const std::string prefix_arg_buf = "argbuf:";
 	static const std::string prefix_iub = "iub:";
+	static const std::string prefix_ssbo = "ssbo:";
 	
 	//
 	const auto handle_stage_input_output = [this, &stage_infos, &is_vertex, &is_fragment](const QualType& clang_type,
 																						  llvm::Type* llvm_type,
 																						  const bool is_return,
-																						  uint32_t* arg_idx) {
+																						  arg_idx_handler_t* arg_idx) {
 		assert((arg_idx != nullptr && !is_return) || (arg_idx == nullptr && is_return) && "invalid args");
 		
 		const bool is_vertex_io = (is_return && is_vertex) || (!is_return && is_fragment);
@@ -2215,7 +2258,7 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 					llvm::Type* field_llvm_type = nullptr;
 					// get llvm type from function args (if !return), else get it from the struct type itself
 					if (arg_idx) {
-						field_llvm_type = std::next(Fn->arg_begin(), *arg_idx)->getType();
+						field_llvm_type = std::next(Fn->arg_begin(), arg_idx->get_llvm_arg_idx())->getType();
 					} else {
 						field_llvm_type = llvm_type->getStructElementType(struct_arg_idx++);
 					}
@@ -2262,9 +2305,10 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 					}
 					
 					// next
-					if (arg_idx) ++*arg_idx;
+					if (arg_idx) {
+						arg_idx->next();
+					}
 				}
-				if (arg_idx) --*arg_idx; // fixup, b/c of inc later
 			} else {
 				// stage defaults (can only be those)
 				if (is_vertex_io) {
@@ -2292,8 +2336,9 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 	const auto add_image_arg = [this, &stage_infos](const FloorImageFlagsAttr* flags_attr,
 													const FloorImageDataTypeAttr* data_type,
 													const std::string& name,
-													const uint32_t elem_count = 1,
-													const bool is_array = false) {
+													const uint32_t elem_count,
+													const bool is_array,
+													const std::string prefix) {
 		std::string access_str = "read";
 		if (flags_attr && flags_attr->isWriteOnly()) {
 			access_str = "write";
@@ -2310,21 +2355,24 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 			// else: just assume float
 		}
 		
-		stage_infos.push_back(llvm::MDString::get(VMContext, (prefix_arg + access_str +
+		stage_infos.push_back(llvm::MDString::get(VMContext, (prefix + access_str +
 															  (is_array ? ":array" : ":scalar") +
 															  ":" + std::to_string(elem_count) +
 															  ":" + sample_type_str)));
 	};
 	
-	uint32_t arg_idx = 0;
+	arg_idx_handler_t arg_idx;
 	uint32_t iub_count = 0;
+	uint32_t arg_buffer_count = 0;
 	for (const auto& parm : FD->parameters()) {
 		const auto clang_type = parm->getType();
-		auto arg_iter = std::next(Fn->arg_begin(), arg_idx);
+		auto arg_iter = std::next(Fn->arg_begin(), arg_idx.get_llvm_arg_idx());
 		const auto llvm_type = arg_iter->getType();
 		const auto cxx_rdecl = clang_type->getAsCXXRecordDecl();
 		
-		// TODO: put into static func
+		// flag that signals if "arg_idx" should be incremented at the end
+		bool inc_arg_idx_at_end = true;
+		
 		const auto compute_type_size = [this, &parm, &Fn](llvm::Type* type) {
 			if (!type->isSized()) {
 				auto err_diagID = getDiags().getCustomDiagID(DiagnosticsEngine::Fatal, "%0");
@@ -2350,6 +2398,110 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 		// stage input
 		if (parm->hasAttr<GraphicsStageInputAttr>()) {
 			handle_stage_input_output(clang_type, llvm_type, false, &arg_idx);
+			// don't inc arg idx at the end
+			inc_arg_idx_at_end = false;
+		} else if (parm->hasAttr<FloorArgBufferAttr>()) {
+			if (!getCodeGenOpts().VulkanDescriptorBufferSupport) {
+				// argument buffers are not support without descriptor buffer support
+				Error(parm->getSourceRange().getBegin(), "argument buffers are not support without Vulkan descriptor buffer support");
+				return;
+			}
+			if (!cxx_rdecl) {
+				Error(parm->getSourceRange().getBegin(), "argument buffer element type must be a struct or class");
+				return;
+			}
+			
+			// limit is defined at the start of this function (depends on the function type)
+			if (arg_buffer_count >= max_argument_buffers) {
+				Error(parm->getSourceRange().getBegin(), "reached the limit of argument buffers that can be used per stage/function");
+				return;
+			}
+			const auto this_arg_buf_prefix = prefix_arg_buf + std::to_string(arg_buffer_count) + ":";
+			++arg_buffer_count;
+			
+			// get argument buffer class/struct fields and check for forbidden types
+			const auto fields = get_aggregate_fields(cxx_rdecl);
+			for (const auto& field : fields) {
+				if (field->isAnonymousStructOrUnion()) {
+					Error(parm->getSourceRange().getBegin(), "argument buffer may not contain anonymous structs/unions");
+					return;
+				} else if (field->isBitField()) {
+					Error(parm->getSourceRange().getBegin(), "argument buffer may not contain bitfields");
+					return;
+				}
+			}
+			
+			uint32_t arg_buffer_arg_idx = 0;
+			for (const auto& field : fields) {
+				auto field_type = field->getType();
+				auto llvm_field_type = getTypes().ConvertTypeForMem(field_type, false, false, false /* want proper image arrays in Vulkan */);
+				
+				// tag as argument buffer
+				arg_iter->addAttr(llvm::Attribute::get(getLLVMContext(), "vulkan_arg_buffer"));
+				
+				if (field_type->isArrayImageType(true)) {
+					const auto array_image_info = get_array_image_info(field_type->getAsCXXRecordDecl(), getContext());
+					if (array_image_info) {
+						add_image_arg(array_image_info->flags,
+									  array_image_info->data_type,
+									  field->getName().str(),
+									  array_image_info->element_count,
+									  true /* always an array */,
+									  this_arg_buf_prefix + prefix_arg);
+					} else {
+						Error(field->getSourceRange().getBegin(), "invalid image array in indirect/argument buffer!");
+						return;
+					}
+				} else if (field_type->isAggregateImageType()) {
+					const auto agg_images = get_aggregate_image_fields(field_type->getAsCXXRecordDecl());
+					for (const auto& img : agg_images) {
+						uint32_t elem_count = 1;
+						bool is_array = false;
+						if (img->getType()->isPointerType()) {
+							elem_count = Context.getAsConstantArrayType(img->getType()->getPointeeType())->getSize().getZExtValue();
+							is_array = true;
+						}
+						add_image_arg(img->getAttr<FloorImageFlagsAttr>(),
+									  img->getAttr<FloorImageDataTypeAttr>(),
+									  field->getName().str(),
+									  elem_count,
+									  is_array,
+									  this_arg_buf_prefix + prefix_arg);
+					}
+				} else if (!field_type->isReferenceType() && !field_type->isPointerType() &&
+						   compute_type_size(llvm_field_type) <= getCodeGenOpts().VulkanIUBSize &&
+						   iub_count < getCodeGenOpts().VulkanIUBCount) {
+					// argument buffer IUB use will count against overall IUB count
+					stage_infos.push_back(llvm::MDString::get(VMContext, this_arg_buf_prefix + prefix_iub + std::to_string(iub_count)));
+					++iub_count;
+					
+					// tag as IUB
+					arg_iter->addAttr(llvm::Attribute::get(getLLVMContext(), "vulkan_iub"));
+					
+					// add deref and readonly attributes if none exist yet
+					if (!arg_iter->hasAttribute(llvm::Attribute::Dereferenceable) &&
+						!arg_iter->hasAttribute(llvm::Attribute::DereferenceableOrNull)) {
+						arg_iter->addAttr(llvm::Attribute::getWithDereferenceableBytes(getLLVMContext(), compute_type_size(llvm_field_type)));
+					}
+					if (!arg_iter->onlyReadsMemory()) {
+						arg_iter->addAttr(llvm::Attribute::ReadOnly);
+					}
+				} else {
+					if (field->hasAttr<FloorArgBufferAttr>()) {
+						Error(field->getSourceRange().getBegin(), "recursive argument buffers are not supported");
+						return;
+					} else if (field->hasAttr<GraphicsStageInputAttr>()) {
+						Error(field->getSourceRange().getBegin(), "stage input is not supported in argument buffers");
+						return;
+					}
+					
+					// SSBO arg
+					stage_infos.push_back(llvm::MDString::get(VMContext, this_arg_buf_prefix + prefix_ssbo + "none"));
+				}
+				++arg_buffer_arg_idx;
+				arg_iter = std::next(Fn->arg_begin(), arg_idx.get_llvm_arg_idx() + arg_buffer_arg_idx);
+			}
+			arg_idx.inc_llvm_arg_idx(arg_buffer_arg_idx - 1u /* -1, b/c arg itself is inc'ed later */);
 		} else if (clang_type->isArrayImageType(true)) { // image array
 			const auto array_image_info = get_array_image_info(cxx_rdecl, Context);
 			if (array_image_info) {
@@ -2357,7 +2509,8 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 							  array_image_info->data_type,
 							  parm->getName().str(),
 							  array_image_info->element_count,
-							  true /* always an array */);
+							  true /* always an array */,
+							  prefix_arg);
 			}
 		} else if (clang_type->isAggregateImageType()) { // aggregate image
 			const auto agg_images = get_aggregate_image_fields(clang_type->getAsCXXRecordDecl());
@@ -2372,18 +2525,18 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 							  img->getAttr<FloorImageDataTypeAttr>(),
 							  parm->getName().str(),
 							  elem_count,
-							  is_array);
+							  is_array,
+							  prefix_arg);
 				
-				// next llvm arg
-				++arg_idx;
+				// next arg
+				arg_idx.next();
 			}
-			// fix up llvm arg count (will inc again after this)
-			--arg_idx;
+			// don't inc arg idx at the end
+			inc_arg_idx_at_end = false;
 		}
 		// make parameters a IUB if their size is <= the size limit and we are still below the IUB count limit
 		else if (clang_type->isReferenceType() &&
 				 clang_type->getPointeeType().getAddressSpace() == LangAS::opencl_constant &&
-				 parm->getAttr<FloorArgBufferAttr>() == nullptr /* must not be an argument buffer */ &&
 				 compute_type_size(llvm_type->getPointerElementType()) <= getCodeGenOpts().VulkanIUBSize &&
 				 iub_count < getCodeGenOpts().VulkanIUBCount) {
 			stage_infos.push_back(llvm::MDString::get(VMContext, prefix_iub + std::to_string(iub_count)));
@@ -2392,43 +2545,19 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 			// tag as IUB
 			arg_iter->addAttr(llvm::Attribute::get(getLLVMContext(), "vulkan_iub"));
 		} else { // anything else
-			stage_infos.push_back(llvm::MDString::get(VMContext, "none"));
-			
-			if (parm->getAttr<FloorArgBufferAttr>() != nullptr) {
-				// tag as argument buffer
-				arg_iter->addAttr(llvm::Attribute::get(getLLVMContext(), "vulkan_arg_buffer"));
-				
-				// validate argument buffer types: currently, images are not supported
-				const auto clang_pointee_type = clang_type->getPointeeType();
-				const auto type_rdecl = clang_pointee_type->getAsCXXRecordDecl();
-				if (!type_rdecl) {
-					auto err_diagID = getDiags().getCustomDiagID(DiagnosticsEngine::Fatal, "%0");
-					getDiags().Report(parm->getSourceRange().getBegin(), err_diagID) << "expected a C++ record declaration";
-				}
-				// struct -> recursively check fields
-				const auto fields = get_aggregate_fields(type_rdecl);
-				for (const auto& field : fields) {
-					auto field_type = field->getType();
-					if (field_type->isImageType() ||
-						field_type->isArrayImageType(true) ||
-						field_type->isAggregateImageType()) {
-						auto err_diagID = getDiags().getCustomDiagID(DiagnosticsEngine::Error, "%0");
-						getDiags().Report(field->getSourceRange().getBegin(), err_diagID) << "image types are not supported in argument buffers with Vulkan";
-						auto fatal_diagID = getDiags().getCustomDiagID(DiagnosticsEngine::Fatal, "%0");
-						getDiags().Report(parm->getSourceRange().getBegin(), fatal_diagID) << "unsupported argument buffer content";
-					}
-				}
-			}
+			stage_infos.push_back(llvm::MDString::get(VMContext, prefix_ssbo + "none"));
 		}
 		
 		// next llvm arg
-		++arg_idx;
+		if (inc_arg_idx_at_end) {
+			arg_idx.next();
+		}
 	}
 	
 	// add fixed input
 	if (getCodeGenOpts().VulkanSoftPrintf > 0) {
 		// soft-printf buffer metadata (plain parameter/buffer)
-		stage_infos.push_back(llvm::MDString::get(VMContext, "none"));
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_ssbo + "none"));
 	}
 	if (is_kernel) {
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "global_invocation_id"));
@@ -2464,22 +2593,30 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 }
 
 static bool is_indirect_buffer(const clang::QualType& type, CodeGenModule &CGM,
-							   const bool has_arg_buffer_attr) {
+							   const bool is_floor_arg_buffer) {
 	if (type.isNull()) {
 		return false;
 	}
 	
-	const auto clang_pointee_type = type->getPointeeType();
-	const auto llvm_type = CGM.getTypes().ConvertTypeForMem(type);
-	const auto llvm_pointee_type = llvm_type->getPointerElementType();
+	const auto converted_llvm_type = CGM.getTypes().ConvertTypeForMem(type);
+	QualType clang_pointee_type;
+	llvm::Type* llvm_pointee_type = nullptr;
+	if (is_floor_arg_buffer && CGM.getLangOpts().Vulkan) {
+		clang_pointee_type = (type->isPointerType() ? type->getPointeeType() : type);
+		llvm_pointee_type = (converted_llvm_type->isPointerTy() ? converted_llvm_type->getPointerElementType() : converted_llvm_type);
+	} else {
+		clang_pointee_type = type->getPointeeType();
+		llvm_pointee_type = converted_llvm_type->getPointerElementType();
+	}
 	
 	// CUDA/Host-Compute: must have had floor arg buffer attribute on the original decl
 	// otherwise: check if in constant address space
-	const auto is_arg_buffer = (!CGM.getLangOpts().CUDA && !CGM.getLangOpts().FloorHostCompute ?
+	const auto is_arg_buffer = (!CGM.getLangOpts().CUDA && !CGM.getLangOpts().FloorHostCompute && !CGM.getLangOpts().Vulkan ?
 								(clang_pointee_type.getAddressSpace() == LangAS::opencl_constant) :
-								has_arg_buffer_attr);
+								is_floor_arg_buffer);
 	
-	if (type->isReferenceType() && llvm_pointee_type->isStructTy() && is_arg_buffer) {
+	if ((type->isReferenceType() || (CGM.getLangOpts().Vulkan && type->isRecordType())) &&
+		llvm_pointee_type->isStructTy() && is_arg_buffer) {
 		// initial requirements are fulfilled
 		// -> need to recursively check for any pointers/buffers/images now (if none are found, this is a normal struct/param)
 		const std::function<bool(const clang::QualType&)> indirect_checker = [&indirect_checker](const clang::QualType& type) {
@@ -3561,6 +3698,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				nullptr,
 				{},
 				(cxx_rdecl && cxx_rdecl->hasAttr<VectorCompatAttr>()),
+				false,
 				false
 			}, true);
 		}
@@ -3721,6 +3859,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				nullptr,
 				{},
 				(cxx_rdecl && cxx_rdecl->hasAttr<VectorCompatAttr>()),
+				false,
 				false
 			}, 0);
 		}
@@ -3817,21 +3956,25 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 	// iterate over clang function decl parameters
 	// NOTE: in case of struct expansion, this doesn't match the llvm parameters
 	// (which is why it iterates over the original clang list!)
-	unsigned int arg_idx = 0;
+	arg_idx_handler_t arg_idx;
 	auto abi_arg_info_iter = FnInfo.arg_begin();
 	uint32_t vulkan_iub_count = 0;
 	for (const auto& parm : FD->parameters()) {
 		const auto clang_type = parm->getType();
-		const auto llvm_type = std::next(Fn->arg_begin(), arg_idx)->getType();
+		const auto llvm_type = std::next(Fn->arg_begin(), arg_idx.get_llvm_arg_idx())->getType();
 		const auto cxx_rdecl = clang_type->getAsCXXRecordDecl();
 		
 		enum class FLOOR_ARG_INFO : uint64_t {
 			// 0 == invalid!
 			NONE						= (0ull),
 			
+			// sets: -------- 000000-- -------- -------- xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx
+			__SIZE_SHIFT				= (0ull),
+			__SIZE_MASK					= (0x0000'0000'FFFF'FFFFull),
+			
 			// sets: -------- 000000-- -------- 00000xxx 00000000 00000000 00000000 00000000
 			__AS_SHIFT					= (32ull),
-			__AS_MASK					= (0x0000000700000000ull),
+			__AS_MASK					= (0x0000'0007'0000'0000ull),
 			AS_NONE						= NONE,
 			AS_GLOBAL					= (1ull << __AS_SHIFT),
 			AS_LOCAL					= (2ull << __AS_SHIFT),
@@ -3840,7 +3983,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 			
 			// sets: -------- 000000-- xxxxxxxx 00000--- 00000000 00000000 00000000 00000000
 			__IMG_TYPE_SHIFT			= (40ull),
-			__IMG_TYPE_MASK				= (0x0000FF0000000000ull),
+			__IMG_TYPE_MASK				= (0x0000'FF000'0000'000ull),
 			IMG_1D						= (1ull << __IMG_TYPE_SHIFT),
 			IMG_1D_ARRAY				= (2ull << __IMG_TYPE_SHIFT),
 			IMG_1D_BUFFER				= (3ull << __IMG_TYPE_SHIFT),
@@ -3860,14 +4003,14 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 			
 			// sets: -------- 000000xx -------- 00000--- 00000000 00000000 00000000 00000000
 			__IMG_ACCESS_SHIFT			= (48ull),
-			__IMG_ACCESS_MASK			= (0x0003000000000000ull),
+			__IMG_ACCESS_MASK			= (0x0003'0000'0000'0000ull),
 			IMG_ACCESS_READ				= (1ull << __IMG_ACCESS_SHIFT),
 			IMG_ACCESS_WRITE			= (2ull << __IMG_ACCESS_SHIFT),
 			IMG_ACCESS_READ_WRITE		= (IMG_ACCESS_READ | IMG_ACCESS_WRITE),
 			
 			// sets: xxxxxxxx 000000-- -------- 00000--- 00000000 00000000 00000000 00000000
 			__SPECIAL_TYPE_SHIFT		= (56ull),
-			__SPECIAL_TYPE_MASK			= (0xFF00000000000000ull),
+			__SPECIAL_TYPE_MASK			= (0xFF00'0000'0000'0000ull),
 			STAGE_INPUT					= (1ull << __SPECIAL_TYPE_SHIFT),
 			PUSH_CONSTANT				= (2ull << __SPECIAL_TYPE_SHIFT),
 			SSBO						= (3ull << __SPECIAL_TYPE_SHIFT),
@@ -4078,19 +4221,28 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 			return arg_info;
 		};
 		//
-		const std::function<uint64_t(const clang::QualType&, const NamedDecl&, const bool, const bool, const bool, const uint32_t)>
+		const std::function<std::pair<uint64_t, uint32_t>(const clang::QualType&, const NamedDecl&, const bool, const bool, const bool, const uint32_t)>
 		add_buffer_arg = [this, &CGM, &vulkan_iub_count, &compute_type_size, &arg_buf_info, &Fn, /*&add_buffer_arg,*/ &add_normal_arg,
 						  &add_image_arg, &add_aggregate_image_arg](const clang::QualType& type,
 																	const NamedDecl& decl,
 																	const bool is_top_level,
 																	const bool is_indirect, // specifies if we're within an indirect buffer
-																	const bool has_arg_buffer_attr,
-																	const uint32_t arg_idx) -> uint64_t /* arg info */ {
-			const auto clang_pointee_type = type->getPointeeType();
-			const auto llvm_type = CGM.getTypes().ConvertTypeForMem(type);
-			const auto llvm_pointee_type = llvm_type->getPointerElementType();
+																	const bool is_floor_arg_buffer,
+																	const uint32_t logical_arg_idx)
+		-> std::pair<uint64_t /* arg info */, uint32_t /* #args in arg buffer */> {
+			const auto converted_llvm_type = CGM.getTypes().ConvertTypeForMem(type);
+			QualType clang_pointee_type;
+			llvm::Type* llvm_pointee_type = nullptr;
+			if (is_floor_arg_buffer && CGM.getLangOpts().Vulkan) {
+				// if this is a Vulkan arg buffer, these might not necessarily be pointers
+				clang_pointee_type = (type->isPointerType() ? type->getPointeeType() : type);
+				llvm_pointee_type = (converted_llvm_type->isPointerTy() ? converted_llvm_type->getPointerElementType() : converted_llvm_type);
+			} else {
+				clang_pointee_type = type->getPointeeType();
+				llvm_pointee_type = converted_llvm_type->getPointerElementType();
+			}
 			
-			const auto indirect_buffer = is_indirect_buffer(type, CGM, has_arg_buffer_attr);
+			const auto indirect_buffer = is_indirect_buffer(type, CGM, is_floor_arg_buffer);
 			
 			const uint64_t arg_size = compute_type_size(llvm_pointee_type);
 			uint64_t arg_info = arg_size;
@@ -4125,6 +4277,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 			}
 			
 			//
+			uint32_t arg_buffer_arg_idx = 0;
 			if (indirect_buffer || is_indirect) {
 				if (const auto pointee_rdecl = clang_pointee_type->getAsCXXRecordDecl()) {
 					// TODO: this is not ideal and doesn't handle properly handle unions
@@ -4155,11 +4308,10 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 						// #3: function flags
 						this_arg_buf_info << "0,"; // none for argument buffers
 						// #4: argument index in function
-						this_arg_buf_info << arg_idx << ",";
+						this_arg_buf_info << logical_arg_idx << ",";
 						// #5/6: 0 / unused for argument buffers
 						this_arg_buf_info << "0,0,";
 						
-						uint32_t field_arg_idx = 0;
 						for (const auto& field : fields) {
 							auto field_type = field->getType();
 							auto llvm_field_type = CGM.getTypes().ConvertTypeForMem(field_type);
@@ -4169,9 +4321,20 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 								if (field_type->isPointerType() || field_type->isReferenceType()) {
 									// buffer field
 									// TODO: handle recursive arg buffers -> for now, ignore this and add it as a 8-byte sized normal arg
-									//const auto field_arg_info = add_buffer_arg(field_type, **field, false, true, false, field_arg_idx);
+									//const auto field_arg_info = add_buffer_arg(field_type, **field, false, true, false, arg_buffer_arg_idx).first;
 									//this_arg_buf_info << field_arg_info << ",";
-									this_arg_buf_info << "8,";
+									uint64_t field_arg_info = 8; // ptr size is always 8
+									const auto field_pointee_type = field_type->getPointeeType();
+									field_arg_info |= (uint64_t)to_fas(field_pointee_type.getAddressSpace());
+									if (CGM.getLangOpts().Vulkan) {
+										// flag this as an SSBO for Vulkan
+										if (field_pointee_type.getAddressSpace() != LangAS::opencl_global) {
+											CGM.Error(field->getSourceRange().getBegin(), StringRef("invalid address space for buffer inside argument buffer"));
+											return {};
+										}
+										field_arg_info |= (uint64_t)FLOOR_ARG_INFO::SSBO;
+									}
+									this_arg_buf_info << field_arg_info << ",";
 								} else if (field_type->isImageType()) {
 									const auto field_arg_info = add_image_arg(img_type_to_floor_type(field_type.getTypePtr()),
 																			  get_image_access(decl.getAttr<FloorImageFlagsAttr>()));
@@ -4184,7 +4347,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 																				  array_image_info->element_count);
 										this_arg_buf_info << field_arg_info << ",";
 									} else {
-										CGM.Error(decl.getSourceRange().getBegin(), StringRef("invalid image array in indirect/argument buffer!"));
+										CGM.Error(field->getSourceRange().getBegin(), StringRef("invalid image array in indirect/argument buffer!"));
 										return {};
 									}
 								} else if (field_type->isAggregateImageType()) {
@@ -4197,27 +4360,51 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 									this_arg_buf_info << agg_img_ret->arg_info << ",";
 								} else if (decl.hasAttr<GraphicsStageInputAttr>()) {
 									// hard error
-									CGM.Error(decl.getSourceRange().getBegin(), StringRef("stage input is not supported in indirect/argument buffers"));
+									CGM.Error(field->getSourceRange().getBegin(), StringRef("stage input is not supported in indirect/argument buffers"));
 									return {};
 								} else {
 									// value / "indirect constant"
-									const auto field_arg_info = add_normal_arg(llvm_field_type, field_type, nullptr, nullptr);
+									auto field_arg_info = add_normal_arg(llvm_field_type, field_type, nullptr, nullptr);
+									if (CGM.getLangOpts().Vulkan) {
+										// this is not a pointer in Vulkan -> must manually set the address space
+										assert(!field_type->isPointerType() && !field_type->isReferenceType());
+										field_arg_info |= (uint64_t)FLOOR_ARG_INFO::AS_CONSTANT;
+										// check if this can be an IUB, flag it if so
+										const auto field_arg_size = (field_arg_info & (uint64_t)FLOOR_ARG_INFO::__SIZE_MASK);
+										if (field_arg_size <= CGM.getCodeGenOpts().VulkanIUBSize &&
+											vulkan_iub_count < CGM.getCodeGenOpts().VulkanIUBCount) {
+											field_arg_info |= (uint64_t)FLOOR_ARG_INFO::IUB;
+											++vulkan_iub_count;
+										}
+									}
 									this_arg_buf_info << field_arg_info << ",";
 								}
 							}
-							++field_arg_idx;
+							++arg_buffer_arg_idx;
 						}
 						arg_buf_info << this_arg_buf_info.str() << "\n";
 					}
 				}
 			}
 			
-			return arg_info;
+			return { arg_info, arg_buffer_arg_idx };
 		};
 		
+		// flag that signals if "arg_idx" should be incremented at the end
+		bool inc_arg_idx_at_end = true;
+		
+		// argument buffer specific flags
+		const auto is_floor_arg_buffer = (parm->getAttr<FloorArgBufferAttr>() != nullptr);
+		const auto is_vk_arg_buffer = (getLangOpts().Vulkan && is_floor_arg_buffer);
+		
 		// #2+: argument sizes + types
-		if (clang_type->isPointerType() || clang_type->isReferenceType()) {
-			const auto arg_info = add_buffer_arg(clang_type, *parm, true, false, (parm->getAttr<FloorArgBufferAttr>() != nullptr), arg_idx);
+		if (clang_type->isPointerType() || clang_type->isReferenceType() || is_vk_arg_buffer) {
+			auto [arg_info, arg_buffer_arg_count] = add_buffer_arg(clang_type, *parm, true, false, is_floor_arg_buffer, arg_idx.get_logical_arg_idx());
+			if (is_vk_arg_buffer) {
+				// argument buffers are expanded in Vulkan
+				// -> need to increment LLVM arg idx accordingly, but keep clang arg idx
+				arg_idx.inc_llvm_arg_idx(arg_buffer_arg_count - 1u /* -1, b/c arg itself is inc'ed later */);
+			}
 			info << arg_info << ",";
 		} else if (clang_type->isImageType()) { // handle image types
 			const auto arg_info = add_image_arg(img_type_to_floor_type(clang_type.getTypePtr()),
@@ -4246,7 +4433,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 				return; // error already printed
 			}
 			info << agg_img_ret->arg_info << ",";
-			arg_idx += agg_img_ret->arg_index_bias;
+			arg_idx.next(agg_img_ret->arg_index_bias);
 		} else if (getLangOpts().CUDA || getLangOpts().FloorHostCompute) { // handle non-pointer parameters
 			// is this an aggregate that is expanded into multiple llvm arguments?
 			if (cxx_rdecl &&
@@ -4266,13 +4453,13 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 					uint64_t arg_info = 0; // sizes will be accumulated
 					const auto fields = get_aggregate_fields(cxx_rdecl);
 					for (size_t i = 0; i < fields.size(); ++i) {
-						const auto field_llvm_type = std::next(Fn->arg_begin(), arg_idx)->getType();
+						const auto field_llvm_type = std::next(Fn->arg_begin(), arg_idx.get_llvm_arg_idx())->getType();
 						arg_info += compute_type_size(field_llvm_type);
-						++arg_idx;
+						arg_idx.next();
 					}
 					arg_info |= (uint64_t)FLOOR_ARG_INFO::AS_CONSTANT;
 					info << arg_info << ",";
-					--arg_idx; // fixup, b/c of inc later
+					inc_arg_idx_at_end = false; // don't inc arg idx later
 				} else { // -> indirect
 					// simple aggregate, all constant -> single pointer on either side of clang/llvm
 					uint64_t arg_info = 0;
@@ -4299,12 +4486,12 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 				const auto fields = CGM.getTypes().get_aggregate_scalar_fields(cxx_rdecl, cxx_rdecl);
 				for (const auto& field : fields) {
 					// TODO: check if field type is int or float!
-					const auto field_llvm_type = std::next(Fn->arg_begin(), arg_idx)->getType();
+					const auto field_llvm_type = std::next(Fn->arg_begin(), arg_idx.get_llvm_arg_idx())->getType();
 					const auto arg_info = add_normal_arg(field_llvm_type, field.type, field.parents[0], field.field_decl, FLOOR_ARG_INFO::STAGE_INPUT);
 					info << arg_info << ",";
-					++arg_idx;
+					arg_idx.next();
 				}
-				--arg_idx; // fixup, b/c of inc later
+				inc_arg_idx_at_end = false; // don't inc arg idx later
 			} else {
 				// add as-is
 				// TODO: check if type is int or float!
@@ -4317,7 +4504,9 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 		}
 		
 		// next arg
-		++arg_idx;
+		if (inc_arg_idx_at_end) {
+			arg_idx.next();
+		}
 		++abi_arg_info_iter;
 	}
 	
@@ -4330,11 +4519,13 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 #endif
 	
 	// if this is wrong, the kernel will almost certainly not be usable
-	arg_idx += CGM.getTypes().getMetalVulkanImplicitArgCount(FD); // account for implicit args
-	if (arg_idx != Fn->arg_size()) {
+	arg_idx.next(CGM.getTypes().getMetalVulkanImplicitArgCount(FD)); // account for implicit args
+	if (arg_idx.get_llvm_arg_idx() != Fn->arg_size()) {
 		// signal that this is _very_ bad
-		auto err_diagID = CGM.getDiags().getCustomDiagID(DiagnosticsEngine::Fatal, "kernel function parameter count mismatch: %0 (clang), %1 (llvm)");
-		CGM.getDiags().Report(FD->getSourceRange().getBegin(), err_diagID) << std::to_string(arg_idx) << std::to_string(Fn->arg_size());
+		auto err_diagID = CGM.getDiags().getCustomDiagID(DiagnosticsEngine::Fatal,
+														 "kernel function parameter count mismatch: %0 (handled LLVM arguments), "
+														 "%1 (LLVM function argument count)");
+		CGM.getDiags().Report(FD->getSourceRange().getBegin(), err_diagID) << std::to_string(arg_idx.get_llvm_arg_idx()) << std::to_string(Fn->arg_size());
 		
 		auto llvm_note_diagID = CGM.getDiags().getCustomDiagID(DiagnosticsEngine::Note, "LLVM function type: %0");
 		std::string llvm_fun_type = "";
@@ -7704,40 +7895,61 @@ llvm::Type* CodeGenModule::GraphicsExpandIOType(const QualType& type,
 												llvm::Type* llvm_type,
 												CodeGenTypes& CGT,
 												const bool create_packed,
-												const bool create_unnamed) {
+												const bool create_unnamed,
+												const bool is_floor_arg_buffer) {
 	const llvm::StructType* ST = dyn_cast<llvm::StructType>(llvm_type);
 	if(!ST) return llvm_type;
 	
 	const auto cxx_rdecl = type->getAsCXXRecordDecl();
 	
 	// if the top decl already is a compat vector, return it directly
-	if(cxx_rdecl->hasAttr<VectorCompatAttr>()) {
+	if (cxx_rdecl->hasAttr<VectorCompatAttr>()) {
 		return CGT.ConvertType(Context.get_compat_vector_type(cxx_rdecl));
 	}
 	
 	// check if we already handled this
-	const auto existing_flattened_type = CGT.getFlattenedRecordType(cxx_rdecl);
+	const auto is_vk_floor_arg_buffer = (is_floor_arg_buffer && getLangOpts().Vulkan);
+	const auto existing_flattened_type = (!is_vk_floor_arg_buffer ?
+										  CGT.getFlattenedRecordType(cxx_rdecl) :
+										  CGT.getFlattenedFloorArgBufferType(cxx_rdecl));
 	if (existing_flattened_type) {
 		return existing_flattened_type;
 	}
 	
 	// else: extract all fields and create a flat llvm struct from them
-	const auto fields = CGT.get_aggregate_scalar_fields(cxx_rdecl, cxx_rdecl);
+	const auto fields = CGT.get_aggregate_scalar_fields(cxx_rdecl, cxx_rdecl, false, is_vk_floor_arg_buffer, false,
+														!is_vk_floor_arg_buffer /* do not expand arrays if this is an arg buffer*/,
+														is_vk_floor_arg_buffer /* use array parent field decls for non-expanded arrays (-> unique) + singular childs */);
 	std::vector<llvm::Type*> llvm_fields;
-	for(const auto& field : fields) {
-		llvm_fields.push_back(CGT.ConvertType(field.type));
+	for (const auto& field : fields) {
+		auto llvm_field_type = CGT.ConvertType(field.type, true, !is_floor_arg_buffer);
+		if (is_floor_arg_buffer) {
+			// transform fields of image arrays into pointers to image arrays
+			if (llvm_field_type->isImageArrayType()) {
+				// transform fields of image arrays into pointers to image arrays
+				llvm_field_type = llvm::PointerType::get(llvm_field_type, 0u);
+			} else if (!llvm_field_type->isPointerTy() && !field.type->isAggregateImageType()) {
+				// transform non-pointer (buffer) fields into pointers in the constant address space (will be IUBs or SSBOs later on)
+				llvm_field_type = llvm::PointerType::get(llvm_field_type, getContext().getTargetAddressSpace(LangAS::opencl_constant));
+			}
+		}
+		llvm_fields.push_back(llvm_field_type);
 	}
 	
 	llvm::StructType* ret = nullptr;
 	if (!create_unnamed) {
-		const std::string name = "struct.floor.flat." + cxx_rdecl->getName().str() + (create_packed ? ".packed" : "");
+		std::string name = "struct.floor.flat.";
+		if (is_vk_floor_arg_buffer) {
+			name += "arg_buffer.";
+		}
+		name += cxx_rdecl->getName().str() + (create_packed ? ".packed" : "");
 		ret = llvm::StructType::create(llvm_fields, name, create_packed);
 	} else {
 		// TODO/NOTE: this can't handle complex types yet!
 		ret = llvm::StructType::get(CGT.getLLVMContext(), llvm_fields, create_packed);
 	}
 	ret->setGraphicsIOType(); // fix up alignment/sizes/offsets
-	CGT.create_flattened_cg_layout(cxx_rdecl, ret, fields); // create corresponding flattend CGRecordLayout
+	CGT.create_flattened_cg_layout(cxx_rdecl, ret, fields, is_vk_floor_arg_buffer); // create corresponding flattend CGRecordLayout
 	return ret;
 }
 
@@ -7749,23 +7961,27 @@ void CodeGenModule::EmitGlobalFunctionDefinition(GlobalDecl GD,
   const CGFunctionInfo &FI = getTypes().arrangeGlobalDeclaration(GD);
   if (D && (getLangOpts().Metal || getLangOpts().Vulkan)) {
     // TODO: do this properly in CGCall
-    // if this is a shader function and we have an I/O type that is a struct/aggregate,
+    // if this is a shader or a kernel function and we have an I/O type that is a struct/aggregate,
     // fully expand/flatten all types within (i.e. structs and arrays to scalars, keep existing scalars)
     if (D->hasAttr<GraphicsVertexShaderAttr>() || D->hasAttr<GraphicsFragmentShaderAttr>() ||
-        D->hasAttr<GraphicsTessellationControlShaderAttr>() || D->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
-		//const bool is_metal_2_3 = (getLangOpts().MetalVersion >= 230); // TODO/NOTE: disabled for now, see above
-		const bool is_metal_2_3 = false;
-		if (FI.getReturnType()->isStructureOrClassType()) {
-			auto& retInfo = const_cast<ABIArgInfo&>(FI.getReturnInfo());
-			retInfo.setCoerceToType(GraphicsExpandIOType(FI.getReturnType(), retInfo.getCoerceToType(), getTypes(), true, is_metal_2_3));
-		}
-		for (const auto& param : D->parameters()) {
-			const auto param_type = param->getType();
-			if (param_type->isStructureOrClassType() && param->hasAttr<GraphicsStageInputAttr>()) {
-				auto llvm_param_type = getTypes().ConvertType(param_type);
-				(void)GraphicsExpandIOType(param_type, llvm_param_type, getTypes(), is_metal_2_3);
-			}
-		}
+        D->hasAttr<GraphicsTessellationControlShaderAttr>() || D->hasAttr<GraphicsTessellationEvaluationShaderAttr>() ||
+        D->hasAttr<ComputeKernelAttr>()) {
+      //const bool is_metal_2_3 = (getLangOpts().MetalVersion >= 230); // TODO/NOTE: disabled for now, see above
+      const bool is_metal_2_3 = false;
+      if (FI.getReturnType()->isStructureOrClassType()) {
+        auto& retInfo = const_cast<ABIArgInfo&>(FI.getReturnInfo());
+        retInfo.setCoerceToType(GraphicsExpandIOType(FI.getReturnType(), retInfo.getCoerceToType(), getTypes(), true, is_metal_2_3));
+      }
+      for (const auto& param : D->parameters()) {
+        const auto param_type = param->getType();
+        if (param_type->isStructureOrClassType()) {
+          const auto is_vulkan_arg_buffer = (getLangOpts().Vulkan && param->hasAttr<FloorArgBufferAttr>());
+          if (param->hasAttr<GraphicsStageInputAttr>() || is_vulkan_arg_buffer) {
+            auto llvm_param_type = getTypes().ConvertType(param_type, true, !is_vulkan_arg_buffer);
+            (void)GraphicsExpandIOType(param_type, llvm_param_type, getTypes(), false, is_metal_2_3, is_vulkan_arg_buffer);
+          }
+        }
+      }
     }
   }
   llvm::FunctionType *Ty = getTypes().GetFunctionType(FI);

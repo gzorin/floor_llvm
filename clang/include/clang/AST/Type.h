@@ -2172,6 +2172,9 @@ public:
   bool isExecType() const;                      // OpenCL 2.0 execution model types
   bool isPatchControlPointT() const;            // Metal/Vulkan patch control point
 
+  // libfloor argument buffer type (direct or with single ptr/ref indirection)
+  bool isFloorArgBufferType() const;
+
 #define EXT_OPAQUE_TYPE(ExtType, Id, Ext) \
   bool is##Id##Type() const;
 #include "clang/Basic/OpenCLExtensionTypes.def"
@@ -3627,6 +3630,7 @@ public:
       IsConsumed = 0x10,
       HasPassObjSize = 0x20,
       IsNoEscape = 0x40,
+      IsFloorArgBuffer = 0x80,
     };
     unsigned char Data = 0;
 
@@ -3667,6 +3671,13 @@ public:
         Copy.Data |= IsNoEscape;
       else
         Copy.Data &= ~IsNoEscape;
+      return Copy;
+    }
+
+    bool isFloorArgBuffer() const { return Data & IsFloorArgBuffer; }
+    ExtParameterInfo withFloorArgBuffer() const {
+      ExtParameterInfo Copy = *this;
+      Copy.Data |= IsFloorArgBuffer;
       return Copy;
     }
 
@@ -6960,6 +6971,17 @@ inline bool Type::isExecType() const {
 
 inline bool Type::isPatchControlPointT() const {
   return isSpecificBuiltinType(BuiltinType::OCLPatchControlPoint);
+}
+
+inline bool Type::isFloorArgBufferType() const {
+  if (hasAttr(attr::FloorArgBuffer)) {
+    return true;
+  } else if (isReferenceType() || isPointerType()) {
+    if (getPointeeType()->hasAttr(attr::FloorArgBuffer)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 inline bool Type::isImageType() const {

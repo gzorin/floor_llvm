@@ -101,15 +101,20 @@ void CodeGenTypes::addRecordTypeName(const RecordDecl *RD,
 /// a type.  For example, the scalar representation for _Bool is i1, but the
 /// memory representation is usually i8 or i32, depending on the target.
 llvm::Type *CodeGenTypes::ConvertTypeForMem(QualType T, bool ForBitField,
-                                            bool ForRecordField) {
+                                            bool ForRecordField,
+                                            bool single_field_array_image_only) {
   if (T->isConstantMatrixType()) {
     const Type *Ty = Context.getCanonicalType(T).getTypePtr();
     const ConstantMatrixType *MT = cast<ConstantMatrixType>(Ty);
     return llvm::ArrayType::get(ConvertType(MT->getElementType()),
                                 MT->getNumRows() * MT->getNumColumns());
+  } else if (T->isFloorArgBufferType()) {
+    if (auto io_type = convert_io_type_or_null(T, true); io_type) {
+      return io_type;
+    }
   }
 
-  llvm::Type *R = ConvertType(T, !ForRecordField);
+  llvm::Type *R = ConvertType(T, !ForRecordField, single_field_array_image_only);
 
   // If this is a bool type, or a bit-precise integer type in a bitfield
   // representation, map this integer to the target-specified size.
@@ -120,6 +125,22 @@ llvm::Type *CodeGenTypes::ConvertTypeForMem(QualType T, bool ForBitField,
 
   // Else, don't map it.
   return R;
+}
+
+llvm::Type* CodeGenTypes::convert_io_type_or_null(QualType Ty, bool indirect_io_type_conversion) {
+  llvm::Type* llvm_type = nullptr;
+  if (const auto cxx_rdecl = Ty->getAsCXXRecordDecl(); cxx_rdecl) {
+    llvm_type = CGM.getTypes().getAnyFlattenedType(cxx_rdecl, true);
+  } else if (indirect_io_type_conversion && (Ty->isPointerType() || Ty->isReferenceType())) {
+    auto pointee_type = Ty->getPointeeType();
+    if (const auto cxx_rdecl = pointee_type->getAsCXXRecordDecl(); cxx_rdecl) {
+      llvm_type = CGM.getTypes().getAnyFlattenedType(cxx_rdecl, true);
+      if (llvm_type) {
+        llvm_type = llvm::PointerType::get(llvm_type, CGM.getContext().getTargetAddressSpace(Ty.getAddressSpace()));
+      }
+    }
+  }
+  return llvm_type;
 }
 
 /// isRecordLayoutComplete - Return true if the specified type is already
@@ -403,14 +424,15 @@ llvm::Type *CodeGenTypes::ConvertFunctionTypeInternal(QualType QFT) {
 }
 
 /// ConvertType - Convert the specified type to its LLVM form.
-llvm::Type *CodeGenTypes::ConvertType(QualType T, bool convert_array_image_type) {
+llvm::Type *CodeGenTypes::ConvertType(QualType T, bool convert_array_image_type,
+                                      bool single_field_array_image_only) {
   T = Context.getCanonicalType(T);
 
   const Type *Ty = T.getTypePtr();
 
   // intercept image arrays before RT conversion
-  // NOTE: we do not want this when this is part of a record/struct
-  if (convert_array_image_type && Ty->isArrayImageType(true))
+  // NOTE: we do not want this when this is part of a record/struct (default single_field_array_image_only == true)
+  if (convert_array_image_type && Ty->isArrayImageType(single_field_array_image_only))
     return ConvertArrayImageType(Ty);
 
   // For the device-side compilation, CUDA device builtin surface/texture types
@@ -1013,19 +1035,22 @@ llvm::Type *CodeGenTypes::ConvertArrayImageType(const Type* Ty) {
   }
 	
   // simple C-style array that contains an image type
-  if(Ty->isArrayType() &&
-     Ty->getArrayElementTypeNoTypeQual()->isImageType()) {
-    const ConstantArrayType *CAT = Context.getAsConstantArrayType(QualType(Ty, 0));
-    const auto elem_type = CAT->getElementType();
-    if(elem_type->isImageType()) {
-      return llvm::ArrayType::get(ConvertType(elem_type), CAT->getSize().getZExtValue());
-    } else if(elem_type->isAggregateImageType()) {
-      // must be an aggregate image with exactly one image
-      const auto agg_img_type = elem_type->getAsCXXRecordDecl();
-      auto agg_img_fields = get_aggregate_scalar_fields(agg_img_type, agg_img_type, false, false,
-                                                        true /* TODO */);
-      if(agg_img_fields.size() != 1) return nullptr;
-      return llvm::ArrayType::get(ConvertType(agg_img_fields[0].type), CAT->getSize().getZExtValue());
+  if (Ty->isArrayType()) {
+    const auto array_elem_type_no_qual = Ty->getArrayElementTypeNoTypeQual();
+    if (array_elem_type_no_qual &&
+        (array_elem_type_no_qual->isImageType() ||
+         array_elem_type_no_qual->isAggregateImageType())) {
+      const ConstantArrayType *CAT = Context.getAsConstantArrayType(QualType(Ty, 0));
+      const auto elem_type = CAT->getElementType();
+      if (elem_type->isImageType()) {
+        return llvm::ArrayType::get(ConvertType(elem_type), CAT->getSize().getZExtValue());
+      } else if (elem_type->isAggregateImageType()) {
+        // must be an aggregate image with exactly one image
+        const auto agg_img_type = elem_type->getAsCXXRecordDecl();
+        auto agg_img_fields = get_aggregate_scalar_fields(agg_img_type, agg_img_type, false, false, false, true /* TODO */);
+        if (agg_img_fields.size() != 1) return nullptr;
+        return llvm::ArrayType::get(ConvertType(agg_img_fields[0].type), CAT->getSize().getZExtValue());
+      }
     }
     assert(false && "invalid array of images type");
   }
@@ -1051,7 +1076,7 @@ llvm::Type *CodeGenTypes::ConvertArrayImageType(const Type* Ty) {
 
   // must be an aggregate image with exactly one image
   const auto agg_img_type = CAT->getElementType()->getAsCXXRecordDecl();
-  auto agg_img_fields = get_aggregate_scalar_fields(agg_img_type, agg_img_type, false, false,
+  auto agg_img_fields = get_aggregate_scalar_fields(agg_img_type, agg_img_type, false, false, false,
                                                     true /* TODO */);
   if(agg_img_fields.size() != 1) return nullptr;
 
@@ -1086,9 +1111,31 @@ CodeGenTypes::getCGRecordLayout(const RecordDecl *RD, llvm::Type* struct_type) {
   return *I->second;
 }
 
+llvm::Type* CodeGenTypes::getAnyFlattenedType(const CXXRecordDecl* D, const bool prefer_arg_buffer_type) const {
+  if (!prefer_arg_buffer_type) {
+    if (auto RT = getFlattenedRecordType(D); RT) {
+      return RT;
+    } else if (auto ABT = getFlattenedFloorArgBufferType(D); ABT) {
+      return ABT;
+    }
+  } else {
+    if (auto ABT = getFlattenedFloorArgBufferType(D); ABT) {
+      return ABT;
+    } else if (auto RT = getFlattenedRecordType(D); RT) {
+      return RT;
+    }
+  }
+  return nullptr;
+}
+
 llvm::Type* CodeGenTypes::getFlattenedRecordType(const CXXRecordDecl* D) const {
   const auto iter = FlattenedRecords.find_as(D);
   return (iter != FlattenedRecords.end() ? iter->second : nullptr);
+}
+
+llvm::Type* CodeGenTypes::getFlattenedFloorArgBufferType(const CXXRecordDecl* D) const {
+  const auto iter = FlattenedFloorArgBufferRecords.find_as(D);
+  return (iter != FlattenedFloorArgBufferRecords.end() ? iter->second : nullptr);
 }
 
 bool CodeGenTypes::isPointerZeroInitializable(QualType T) {
@@ -1133,8 +1180,10 @@ std::vector<ASTContext::aggregate_scalar_entry>
 CodeGenTypes::get_aggregate_scalar_fields(const CXXRecordDecl* root_decl,
 										  const CXXRecordDecl* decl,
 										  const bool ignore_root_vec_compat,
+										  const bool ignore_vec_compat,
 										  const bool ignore_bases,
-										  const bool expand_array_image) const {
-	return Context.get_aggregate_scalar_fields(root_decl, decl, &TheCXXABI.getMangleContext(),
-											   ignore_root_vec_compat, ignore_bases, expand_array_image);
+										  const bool expand_array_image,
+										  const bool merge_parent_field_decl) const {
+	return Context.get_aggregate_scalar_fields(root_decl, decl, &TheCXXABI.getMangleContext(), ignore_root_vec_compat,
+											   ignore_vec_compat, ignore_bases, expand_array_image, merge_parent_field_decl);
 }

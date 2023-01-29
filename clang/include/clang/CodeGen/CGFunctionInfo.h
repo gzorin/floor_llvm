@@ -40,6 +40,10 @@ public:
     /// if the specified type stored in "PaddingType" is not zero.
     Direct,
 
+    /// DirectFloorArgBuffer - Similar to Direct with special handling for
+    /// libfloor argument buffers (used in functions / non-entry-points).
+    DirectFloorArgBuffer,
+
     /// Extend - Valid only for integer argument types. Same as 'direct'
     /// but also emit a zero/sign extension attribute.
     Extend,
@@ -70,6 +74,10 @@ public:
     /// Currently expand is only allowed on structures whose fields
     /// are all scalar types or are themselves expandable types.
     Expand,
+
+    /// ExpandFloorArgBuffer - Similar to Expand with special handling for
+    /// libfloor argument buffers (used in entry points).
+    ExpandFloorArgBuffer,
 
     /// CoerceAndExpand - Only valid for aggregate argument types. The
     /// structure should be expanded into consecutive arguments corresponding
@@ -102,7 +110,7 @@ private:
     unsigned AddrSpace;
   };
   union {
-    DirectAttrInfo DirectAttr;     // isDirect() || isExtend()
+    DirectAttrInfo DirectAttr;     // isDirect() || isExtend() || isDirectFloorArgBuffer()
     IndirectAttrInfo IndirectAttr; // isIndirect()
     unsigned AllocaFieldIndex; // isInAlloca()
   };
@@ -113,13 +121,13 @@ private:
   bool IndirectByVal : 1;   // isIndirect()
   bool IndirectRealign : 1; // isIndirect()
   bool SRetAfterThis : 1;   // isIndirect()
-  bool InReg : 1;           // isDirect() || isExtend() || isIndirect()
-  bool CanBeFlattened: 1;   // isDirect()
+  bool InReg : 1;           // isDirect() || isExtend() || isIndirect() || isDirectFloorArgBuffer()
+  bool CanBeFlattened: 1;   // isDirect() || isDirectFloorArgBuffer()
   bool SignExt : 1;         // isExtend()
 
   bool canHavePaddingType() const {
     return isDirect() || isExtend() || isIndirect() || isIndirectAliased() ||
-           isExpand();
+           isExpand() || isExpandFloorArgBuffer() || isDirectFloorArgBuffer();
   }
   void setPaddingType(llvm::Type *T) {
     assert(canHavePaddingType());
@@ -148,6 +156,15 @@ public:
     AI.setDirectOffset(Offset);
     AI.setDirectAlign(Align);
     AI.setCanBeFlattened(CanBeFlattened);
+    return AI;
+  }
+  static ABIArgInfo getDirectFloorArgBuffer(llvm::Type *T = nullptr) {
+    auto AI = ABIArgInfo(DirectFloorArgBuffer);
+    AI.setCoerceToType(T);
+    AI.setPaddingType(nullptr);
+    AI.setDirectOffset(0);
+    AI.setDirectAlign(0);
+    AI.setCanBeFlattened(false);
     return AI;
   }
   static ABIArgInfo getDirectInReg(llvm::Type *T = nullptr) {
@@ -243,6 +260,11 @@ public:
     AI.setPaddingType(Padding);
     return AI;
   }
+  static ABIArgInfo getExpandFloorArgBuffer() {
+    auto AI = ABIArgInfo(ExpandFloorArgBuffer);
+    AI.setPaddingType(nullptr);
+    return AI;
+  }
 
   /// \param unpaddedCoerceToType The coerce-to type with padding elements
   ///   removed, canonicalized to a single element if it would otherwise
@@ -294,34 +316,36 @@ public:
 
   Kind getKind() const { return TheKind; }
   bool isDirect() const { return TheKind == Direct; }
+  bool isDirectFloorArgBuffer() const { return TheKind == DirectFloorArgBuffer; }
   bool isInAlloca() const { return TheKind == InAlloca; }
   bool isExtend() const { return TheKind == Extend; }
   bool isIgnore() const { return TheKind == Ignore; }
   bool isIndirect() const { return TheKind == Indirect; }
   bool isIndirectAliased() const { return TheKind == IndirectAliased; }
   bool isExpand() const { return TheKind == Expand; }
+  bool isExpandFloorArgBuffer() const { return TheKind == ExpandFloorArgBuffer; }
   bool isCoerceAndExpand() const { return TheKind == CoerceAndExpand; }
 
   bool canHaveCoerceToType() const {
-    return isDirect() || isExtend() || isCoerceAndExpand();
+    return isDirect() || isExtend() || isCoerceAndExpand() || isDirectFloorArgBuffer();
   }
 
   // Direct/Extend accessors
   unsigned getDirectOffset() const {
-    assert((isDirect() || isExtend()) && "Not a direct or extend kind");
+    assert((isDirect() || isExtend() || isDirectFloorArgBuffer()) && "Not a direct or extend kind");
     return DirectAttr.Offset;
   }
   void setDirectOffset(unsigned Offset) {
-    assert((isDirect() || isExtend()) && "Not a direct or extend kind");
+    assert((isDirect() || isExtend() || isDirectFloorArgBuffer()) && "Not a direct or extend kind");
     DirectAttr.Offset = Offset;
   }
 
   unsigned getDirectAlign() const {
-    assert((isDirect() || isExtend()) && "Not a direct or extend kind");
+    assert((isDirect() || isExtend() || isDirectFloorArgBuffer()) && "Not a direct or extend kind");
     return DirectAttr.Align;
   }
   void setDirectAlign(unsigned Align) {
-    assert((isDirect() || isExtend()) && "Not a direct or extend kind");
+    assert((isDirect() || isExtend() || isDirectFloorArgBuffer()) && "Not a direct or extend kind");
     DirectAttr.Align = Align;
   }
 
@@ -376,12 +400,12 @@ public:
   }
 
   bool getInReg() const {
-    assert((isDirect() || isExtend() || isIndirect()) && "Invalid kind!");
+    assert((isDirect() || isExtend() || isIndirect() || isDirectFloorArgBuffer()) && "Invalid kind!");
     return InReg;
   }
 
   void setInReg(bool IR) {
-    assert((isDirect() || isExtend() || isIndirect()) && "Invalid kind!");
+    assert((isDirect() || isExtend() || isIndirect() || isDirectFloorArgBuffer()) && "Invalid kind!");
     InReg = IR;
   }
 
@@ -463,12 +487,12 @@ public:
   }
 
   bool getCanBeFlattened() const {
-    assert(isDirect() && "Invalid kind!");
+    assert((isDirect() || isDirectFloorArgBuffer()) && "Invalid kind!");
     return CanBeFlattened;
   }
 
   void setCanBeFlattened(bool Flatten) {
-    assert(isDirect() && "Invalid kind!");
+    assert((isDirect() || isDirectFloorArgBuffer()) && "Invalid kind!");
     CanBeFlattened = Flatten;
   }
 

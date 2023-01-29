@@ -274,6 +274,17 @@ public:
     return isSizedDerivedType(Visited);
   }
 
+  /// Return true if this is an image type.
+  /// Images are identified as pointers to opaque struct types with an OpenCL image name.
+  bool isImageType() const;
+
+  /// Return true if this is an array type containing images.
+  /// Images are identified as pointers to opaque struct types with an OpenCL image name.
+  bool isImageArrayType() const;
+
+  /// Return true if this is a flattened libfloor argument buffer type.
+  bool isFlattenedFloorArgBufferType() const;
+
   /// Return the basic size of this type if it is a primitive type. These are
   /// fixed by LLVM and are not target-dependent.
   /// This will return zero if the type does not have a size or is not a

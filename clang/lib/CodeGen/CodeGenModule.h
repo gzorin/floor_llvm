@@ -1475,10 +1475,12 @@ public:
   /// type from the specified clang "type" and pre-existing LLVM "llvm_type".
   /// If "create_packed" is true, this will create a packed struct type.
   /// If "create_unnamed" is true, this will create an unname struct type.
+  /// If "is_floor_arg_buffer" is true, argument buffer specific handling is enabled.
   llvm::Type* GraphicsExpandIOType(const QualType& type, llvm::Type* llvm_type,
                                    CodeGenTypes& CGT,
                                    const bool create_packed = true,
-                                   const bool create_unnamed = false);
+                                   const bool create_unnamed = false,
+                                   const bool is_floor_arg_buffer = false);
 
 private:
   llvm::Constant *GetOrCreateLLVMFunction(

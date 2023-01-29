@@ -2595,15 +2595,17 @@ public:
   /// appropriate alignmen and cast it to the default address space. Returns
   /// the original alloca instruction by \p Alloca if it is not nullptr.
   Address CreateMemTemp(QualType T, const Twine &Name = "tmp",
-                        Address *Alloca = nullptr);
+                        Address *Alloca = nullptr, bool indirect_io_type_conversion = false);
   Address CreateMemTemp(QualType T, CharUnits Align, const Twine &Name = "tmp",
-                        Address *Alloca = nullptr);
+                        Address *Alloca = nullptr, bool indirect_io_type_conversion = false);
 
   /// CreateMemTemp - Create a temporary memory object of the given type, with
   /// appropriate alignmen without casting it to the default address space.
-  Address CreateMemTempWithoutCast(QualType T, const Twine &Name = "tmp");
+  Address CreateMemTempWithoutCast(QualType T, const Twine &Name = "tmp",
+                                   bool with_io_type_conversion = false);
   Address CreateMemTempWithoutCast(QualType T, CharUnits Align,
-                                   const Twine &Name = "tmp");
+                                   const Twine &Name = "tmp",
+                                   bool with_io_type_conversion = false);
 
   /// CreateAggTemp - Create a temporary memory object for the given
   /// aggregate type.
@@ -3015,6 +3017,10 @@ public:
 
   /// Get the record field index as represented in debug info.
   unsigned getDebugInfoFIndex(const RecordDecl *Rec, unsigned FieldIndex);
+
+  /// Returns true if "val" is an indirect argument buffer function parameter,
+  /// i.e. a pointer to an argument buffer.
+  static bool is_floor_indirect_arg_buffer_argument(llvm::Value* val);
 
 
   //===--------------------------------------------------------------------===//
@@ -3965,14 +3971,16 @@ public:
 
   llvm::Value *EmitIvarOffset(const ObjCInterfaceDecl *Interface,
                               const ObjCIvarDecl *Ivar);
-  LValue EmitLValueForField(LValue Base, const FieldDecl* Field);
+  LValue EmitLValueForField(LValue Base, const FieldDecl* Field,
+                            const bool is_floor_arg_buffer = false);
   LValue EmitLValueForLambdaField(const FieldDecl *Field);
 
   /// EmitLValueForFieldInitialization - Like EmitLValueForField, except that
   /// if the Field is a reference, this will return the address of the reference
   /// and not the address of the value stored in the reference.
   LValue EmitLValueForFieldInitialization(LValue Base,
-                                          const FieldDecl* Field);
+                                          const FieldDecl* Field,
+                                          const bool is_floor_arg_buffer = false);
 
   LValue EmitLValueForIvar(QualType ObjectTy,
                            llvm::Value* Base, const ObjCIvarDecl *Ivar,
@@ -4671,7 +4679,8 @@ private:
   /// \param AI - The first function argument of the expansion.
   void ExpandTypeFromArgs(QualType Ty, LValue Dst,
                           llvm::Function::arg_iterator &AI,
-                          const CallingConv CC);
+                          const CallingConv CC,
+                          const bool is_floor_arg_buffer);
 
   /// ExpandTypeToArgs - Expand an CallArg \arg Arg, with the LLVM type for \arg
   /// Ty, into individual arguments on the provided vector \arg IRCallArgs,
@@ -4679,7 +4688,8 @@ private:
   void ExpandTypeToArgs(QualType Ty, CallArg Arg, llvm::FunctionType *IRFuncTy,
                         SmallVectorImpl<llvm::Value *> &IRCallArgs,
                         unsigned &IRCallArgPos,
-                        const CallingConv CC);
+                        const CallingConv CC,
+                        const bool is_floor_arg_buffer);
 
   std::pair<llvm::Value *, llvm::Type *>
   EmitAsmInput(const TargetInfo::ConstraintInfo &Info, const Expr *InputExpr,

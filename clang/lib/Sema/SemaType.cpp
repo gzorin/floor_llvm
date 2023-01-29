@@ -5395,6 +5395,11 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
             HasAnyInterestingExtParameterInfos = true;
           }
 
+          if (Param->hasAttr<FloorArgBufferAttr>()) {
+            ExtParameterInfos[i] = ExtParameterInfos[i].withFloorArgBuffer();
+            HasAnyInterestingExtParameterInfos = true;
+          }
+
           ParamTys.push_back(ParamTy);
         }
 
@@ -8331,7 +8336,6 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
       break;
     }
     case ParsedAttr::AT_ImageAccess:
-    case ParsedAttr::AT_FloorArgBuffer:
     case ParsedAttr::AT_FloorImageDataType:
     case ParsedAttr::AT_FloorImageFlags:
     case ParsedAttr::AT_VectorCompat:
@@ -8343,6 +8347,13 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
     case ParsedAttr::AT_GraphicsTessellationPatch:
       attr.setUsedAsTypeAttr();
       break;
+    case ParsedAttr::AT_FloorArgBuffer: {
+      ASTContext &Ctx = state.getSema().Context;
+      type = state.getAttributedType(createSimpleAttr<FloorArgBufferAttr>(Ctx, attr),
+                                     type, type);
+      attr.setUsedAsTypeAttr();
+      break;
+    }
     case ParsedAttr::AT_LifetimeBound:
       if (TAL == TAL_DeclChunk)
         HandleLifetimeBoundAttr(state, type, attr);

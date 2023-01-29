@@ -561,7 +561,6 @@ public:
   // Return true if this value is only transitively referenced by metadata.
   bool isTransitiveUsedByMetadataOnly() const;
 
-protected:
   /// Get the current metadata attachments for the given kind, if any.
   ///
   /// These functions require that the value have at most a single attachment
@@ -571,6 +570,7 @@ protected:
   MDNode *getMetadata(StringRef Kind) const;
   /// @}
 
+protected:
   /// Appends all attachments with the given ID to \c MDs in insertion order.
   /// If the Value has no attachments with the given ID, or if ID is invalid,
   /// leaves MDs unchanged.
