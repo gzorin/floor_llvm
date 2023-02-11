@@ -5982,8 +5982,6 @@ def metal_intel_workarounds : Flag<["-"], "metal-intel-workarounds">,
   HelpText<"Enable Intel GPU specific fixes and workarounds">;
 def metal_nvidia_workarounds : Flag<["-"], "metal-nvidia-workarounds">,
   HelpText<"Enable Nvidia GPU specific fixes and workarounds">;
-def metal_no_array_image : Flag<["-"], "metal-no-array-image">,
-  HelpText<"Disables native support for array of images">;
 def metal_soft_printf : Flag<["-"], "metal-soft-printf">,
   HelpText<"Enables support of software printf emulation">;
 

@@ -131,12 +131,12 @@ public:
   CanQualType DeriveThisType(const CXXRecordDecl *RD, const CXXMethodDecl *MD);
 
   /// ConvertType - Convert type T into a llvm::Type.
-  /// "convert_array_image_type" signals if we want to directly convert struct
-  /// types containing image arrays to native LLVM arrays (default).
-  /// "single_field_array_image_only" signals that only single field array
-  /// images should be convertable to an array image type.
-  llvm::Type *ConvertType(QualType T, bool convert_array_image_type = true,
-                          bool single_field_array_image_only = true);
+  /// "convert_array_image_or_buffer_type" signals if we want to directly convert struct
+  /// types containing image/buffer arrays to native LLVM arrays (default).
+  /// "single_field_array_image_or_buffer_only" signals that only single field array
+  /// images/buffers should be convertable to an array image/buffer type.
+  llvm::Type *ConvertType(QualType T, bool convert_array_image_or_buffer_type = true,
+                          bool single_field_array_image_or_buffer_only = true);
 
   /// ConvertTypeForMem - Convert type T into a llvm::Type.  This differs from
   /// ConvertType in that it is used to convert to the memory representation for
@@ -144,11 +144,11 @@ public:
   /// memory representation is usually i8 or i32, depending on the target.
   /// "ForRecordField" signals if this should be converted for a field type
   /// within a record/struct.
-  /// "single_field_array_image_only" signals that only single field array
-  /// images should be convertable to an array image type.
+  /// "single_field_array_image_or_buffer_only" signals that only single field array
+  /// images/buffers should be convertable to an array image/buffer type.
   llvm::Type *ConvertTypeForMem(QualType T, bool ForBitField = false,
                                 bool ForRecordField = false,
-                                bool single_field_array_image_only = true);
+                                bool single_field_array_image_or_buffer_only = true);
 
   /// helper function to convert "Ty" into a graphics I/O type if it is one (returns nullptr otherwise),
   /// if "indirect_io_type_conversion" is true, this will also convert pointers/references to graphics I/O types
@@ -312,6 +312,7 @@ public:
   /// "ignore_vec_compat" will not consider [[vector_compat]] at any level, but keep vector-compat structs instead
   /// "ignore_bases" will not consider/include any bases classes
   /// "expand_array_image" will expand image arrays into individual images
+  /// "expand_array_other" will expand non-image arrays into individual components
   /// "merge_parent_field_decl" will merge the parent field with the child field if there is a singular child
   // NOTE: for unions, only the first field will be considered
   // NOTE: this also transform/converts [[vector_compat]] types to clang vector types
@@ -319,10 +320,11 @@ public:
   get_aggregate_scalar_fields(const CXXRecordDecl* root_decl,
                               const CXXRecordDecl* decl,
                               const bool ignore_root_vec_compat = false,
-							  const bool ignore_vec_compat = false,
+                              const bool ignore_vec_compat = false,
                               const bool ignore_bases = false,
                               const bool expand_array_image = true,
-							  const bool merge_parent_field_decl = false) const;
+                              const bool expand_array_other = true,
+                              const bool merge_parent_field_decl = false) const;
 
   //
   void create_flattened_cg_layout(const CXXRecordDecl* decl, llvm::StructType* type,
@@ -348,6 +350,7 @@ public:  // These are internal details of CGT that shouldn't be used externally.
   llvm::StructType *ConvertRecordDeclType(const RecordDecl *TD);
 
   llvm::Type *ConvertArrayImageType(const Type* Ty);
+  llvm::Type *ConvertArrayBufferType(const Type* Ty);
 
   /// getExpandedTypes - Expand the type \arg Ty into the LLVM
   /// argument types it would be passed as. See ABIArgInfo::Expand.

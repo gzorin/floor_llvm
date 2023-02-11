@@ -69,6 +69,7 @@
 #include "llvm/Transforms/Utils/LoopUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/LibFloor/AddressSpaceFix.h"
+#include "llvm/Transforms/LibFloor/VulkanUtils.h"
 #include <algorithm>
 #include <cstdarg>
 #include <memory>
@@ -623,7 +624,7 @@ namespace {
 				//  * transform constant AS pointers to either Uniform or StorageBuffer AS
 				//  * transform StorageBuffer AS image pointers to Uniform AS
 				//  * enclose non-struct Uniform parameters in a struct (note that enclosing SSBOs happens later)
-				//  * transform pointers inside argument buffers to PhysicalStorageBuffer AS
+				//  * handle SSBO array transforms
 				// NOTE: must be called after visiting rets and other ret type/val users
 				std::vector<Type*> param_types;
 				DBG(errs() << "func: " << F.getName().str() << "\n";)
@@ -635,7 +636,7 @@ namespace {
 					if (const auto ptr_type = dyn_cast<llvm::PointerType>(arg_type);
 						ptr_type && (ptr_type->getAddressSpace() == SPIRAS_Constant || ptr_type->getAddressSpace() == SPIRAS_StorageBuffer)) {
 						const auto ptr_as = ptr_type->getAddressSpace();
-						auto elem_type = ptr_type->getElementType();
+						auto elem_type = ptr_type->getPointerElementType();
 						const auto arg_idx = param_types.size();
 						
 						// handle IUBs
@@ -651,6 +652,13 @@ namespace {
 						const auto is_ssbo_uniform = (!is_iub && arg.onlyReadsMemory() &&
 													  (arg.hasAttribute(Attribute::Dereferenceable) ||
 													   arg.hasAttribute(Attribute::DereferenceableOrNull)));
+						
+						// handle SSBO arrays
+						const auto ssbo_array_attr = F.getAttributeAtIndex(llvm::AttributeList::FirstArgIndex + arg_idx, "vulkan_ssbo_array");
+						const auto is_ssbo_array = (ssbo_array_attr.getRawPointer() != nullptr);
+						assert(!(is_ssbo_array && is_iub) && "can't be both IUB and SSBO array");
+						assert(!(is_ssbo_array && is_ssbo_uniform) && "can't be both SSBO uniform and SSBO array");
+						assert((!is_ssbo_array || (is_ssbo_array && ptr_as == SPIRAS_StorageBuffer)) && "wrong SSBO array address space");
 						
 						// any image/opaque type is unsized
 						const auto is_sized = elem_type->isSized();
@@ -709,6 +717,9 @@ namespace {
 									assert(false && "arg user is not an instruction");
 								}
 							}
+						} else if (is_ssbo_array) {
+							// perform SSBO array transforms
+							arg_type = handle_ssbo_array_transforms(F, arg);
 						} else if (storage_class != ptr_as) {
 							arg_type = elem_type->getPointerTo(storage_class);
 							arg.mutateType(arg_type);
@@ -741,6 +752,189 @@ namespace {
 			// always modified
 			DBG(errs() << "> " << F.getName() << " done\n";)
 			return true;
+		}
+		
+		llvm::Type* handle_ssbo_array_transforms(Function& F, Argument& arg) {
+			// * transform array element pointer address space:
+			//   even though we technically have a pointer to an array of SSBOs (pointers to storage buffer address space),
+			//   Vulkan/SPIR-V handle this differently and instead only puts the pointer to the array into storage buffer address space,
+			//   but all inner "pointers" do not have an address space (they are runtime arrays, i.e. no address space)
+			// * LLVM will emit chains of GEP-load-GEP: transform these into single GEPs
+			
+			auto new_arg_type = handle_ssbo_array_transform_array_elem_ptr(F, arg);
+			handle_ssbo_array_transform_fuse_gep_chains(F, arg, new_arg_type);
+			return new_arg_type;
+		}
+		
+		llvm::Type* handle_ssbo_array_transform_array_elem_ptr(Function& F, Argument& arg) {
+			auto arg_type = arg.getType();
+			assert(arg_type->isPointerTy());
+			auto array_type = arg_type->getPointerElementType();
+			assert(array_type->isArrayTy());
+			auto array_elem_type = array_type->getArrayElementType();
+			assert(array_elem_type->isPointerTy());
+			if (array_elem_type->getPointerAddressSpace() == 0) {
+				// already has the correct address space
+				return arg_type;
+			}
+			
+			// set new argument type
+			auto new_array_elem_type = llvm::PointerType::get(array_elem_type->getPointerElementType(), 0);
+			auto new_array_type = llvm::ArrayType::get(new_array_elem_type, array_type->getArrayNumElements());
+			auto new_arg_type = llvm::PointerType::get(new_array_type, SPIRAS_StorageBuffer);
+			arg.mutateType(new_arg_type);
+			
+			// update users
+			std::vector<User*> users;
+			for (auto* user : arg.users()) {
+				users.emplace_back(user);
+			}
+			for (auto& user : users) {
+				if (auto instr = dyn_cast<Instruction>(user)) {
+					// we expect the top level users to all be GEPs
+					if (auto GEP = dyn_cast_or_null<GetElementPtrInst>(instr); GEP) {
+						// create new GEP with updated type
+						SmallVector<Value*, 8> indices;
+						for (auto& idx : GEP->indices()) {
+							indices.emplace_back(idx);
+						}
+						auto repl_instr = llvm::GetElementPtrInst::Create(new_array_type, &arg, indices,
+																		  (GEP->hasName() ? GEP->getName() + "." : "") + "ssboarrgep",
+																		  instr);
+						if (GEP->isInBounds()) {
+							repl_instr->setIsInBounds();
+						}
+						repl_instr->setDebugLoc(instr->getDebugLoc());
+						instr->replaceAllUsesWith(repl_instr, true /* allow address space change */);
+						instr->eraseFromParent();
+					} else {
+						DBG(errs() << "\nunhandled arg user: " << *instr << "\n";)
+						DBG(errs().flush();)
+						assert(false && "unhandled arg user");
+					}
+				} else {
+					DBG(errs() << "\narg user is not an instruction\n";)
+					DBG(errs().flush();)
+					assert(false && "arg user is not an instruction");
+				}
+			}
+			
+			return new_arg_type;
+		}
+		
+		void handle_ssbo_array_transform_fuse_gep_chains(Function& F, Argument& arg, llvm::Type* new_arg_type) {
+			std::vector<User*> users;
+			for (auto* user : arg.users()) {
+				users.emplace_back(user);
+			}
+			for (auto& user : users) {
+				if (auto instr = dyn_cast<Instruction>(user)) {
+					// all top level users should be GEPs
+					if (auto GEP = dyn_cast_or_null<GetElementPtrInst>(instr); GEP) {
+						handle_ssbo_array_transform_fuse_gep_chain_ld(arg, new_arg_type, GEP);
+						assert(GEP->getNumUses() == 0 && "top level GEP should have no uses left");
+						GEP->eraseFromParent();
+					} else {
+						DBG(errs() << "\nunhandled arg user: " << *instr << "\n";)
+						DBG(errs().flush();)
+						assert(false && "unhandled arg user");
+					}
+				} else {
+					DBG(errs() << "\narg user is not an instruction\n";)
+					DBG(errs().flush();)
+					assert(false && "arg user is not an instruction");
+				}
+			}
+		}
+		
+		void handle_ssbo_array_transform_fuse_gep_chain_ld(Argument& arg, llvm::Type* new_arg_type, GetElementPtrInst* top_gep) {
+			std::vector<User*> top_gep_users;
+			for (auto* user : top_gep->users()) {
+				top_gep_users.emplace_back(user);
+			}
+			for (auto& user : top_gep_users) {
+				if (auto instr = dyn_cast<Instruction>(user)) {
+					// all top level GEP users should be load instructions
+					if (auto ld = dyn_cast_or_null<LoadInst>(instr); ld) {
+						// this essentially loads a pointer from the SSBO array
+						assert(ld->getOperand(0) == top_gep);
+						handle_ssbo_array_transform_fuse_gep_chain_ld_gep(arg, new_arg_type, top_gep, ld);
+						assert(ld->getNumUses() == 0 && "load should have no uses left");
+						ld->eraseFromParent();
+					} else {
+						DBG(errs() << "\nunhandled GEP user: " << *instr << "\n";)
+						DBG(errs().flush();)
+						assert(false && "unhandled GEP user");
+					}
+				} else {
+					DBG(errs() << "\nGEP user is not an instruction\n";)
+					DBG(errs().flush();)
+					assert(false && "GEP user is not an instruction");
+				}
+			}
+		}
+		
+		void handle_ssbo_array_transform_fuse_gep_chain_ld_gep(Argument& arg, llvm::Type* new_arg_type, GetElementPtrInst* top_gep, LoadInst* ld) {
+			std::vector<User*> ld_users;
+			for (auto* user : ld->users()) {
+				ld_users.emplace_back(user);
+			}
+			for (auto& user : ld_users) {
+				if (auto instr = dyn_cast<Instruction>(user)) {
+					// all load users should be GEPs
+					if (auto GEP = dyn_cast_or_null<GetElementPtrInst>(instr); GEP) {
+						// can now fuse GEP-load-GEP into a single GEP
+						
+						SmallVector<Value*, 8> indices;
+						assert(top_gep->getNumIndices() >= 2);
+						for (auto& idx : top_gep->indices()) {
+							indices.emplace_back(idx);
+						}
+						// the first index must be 0
+						assert(dyn_cast_or_null<ConstantInt>(indices[0]) &&
+							   dyn_cast_or_null<ConstantInt>(indices[0])->getZExtValue() == 0 &&
+							   "invalid top level index");
+						// we need to swizzle the first two indices, because array/struct/SSBO layout is different on the SPIR-V side
+						std::swap(indices[0], indices[1]);
+						
+						for (auto& idx : GEP->indices()) {
+							indices.emplace_back(idx);
+						}
+						
+						std::vector<Value*> params;
+						std::vector<Type*> param_types;
+						params.push_back(&arg);
+						param_types.push_back(new_arg_type);
+						for (const auto& idx : indices) {
+							params.push_back(idx);
+							param_types.push_back(idx->getType());
+						}
+						
+						const auto func_type = llvm::FunctionType::get(GEP->getType(), param_types, false);
+						
+						// need a unique function name for this
+						static uint32_t func_ident_counter = 0;
+						auto func_ident = std::to_string(func_ident_counter++);
+						
+						auto CI = CallInst::Create(M->getOrInsertFunction("floor.ssbo_array_gep." + func_ident, func_type),
+												   params, (GEP->hasName() ? GEP->getName() + "." : "") + "ssbo_array_gep", GEP);
+						
+						// if dynamic access (bitcast), then bitcast has the debug location, use gep location otherwise
+						CI->setDebugLoc(GEP->getDebugLoc());
+						
+						GEP->replaceAllUsesWith(CI, true /* allow address space change */);
+						GEP->eraseFromParent();
+					} else {
+						DBG(errs() << "\nunhandled LoadInst user: " << *instr << "\n";)
+						DBG(errs().flush();)
+						assert(false && "unhandled LoadInst user");
+					}
+				} else {
+					DBG(errs() << "\nLoadInst user is not an instruction\n";)
+					DBG(errs().flush();)
+					assert(false && "LoadInst user is not an instruction");
+				}
+			}
 		}
 		
 		// InstVisitor overrides...
@@ -934,23 +1128,40 @@ namespace {
 			const auto fuse_index = [this](Value* lhs, Value* rhs, Instruction* insert_pos) -> Value* {
 				ConstantInt* lhs_const = dyn_cast_or_null<ConstantInt>(lhs);
 				ConstantInt* rhs_const = dyn_cast_or_null<ConstantInt>(rhs);
-				if(lhs_const != nullptr && rhs_const != nullptr) {
+				if (lhs_const != nullptr && rhs_const != nullptr) {
 					// both are constant -> simply fold them
 					return folder.FoldAdd(lhs_const, rhs_const);
-				}
-				else if(lhs_const != nullptr && lhs_const->getZExtValue() == 0) {
+				} else if(lhs_const != nullptr && lhs_const->getZExtValue() == 0) {
 					// lhs idx is 0
 					return rhs;
-				}
-				else if(rhs_const != nullptr && rhs_const->getZExtValue() == 0) {
+				} else if(rhs_const != nullptr && rhs_const->getZExtValue() == 0) {
 					// rhs idx is 0
 					return lhs;
-				}
-				else {
+				} else {
 					// need to create a proper addition
 					std::string name = ".gep.idx.add";
-					if(rhs->hasName()) name = rhs->getName().str() + name;
-					if(lhs->hasName()) name = lhs->getName().str() + name;
+					if (rhs->hasName()) name = rhs->getName().str() + name;
+					if (lhs->hasName()) name = lhs->getName().str() + name;
+					if (lhs->getType() != rhs->getType()) {
+						// must cast upwards
+						assert(lhs->getType()->isIntegerTy() && rhs->getType()->isIntegerTy());
+						const auto lhs_int_width = lhs->getType()->getIntegerBitWidth();
+						const auto rhs_int_width = rhs->getType()->getIntegerBitWidth();
+						assert(lhs_int_width != rhs_int_width);
+						if (lhs_int_width < rhs_int_width) {
+							if (lhs_const) {
+								lhs = ConstantInt::get(rhs->getType(), lhs_const->getZExtValue());
+							} else {
+								lhs = CastInst::CreateIntegerCast(lhs, rhs->getType(), false, "", insert_pos);
+							}
+						} else {
+							if (rhs_const) {
+								rhs = ConstantInt::get(lhs->getType(), rhs_const->getZExtValue());
+							} else {
+								rhs = CastInst::CreateIntegerCast(rhs, lhs->getType(), false, "", insert_pos);
+							}
+						}
+					}
 					return BinaryOperator::CreateAdd(lhs, rhs, name, insert_pos);
 				}
 			};
@@ -997,7 +1208,7 @@ namespace {
 				
 				// create the new GEP
 				auto gep_ptr = base_gep->getPointerOperand();
-				auto gep_ptr_type = cast<PointerType>(gep_ptr->getType()->getScalarType())->getElementType();
+				auto gep_ptr_type = cast<PointerType>(gep_ptr->getType()->getScalarType())->getPointerElementType();
 				if (const auto idx_type = GetElementPtrInst::getIndexedType(gep_ptr_type, idx_list); !idx_type) {
 					// can't handle it -> ignore it
 					// NOTE: since variable pointers are now used by default, PtrAccessChain is possible -> we don't necessarily
@@ -1019,20 +1230,8 @@ namespace {
 		}
 		
 		void visitGetElementPtrInst(GetElementPtrInst &I) {
-			// prefer i32 indices so that we don't need the Int64 capability
-			for(auto& op : I.operands()) {
-				if(op->getType()->isIntegerTy() &&
-				   !op->getType()->isIntegerTy(32)) {
-					if(const auto const_idx_op = dyn_cast_or_null<ConstantInt>(op)) {
-						op.set(ConstantInt::get(Type::getInt32Ty(*ctx),
-												(int32_t)const_idx_op->getValue().getZExtValue()));
-					}
-					else {
-						// TODO: does this make sense? would need Int64 cap either way
-						op.set(CastInst::CreateIntegerCast(op, Type::getInt32Ty(*ctx), false, "gep.idx.i32.cast", &I));
-					}
-				}
-			}
+			// prefer i32 indices where we can
+			vulkan_utils::simplify_gep_indices(*ctx, I);
 			
 			// GEP fusion: we can't have GEPs into GEPs, so fuse them
 			// NOTE: this has to be done recursively of course

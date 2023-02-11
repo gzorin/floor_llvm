@@ -1714,6 +1714,31 @@ static std::vector<RecordDecl::field_iterator> get_aggregate_fields(const CXXRec
 	return ret;
 }
 
+struct array_buffer_info_t {
+	QualType element_type;
+	uint32_t element_count { 0u };
+};
+static std::optional<array_buffer_info_t> get_array_buffer_info(QualType& type, const CXXRecordDecl* decl, const ASTContext& ASTCtx) {
+	const ConstantArrayType *CAT = nullptr;
+	if (!type->isArrayType()) {
+		assert(decl);
+		const auto ret = get_aggregate_fields(decl);
+		if (ret.size() != 1) return {};
+		
+		FieldDecl* arr_field_decl = *ret[0];
+		CAT = ASTCtx.getAsConstantArrayType(arr_field_decl->getType());
+		if (!CAT) return {};
+	} else {
+		CAT = ASTCtx.getAsConstantArrayType(type);
+		if (!CAT) return {};
+	}
+	
+	return array_buffer_info_t {
+		CAT->getElementType(),
+		uint32_t(CAT->getSize().getZExtValue()),
+	};
+}
+
 // will recurse through the specified class/struct decl and its base classes,
 // returning a vector containing all iterators to all contained image types
 // NOTE: will return an empty vector if not a proper aggregate image
@@ -2208,6 +2233,7 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 	static const std::string prefix_arg_buf = "argbuf:";
 	static const std::string prefix_iub = "iub:";
 	static const std::string prefix_ssbo = "ssbo:";
+	static const std::string prefix_ssbo_array = "ssbo_array:";
 	
 	//
 	const auto handle_stage_input_output = [this, &stage_infos, &is_vertex, &is_fragment](const QualType& clang_type,
@@ -2434,7 +2460,8 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 			uint32_t arg_buffer_arg_idx = 0;
 			for (const auto& field : fields) {
 				auto field_type = field->getType();
-				auto llvm_field_type = getTypes().ConvertTypeForMem(field_type, false, false, false /* want proper image arrays in Vulkan */);
+				auto llvm_field_type = getTypes().ConvertTypeForMem(field_type, false, false,
+																	false /* want proper image/buffer arrays in Vulkan */);
 				
 				// tag as argument buffer
 				arg_iter->addAttr(llvm::Attribute::get(getLLVMContext(), "vulkan_arg_buffer"));
@@ -2467,6 +2494,18 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 									  elem_count,
 									  is_array,
 									  this_arg_buf_prefix + prefix_arg);
+					}
+				} else if (field_type->isArrayBufferType()) {
+					const auto array_buffer_info = get_array_buffer_info(field_type, field_type->getAsCXXRecordDecl(), getContext());
+					if (array_buffer_info) {
+						stage_infos.push_back(llvm::MDString::get(VMContext, this_arg_buf_prefix + prefix_ssbo_array +
+																  std::to_string(array_buffer_info->element_count) + ":none"));
+						
+						// tag as SSBO array
+						arg_iter->addAttr(llvm::Attribute::get(getLLVMContext(), "vulkan_ssbo_array"));
+					} else {
+						Error(field->getSourceRange().getBegin(), "invalid buffer array in indirect/argument buffer!");
+						return;
 					}
 				} else if (!field_type->isReferenceType() && !field_type->isPointerType() &&
 						   compute_type_size(llvm_field_type) <= getCodeGenOpts().VulkanIUBSize &&
@@ -2624,6 +2663,7 @@ static bool is_indirect_buffer(const clang::QualType& type, CodeGenModule &CGM,
 				type->isReferenceType() ||
 				type->isImageType() ||
 				type->isArrayImageType(true) ||
+				type->isArrayBufferType() ||
 				type->isAggregateImageType()) {
 				return true;
 			} else if (const auto type_rdecl = type->getAsCXXRecordDecl()) {
@@ -4017,6 +4057,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 			IMAGE_ARRAY					= (4ull << __SPECIAL_TYPE_SHIFT),
 			IUB							= (5ull << __SPECIAL_TYPE_SHIFT),
 			ARGUMENT_BUFFER				= (6ull << __SPECIAL_TYPE_SHIFT),
+			BUFFER_ARRAY				= (7ull << __SPECIAL_TYPE_SHIFT),
 		};
 		static const auto to_fas = [](const LangAS& addr_space) {
 			if (addr_space == LangAS::opencl_global) {
@@ -4358,6 +4399,17 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 									}
 									assert(agg_img_ret->arg_index_bias == 0); // this is the case when only have read-only or write-only
 									this_arg_buf_info << agg_img_ret->arg_info << ",";
+								} else if (CGM.getLangOpts().Vulkan && field_type->isArrayBufferType()) {
+									const auto array_buffer_info = get_array_buffer_info(field_type, field_type->getAsCXXRecordDecl(), getContext());
+									if (array_buffer_info) {
+										uint64_t field_arg_info = (uint64_t)FLOOR_ARG_INFO::BUFFER_ARRAY;
+										field_arg_info |= array_buffer_info->element_count;
+										field_arg_info |= (uint64_t)to_fas(array_buffer_info->element_type->getPointeeType().getAddressSpace());
+										this_arg_buf_info << field_arg_info << ",";
+									} else {
+										CGM.Error(field->getSourceRange().getBegin(), "invalid buffer array in indirect/argument buffer!");
+										return {};
+									}
 								} else if (decl.hasAttr<GraphicsStageInputAttr>()) {
 									// hard error
 									CGM.Error(field->getSourceRange().getBegin(), StringRef("stage input is not supported in indirect/argument buffers"));
@@ -7918,16 +7970,19 @@ llvm::Type* CodeGenModule::GraphicsExpandIOType(const QualType& type,
 	
 	// else: extract all fields and create a flat llvm struct from them
 	const auto fields = CGT.get_aggregate_scalar_fields(cxx_rdecl, cxx_rdecl, false, is_vk_floor_arg_buffer, false,
-														!is_vk_floor_arg_buffer /* do not expand arrays if this is an arg buffer*/,
+														!is_vk_floor_arg_buffer /* do not expand image arrays if this is an arg buffer*/,
+														!is_vk_floor_arg_buffer /* do not expand non-image arrays if this is an arg buffer*/,
 														is_vk_floor_arg_buffer /* use array parent field decls for non-expanded arrays (-> unique) + singular childs */);
 	std::vector<llvm::Type*> llvm_fields;
 	for (const auto& field : fields) {
 		auto llvm_field_type = CGT.ConvertType(field.type, true, !is_floor_arg_buffer);
-		if (is_floor_arg_buffer) {
-			// transform fields of image arrays into pointers to image arrays
-			if (llvm_field_type->isImageArrayType()) {
-				// transform fields of image arrays into pointers to image arrays
+		if (is_vk_floor_arg_buffer) {
+			if (llvm_field_type->isArrayImageType()) {
+				// transform fields of arrays into pointers to arrays
 				llvm_field_type = llvm::PointerType::get(llvm_field_type, 0u);
+			} else if (llvm_field_type->isArrayBufferType()) {
+				// transform fields of arrays into pointers to arrays
+				llvm_field_type = llvm::PointerType::get(llvm_field_type, getContext().getTargetAddressSpace(LangAS::opencl_global));
 			} else if (!llvm_field_type->isPointerTy() && !field.type->isAggregateImageType()) {
 				// transform non-pointer (buffer) fields into pointers in the constant address space (will be IUBs or SSBOs later on)
 				llvm_field_type = llvm::PointerType::get(llvm_field_type, getContext().getTargetAddressSpace(LangAS::opencl_constant));
@@ -7977,7 +8032,7 @@ void CodeGenModule::EmitGlobalFunctionDefinition(GlobalDecl GD,
         if (param_type->isStructureOrClassType()) {
           const auto is_vulkan_arg_buffer = (getLangOpts().Vulkan && param->hasAttr<FloorArgBufferAttr>());
           if (param->hasAttr<GraphicsStageInputAttr>() || is_vulkan_arg_buffer) {
-            auto llvm_param_type = getTypes().ConvertType(param_type, true, !is_vulkan_arg_buffer);
+            auto llvm_param_type = getTypes().ConvertType(param_type, !is_vulkan_arg_buffer, !is_vulkan_arg_buffer);
             (void)GraphicsExpandIOType(param_type, llvm_param_type, getTypes(), false, is_metal_2_3, is_vulkan_arg_buffer);
           }
         }

@@ -1239,6 +1239,7 @@ getTypeExpansion(QualType Ty, const ASTContext &Context,
       auto fields = CGT.get_aggregate_scalar_fields(cxx_rdecl, cxx_rdecl, false, is_vk_floor_arg_buffer, false,
                                                     !(Context.getLangOpts().Vulkan ||
                                                       Context.getLangOpts().Metal),
+                                                    !is_vk_floor_arg_buffer,
                                                     is_vk_floor_arg_buffer);
       return std::make_unique<FloorAggregateExpansion>(std::move(bases), std::move(field_decls), std::move(fields));
     }
@@ -1338,6 +1339,8 @@ CodeGenTypes::getExpandedTypes(QualType Ty,
       auto conv_type = ConvertType(field.type, true, !is_floor_arg_buffer);
       if (field.type->isArrayImageType(false)) {
         *TI++ = (!conv_type->isPointerTy() ? llvm::PointerType::get(conv_type, 0) : conv_type);
+      } else if (field.type->isArrayBufferType()) {
+        *TI++ = (!conv_type->isPointerTy() ? llvm::PointerType::get(conv_type, getContext().getTargetAddressSpace(LangAS::opencl_global)) : conv_type);
       } else if (!conv_type->isPointerTy() && !field.type->isAggregateImageType() && is_vk_floor_arg_buffer) {
         *TI++ = llvm::PointerType::get(conv_type, getContext().getTargetAddressSpace(LangAS::opencl_constant));
       } else {
@@ -1404,8 +1407,8 @@ void CodeGenFunction::ExpandTypeFromArgs(QualType Ty, LValue LV,
       for (const auto& field : FAExp->fields) {
         // TODO: non-image arrays -> these have no FD
         if (field.field_decl) {
-          // array of images
-          if (field.type->isArrayImageType(false)) {
+          // array of images/buffers
+          if (field.type->isArrayImageType(false) || field.type->isArrayBufferType()) {
             LValue SubLV = EmitLValueForField(LV, field.field_decl, is_floor_arg_buffer);
             Builder.CreateStore(&*AI++, SubLV.getAddress(*this));
           }
@@ -1435,8 +1438,8 @@ void CodeGenFunction::ExpandTypeFromArgs(QualType Ty, LValue LV,
         if(field.is_in_base) continue; // already handled
         // TODO: non-image arrays -> these have no FD
         if (field.field_decl) {
-          // array of images
-          if (field.type->isArrayImageType(false)) {
+          // array of images/buffers
+          if (field.type->isArrayImageType(false) || field.type->isArrayBufferType()) {
             LValue SubLV = EmitLValueForField(LV, field.field_decl);
             Builder.CreateStore(&*AI++, SubLV.getAddress(*this));
           }
@@ -3519,8 +3522,8 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
 			AI->setName(Arg->getName() + "." + Twine(arg_idx) + "_" + field.name);
 			
 			if (field.field_decl) {
-				// array of images and singular images
-				if (field.type->isArrayImageType(false)) {
+				// array of images/buffers and singular images
+				if (field.type->isArrayImageType(false) || field.type->isArrayBufferType()) {
 					LValue SubLV = EmitLValueForField(LV, field.field_decl, true);
 					Builder.CreateStore(&*AI, SubLV.getAddress(*this));
 				} else { // all else

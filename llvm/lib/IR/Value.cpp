@@ -502,8 +502,11 @@ void Value::doRAUW(Value *New, ReplaceMetadataUses ReplaceMetaUses, const bool A
   if (AllowASChange &&
       New->getType()->isPointerTy() &&
       getType()->isPointerTy()) {
-    assert(New->getType()->getPointerElementType() ==
-           getType()->getPointerElementType() &&
+    assert((New->getType()->getPointerElementType() == getType()->getPointerElementType() ||
+			(New->getType()->getPointerElementType()->isPointerTy() &&
+			 getType()->getPointerElementType()->isPointerTy() &&
+			 New->getType()->getPointerElementType()->getPointerElementType() ==
+			 getType()->getPointerElementType()->getPointerElementType())) &&
            "replaceAllUses of value with new value of different type!");
   } else {
     assert(New->getType() == getType() &&
@@ -1199,8 +1202,11 @@ void ValueHandleBase::ValueIsRAUWd(Value *Old, Value *New, const bool AllowASCha
   if (AllowASChange &&
       Old->getType()->isPointerTy() &&
       New->getType()->isPointerTy()) {
-    assert(Old->getType()->getPointerElementType() ==
-           New->getType()->getPointerElementType() &&
+    assert((Old->getType()->getPointerElementType() == New->getType()->getPointerElementType() ||
+			(Old->getType()->getPointerElementType()->isPointerTy() &&
+			 New->getType()->getPointerElementType()->isPointerTy() &&
+			 Old->getType()->getPointerElementType()->getPointerElementType() ==
+			 New->getType()->getPointerElementType()->getPointerElementType())) &&
            "replaceAllUses of value with new value of different type!");
   } else {
     assert(Old->getType() == New->getType() &&

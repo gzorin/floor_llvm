@@ -2163,6 +2163,7 @@ public:
 
   bool isAggregateImageType() const;            // struct/class containing only image*_t members
   bool isArrayImageType(bool single_field_arr) const; // array of aggregate images
+  bool isArrayBufferType() const;               // array of buffers
 
   bool isSamplerT() const;                      // OpenCL sampler_t
   bool isEventT() const;                        // OpenCL event_t

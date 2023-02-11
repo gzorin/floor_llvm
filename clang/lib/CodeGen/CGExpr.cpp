@@ -4272,21 +4272,24 @@ static Address emitAddrOfFieldStorage(CodeGenFunction &CGF, Address base,
     return base;
   }
 
-  // deal with array of opaque (struct) types (e.g. used for array of images)
+  // deal with arrays of opaque/image and non-opaque/struct/sized/buffer types (used for array of images/buffers)
   if (elem_type->isArrayTy() &&
       elem_type->getArrayElementType()->isPointerTy()) {
-    if (elem_type->getArrayElementType()->getPointerElementType()->isStructTy() &&
-        !elem_type->getArrayElementType()->getPointerElementType()->isSized()) {
-      // -> 1D
+    const auto array_elem_type = elem_type->getArrayElementType();
+    if (array_elem_type->getPointerElementType()->isStructTy() &&
+        !array_elem_type->getPointerElementType()->isSized()) {
+      // -> 1D array of images
       return CGF.Builder.CreateConstArrayGEP(base, idx, field->getName());
-    } else if (elem_type->getArrayElementType()->getPointerElementType()->isArrayTy()) {
-      // -> 2D
-      auto arr_type = dyn_cast<llvm::ArrayType>(elem_type->getArrayElementType()->getPointerElementType());
-      if (arr_type && arr_type->getElementType()->isPointerTy() &&
-          arr_type->getElementType()->getPointerElementType()->isStructTy() &&
-          !arr_type->getElementType()->getPointerElementType()->isSized()) {
-        return CGF.Builder.CreateConstArrayGEP(base, idx, field->getName());
-      }
+    } else if (array_elem_type->getPointerAddressSpace() != 0 &&
+               array_elem_type->getPointerElementType()->isSized()) {
+      // -> 1D array of buffers
+      return CGF.Builder.CreateConstArrayGEP(base, idx, field->getName());
+    } else if (auto arr_type = dyn_cast_or_null<llvm::ArrayType>(array_elem_type->getPointerElementType());
+               arr_type && arr_type->getElementType()->isPointerTy() &&
+               arr_type->getElementType()->getPointerElementType()->isStructTy() &&
+               !arr_type->getElementType()->getPointerElementType()->isSized()) {
+      // -> 2D array of images
+      return CGF.Builder.CreateConstArrayGEP(base, idx, field->getName());
     }
   }
 
@@ -4510,7 +4513,24 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
 			  break;
 		  }
 		  
-		  if (llvm_elem_type->isImageArrayType()) {
+		  const auto is_array_image = llvm_elem_type->isArrayImageType();
+		  const auto is_array_buffer = (!is_array_image && llvm_elem_type->isArrayBufferType());
+		  if (is_array_image || is_array_buffer) {
+			  // direct array of images/buffers
+			  if (is_floor_arg_buffer) {
+				  // add indirection
+				  llvm_elem_type = llvm::PointerType::get(llvm_elem_type,
+														  (is_array_buffer ?
+														   getContext().getTargetAddressSpace(LangAS::opencl_global) : 0u));
+			  } else {
+				  // load from indirection
+				  addr = Address(Builder.CreateLoad(addr), addr.getAlignment());
+			  }
+		  } else if (llvm_elem_type->isStructTy() && llvm_elem_type->getStructNumElements() == 1 &&
+					 llvm_elem_type->getStructElementType(0)->isArrayTy() &&
+					 llvm_elem_type->getStructElementType(0)->getArrayElementType()->isPointerTy()) {
+			  // struct containing an array of buffers -> need to unpack type first
+			  llvm_elem_type = llvm_elem_type->getStructElementType(0);
 			  if (is_floor_arg_buffer) {
 				  // add indirection
 				  llvm_elem_type = llvm::PointerType::get(llvm_elem_type, 0u);

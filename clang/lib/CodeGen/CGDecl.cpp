@@ -1920,6 +1920,86 @@ void CodeGenFunction::EmitAutoVarInit(const AutoVarEmission &emission) {
       type.isVolatileQualified(), Builder, constant, /*IsAutoInit=*/false);
 }
 
+// fix up alloca address space according to the first init (when using arg buffers in Vulkan):
+// if the alloca is at least a double-pointer (i.e. may have more levels), with the inner pointer AS matching the inner AS of the rvalue,
+// but the outer AS isn't matching -> transform the alloca type according to the rvalue
+// NOTE: ideally, we want to already do this when creating the alloca in the first place, but we have no way of checking this there
+static bool handle_arg_buffer_ref_alloca(CodeGenModule& CGM, CodeGenFunction& CGF, LValue& lvalue, RValue& rvalue) {
+	if (!CGM.getLangOpts().Vulkan || !rvalue.isScalar()) {
+		return false;
+	}
+	
+	// lhs must be an alloca of ptr type
+	auto lhs = dyn_cast_or_null<llvm::AllocaInst>(lvalue.getPointer(CGF));
+	auto lhs_type = lhs->getType();
+	if (!lhs || !lhs_type->isPointerTy()) {
+		return false;
+	}
+	
+	// rhs must be a pointer of ptr type
+	auto rhs = rvalue.getScalarVal();
+	auto rhs_type = rhs->getType();
+	if (!rhs_type->isPointerTy() ||
+		// if this already matches, we can abort
+		cast<llvm::PointerType>(lhs_type)->isOpaqueOrPointeeTypeMatches(rhs_type)) {
+		return false;
+	}
+	
+	// lhs pointee type must also be a pointer + AS must not match rhs
+	auto lhs_pointee_type = lhs_type->getPointerElementType();
+	if (!lhs_pointee_type->isPointerTy() &&
+		rhs_type->getPointerAddressSpace() == lhs_pointee_type->getPointerAddressSpace()) {
+		return false;
+	}
+	
+	// inner ptr AS must match
+	auto lhs_pointee_pointee_type = lhs_pointee_type->getPointerElementType();
+	auto rhs_pointee_type = rhs_type->getPointerElementType();
+	const auto old_address = lvalue.getAddress(CGF);
+	if (lhs_pointee_pointee_type == rhs_pointee_type) {
+		// all type preconditions are fulfilled: now perform a deep check of where rvalue came from (must be arg buffer)
+		if (!isa<llvm::Instruction>(rhs)) {
+			return false;
+		}
+		auto instr = rhs;
+		do {
+			if (auto alloca = dyn_cast_or_null<llvm::AllocaInst>(instr); alloca) {
+				auto annotation_md = alloca->getMetadata(llvm::LLVMContext::MD_annotation);
+				if (!annotation_md || annotation_md->getNumOperands() == 0) {
+					return false;
+				}
+				auto annotation_str = dyn_cast_or_null<llvm::MDString>(annotation_md->getOperand(0));
+				if (!annotation_str || !annotation_str->getString().equals("vulkan_arg_buffer")) {
+					return false;
+				}
+				break; // success
+			} else if (auto arg = dyn_cast_or_null<llvm::Argument>(instr); arg) {
+				if (!CGF.is_floor_indirect_arg_buffer_argument(arg)) {
+					return false;
+				}
+				break; // success
+			} else if (auto gep = dyn_cast_or_null<llvm::GetElementPtrInst>(instr); gep) {
+				instr = gep->getOperand(0);
+			} else if (auto ld = dyn_cast_or_null<llvm::LoadInst>(instr); ld) {
+				instr = ld->getOperand(0);
+			} else if (auto bc = dyn_cast_or_null<llvm::BitCastInst>(instr); bc) {
+				instr = bc->getOperand(0);
+			} else {
+				// can't trace back further -> assume this does not come from an arg buffer
+				return false;
+			}
+		} while(true);
+		
+		// finally: we know everything is as expected -> update types
+		lhs->setAllocatedType(rhs_type);
+		lhs->mutateType(llvm::PointerType::get(rhs_type, lhs_type->getPointerAddressSpace()));
+		Address new_address(lhs, rhs_type, old_address.getAlignment());
+		lvalue.setAddress(new_address);
+		return true;
+	}
+	return false;
+}
+
 /// Emit an expression as an initializer for an object (variable, field, etc.)
 /// at the given location.  The expression is not necessarily the normal
 /// initializer for the object, and the address is not necessarily
@@ -1938,6 +2018,13 @@ void CodeGenFunction::EmitExprAsInit(const Expr *init, const ValueDecl *D,
     RValue rvalue = EmitReferenceBindingToExpr(init);
     if (capturedByInit)
       drillIntoBlockVariable(*this, lvalue, cast<VarDecl>(D));
+    if (handle_arg_buffer_ref_alloca(CGM, *this, lvalue, rvalue)) {
+      // -> modified var/lvalue/alloca
+      if (auto var_decl = dyn_cast_or_null<const VarDecl>(D); var_decl) {
+        // NOTE: this doesn't replace the actual address/pointer, just it's type
+        replace_or_set_addr_of_local_var(var_decl, lvalue.getAddress(*this));
+      }
+    }
     EmitStoreThroughLValue(rvalue, lvalue, true);
     return;
   }

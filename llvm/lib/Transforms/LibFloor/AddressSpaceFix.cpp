@@ -559,10 +559,25 @@ namespace {
 					const bool is_constant_as = (as_ptr->getPointerAddressSpace() == 2);
 					const bool is_readonly = CI.onlyReadsMemory(i);
 					const bool is_load = isa<LoadInst>(arg);
-					// don't allow cloning/alloca-read-only-fix for certain constructs (e.g. too expensive or not allowed)
-					const bool is_clonable = !(as_ptr->getElementType()->isArrayTy() ||
-											   (as_ptr->getElementType()->isStructTy() &&
-												cast<StructType>(as_ptr->getElementType())->getName().startswith("class.floor_image::image")));
+					// don't allow cloning/alloca-read-only-fix for certain constructs (e.g. too expensive or not allowed, especially arrays)
+					bool is_clonable = true;
+					const auto elem_type = as_ptr->getPointerElementType();
+					if (elem_type->isArrayTy()) {
+						is_clonable = false;
+					} else if (elem_type->isStructTy()) {
+						const auto st_type = cast<llvm::StructType>(elem_type);
+						for (const auto& field_type : st_type->elements()) {
+							if (field_type->isArrayTy() || (field_type->isPointerTy() && field_type->getPointerElementType()->isArrayTy())) {
+								is_clonable = false;
+								break;
+							}
+						}
+						if (is_clonable) {
+							if (st_type->getName().startswith("class.floor_image::image")) {
+								is_clonable = false;
+							}
+						}
+					}
 					
 					DBG(errs() << "\tread-only: " << is_constant_as << ", " << is_readonly << ", " << is_load << "; " << is_clonable << "\n";)
 					fix_args.push_back(as_fix_arg_info {

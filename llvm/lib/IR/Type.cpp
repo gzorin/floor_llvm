@@ -318,7 +318,7 @@ bool Type::isImageType() const {
   return false;
 }
 
-bool Type::isImageArrayType() const {
+bool Type::isArrayImageType() const {
   if (!isArrayTy()) {
 	return false;
   }
@@ -336,6 +336,18 @@ bool Type::isImageArrayType() const {
 	return true;
   }
   return false;
+}
+
+bool Type::isArrayBufferType() const {
+  if (!isArrayTy()) {
+	return false;
+  }
+
+  const auto elem_type = getArrayElementType();
+  if (!elem_type->isPointerTy() || elem_type->getPointerAddressSpace() == 0) {
+	return false;
+  }
+  return true;
 }
 
 bool Type::isFlattenedFloorArgBufferType() const {

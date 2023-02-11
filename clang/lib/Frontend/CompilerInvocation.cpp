@@ -1839,7 +1839,6 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
                                 Args.hasArg(OPT_emit_spirv_container));
   Opts.MetalIntelWorkarounds = Args.hasArg(OPT_metal_intel_workarounds);
   Opts.MetalNvidiaWorkarounds = Args.hasArg(OPT_metal_nvidia_workarounds);
-  Opts.MetalNoArrayImage = Args.hasArg(OPT_metal_no_array_image);
   Opts.MetalSoftPrintf = Args.hasArg(OPT_metal_soft_printf);
   Opts.SPIRIntelWorkarounds = Args.hasArg(OPT_cl_spir_intel_workarounds);
   Opts.VulkanIUBSize = uint32_t(std::min(uint64_t(~0u),
@@ -3798,9 +3797,6 @@ bool CompilerInvocation::ParseLangArgs(LangOptions &Opts, ArgList &Args,
   }
 
   // metal lang options
-  if (Args.hasArg(OPT_metal_no_array_image)) {
-    Opts.metal_no_array_image = true;
-  }
   if (Args.hasArg(OPT_metal_soft_printf)) {
     Opts.metal_soft_printf = true;
   }

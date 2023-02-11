@@ -3344,6 +3344,7 @@ public:
   /// "ignore_vec_compat" will not consider [[vector_compat]] at any level, but keep vector-compat structs instead
   /// "ignore_bases" will not consider/include any bases classes
   /// "expand_array_image" will expand image arrays into individual images
+  /// "expand_array_other" will expand non-image arrays into individual components
   /// "merge_parent_field_decl" will merge the parent field with the child field if there is a singular child
   /// NOTE: for unions, only the first field will be considered
   /// NOTE: this also transform/converts [[vector_compat]] types to clang vector types
@@ -3354,6 +3355,7 @@ public:
                                                                   const bool ignore_vec_compat = false,
                                                                   const bool ignore_bases = false,
                                                                   const bool expand_array_image = true,
+                                                                  const bool expand_array_other = true,
                                                                   const bool merge_parent_field_decl = false) const;
 
   /// Returns the corresponding clang vector type for a [[vector_compat]] aggregate.
@@ -3374,6 +3376,7 @@ private:
                                          const FieldDecl* parent_field_decl,
                                          const std::string& name,
                                          const bool expand_array_image,
+                                         const bool expand_array_other,
                                          const bool merge_parent_field_decl,
                                          MangleContext* MC,
                                          std::vector<ASTContext::aggregate_scalar_entry>& ret) const;

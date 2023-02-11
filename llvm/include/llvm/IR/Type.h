@@ -280,7 +280,11 @@ public:
 
   /// Return true if this is an array type containing images.
   /// Images are identified as pointers to opaque struct types with an OpenCL image name.
-  bool isImageArrayType() const;
+  bool isArrayImageType() const;
+
+  /// Return true if this is an array type containing buffers.
+  /// Buffers are identified as pointers with an address space != default/0.
+  bool isArrayBufferType() const;
 
   /// Return true if this is a flattened libfloor argument buffer type.
   bool isFlattenedFloorArgBufferType() const;

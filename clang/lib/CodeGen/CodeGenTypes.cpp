@@ -102,7 +102,7 @@ void CodeGenTypes::addRecordTypeName(const RecordDecl *RD,
 /// memory representation is usually i8 or i32, depending on the target.
 llvm::Type *CodeGenTypes::ConvertTypeForMem(QualType T, bool ForBitField,
                                             bool ForRecordField,
-                                            bool single_field_array_image_only) {
+                                            bool single_field_array_image_or_buffer_only) {
   if (T->isConstantMatrixType()) {
     const Type *Ty = Context.getCanonicalType(T).getTypePtr();
     const ConstantMatrixType *MT = cast<ConstantMatrixType>(Ty);
@@ -114,7 +114,7 @@ llvm::Type *CodeGenTypes::ConvertTypeForMem(QualType T, bool ForBitField,
     }
   }
 
-  llvm::Type *R = ConvertType(T, !ForRecordField, single_field_array_image_only);
+  llvm::Type *R = ConvertType(T, !ForRecordField, single_field_array_image_or_buffer_only);
 
   // If this is a bool type, or a bit-precise integer type in a bitfield
   // representation, map this integer to the target-specified size.
@@ -424,16 +424,20 @@ llvm::Type *CodeGenTypes::ConvertFunctionTypeInternal(QualType QFT) {
 }
 
 /// ConvertType - Convert the specified type to its LLVM form.
-llvm::Type *CodeGenTypes::ConvertType(QualType T, bool convert_array_image_type,
-                                      bool single_field_array_image_only) {
+llvm::Type *CodeGenTypes::ConvertType(QualType T, bool convert_array_image_or_buffer_type,
+                                      bool single_field_array_image_or_buffer_only) {
   T = Context.getCanonicalType(T);
 
   const Type *Ty = T.getTypePtr();
 
   // intercept image arrays before RT conversion
-  // NOTE: we do not want this when this is part of a record/struct (default single_field_array_image_only == true)
-  if (convert_array_image_type && Ty->isArrayImageType(single_field_array_image_only))
+  // NOTE: we do not want this when this is part of a record/struct (default single_field_array_image_or_buffer_only == true)
+  if (convert_array_image_or_buffer_type && Ty->isArrayImageType(single_field_array_image_or_buffer_only))
     return ConvertArrayImageType(Ty);
+
+  // same thing for buffer arrays (Vulkan only)
+  if (Context.getLangOpts().Vulkan && convert_array_image_or_buffer_type && Ty->isArrayBufferType())
+    return ConvertArrayBufferType(Ty);
 
   // For the device-side compilation, CUDA device builtin surface/texture types
   // may be represented in different types.
@@ -1047,7 +1051,7 @@ llvm::Type *CodeGenTypes::ConvertArrayImageType(const Type* Ty) {
       } else if (elem_type->isAggregateImageType()) {
         // must be an aggregate image with exactly one image
         const auto agg_img_type = elem_type->getAsCXXRecordDecl();
-        auto agg_img_fields = get_aggregate_scalar_fields(agg_img_type, agg_img_type, false, false, false, true /* TODO */);
+        auto agg_img_fields = get_aggregate_scalar_fields(agg_img_type, agg_img_type, false, false, false, true /* TODO */, true /* TODO */);
         if (agg_img_fields.size() != 1) return nullptr;
         return llvm::ArrayType::get(ConvertType(agg_img_fields[0].type), CAT->getSize().getZExtValue());
       }
@@ -1077,11 +1081,67 @@ llvm::Type *CodeGenTypes::ConvertArrayImageType(const Type* Ty) {
   // must be an aggregate image with exactly one image
   const auto agg_img_type = CAT->getElementType()->getAsCXXRecordDecl();
   auto agg_img_fields = get_aggregate_scalar_fields(agg_img_type, agg_img_type, false, false, false,
-                                                    true /* TODO */);
+                                                    true /* TODO */, true /* TODO */);
   if(agg_img_fields.size() != 1) return nullptr;
 
   // got everything we need
   return llvm::ArrayType::get(ConvertType(agg_img_fields[0].type), CAT->getSize().getZExtValue());
+}
+
+llvm::Type *CodeGenTypes::ConvertArrayBufferType(const Type* Ty) {
+  // ptr to array of buffer
+  if (Ty->isPointerType() &&
+      Ty->getPointeeType()->isArrayType() &&
+      Ty->getPointeeType()->getAsArrayTypeUnsafe()->getElementType()->isPointerType() &&
+      Ty->getPointeeType()->getAsArrayTypeUnsafe()->getElementType()->getPointeeType().getAddressSpace() != LangAS::Default) {
+    auto converted_type = ConvertArrayBufferType(Ty->getPointeeType().getTypePtr());
+    if (!converted_type) {
+      return nullptr;
+    }
+    return llvm::PointerType::get(converted_type, 0);
+  }
+
+  // simple C-style array that contains a buffer
+  if (Ty->isArrayType()) {
+    const auto array_elem_type = Ty->getAsArrayTypeUnsafe()->getElementType();
+    if (array_elem_type->isPointerType() && array_elem_type->getPointeeType().getAddressSpace() != LangAS::Default) {
+      const ConstantArrayType *CAT = Context.getAsConstantArrayType(QualType(Ty, 0));
+      return llvm::ArrayType::get(ConvertType(array_elem_type, false, false) /* do not recursively convert this */, CAT->getSize().getZExtValue());
+    }
+    assert(false && "invalid array of buffers type");
+  }
+
+  // must be struct or class, union is not allowed
+  if (!Ty->isStructureOrClassType()) return nullptr;
+
+  // must be a cxx rdecl
+  const auto decl = Ty->getAsCXXRecordDecl();
+  if (!decl) return nullptr;
+
+  // must have definition
+  if (!decl->hasDefinition()) return nullptr;
+
+  // must have exactly one field
+  const auto field_count = std::distance(decl->field_begin(), decl->field_end());
+  // NOTE: contrary to images and aggregate images, we always want this to be a single field
+  if (field_count != 1) return nullptr;
+
+  // field must be an array
+  const QualType arr_field_type = decl->field_begin()->getType();
+  const ConstantArrayType *CAT = Context.getAsConstantArrayType(arr_field_type);
+  if (!CAT) return nullptr;
+
+  // element type must be a buffer
+  const auto elem_type = arr_field_type->getAsArrayTypeUnsafe()->getElementType();
+  if (!elem_type->isPointerType()) {
+    return nullptr;
+  }
+  if (elem_type->getPointeeType().getAddressSpace() == LangAS::Default) {
+    return nullptr;
+  }
+
+  // got everything we need
+  return llvm::ArrayType::get(ConvertType(elem_type, false, false) /* do not recursively convert this */, CAT->getSize().getZExtValue());
 }
 
 
@@ -1183,7 +1243,9 @@ CodeGenTypes::get_aggregate_scalar_fields(const CXXRecordDecl* root_decl,
 										  const bool ignore_vec_compat,
 										  const bool ignore_bases,
 										  const bool expand_array_image,
+										  const bool expand_array_other,
 										  const bool merge_parent_field_decl) const {
 	return Context.get_aggregate_scalar_fields(root_decl, decl, &TheCXXABI.getMangleContext(), ignore_root_vec_compat,
-											   ignore_vec_compat, ignore_bases, expand_array_image, merge_parent_field_decl);
+											   ignore_vec_compat, ignore_bases, expand_array_image, expand_array_other,
+											   merge_parent_field_decl);
 }

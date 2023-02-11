@@ -12357,7 +12357,7 @@ static std::string aggregate_scalar_fields_mangle(const CXXRecordDecl* root_decl
 }
 
 clang::QualType ASTContext::get_compat_vector_type(const CXXRecordDecl* decl) const {
-	const auto fields = get_aggregate_scalar_fields(decl, decl, nullptr, true, false, false, true);
+	const auto fields = get_aggregate_scalar_fields(decl, decl, nullptr, true, false, false, true, true);
 	
 	const auto vec_size = fields.size();
 	if (vec_size < 1 || vec_size > 4) {
@@ -12383,29 +12383,31 @@ void ASTContext::aggregate_scalar_fields_add_array(const CXXRecordDecl* root_dec
 												   const FieldDecl* parent_field_decl,
 												   const std::string& name,
 												   const bool expand_array_image,
+												   const bool expand_array_other,
 												   const bool merge_parent_field_decl,
 												   MangleContext* MC,
 												   std::vector<ASTContext::aggregate_scalar_entry>& ret) const {
-	if (expand_array_image ||
-		!(CAT->getElementType()->isAggregateImageType() ||
-		  CAT->getElementType()->isImageType())) {
+	const auto is_image_elem = (CAT->getElementType()->isAggregateImageType() ||
+								CAT->getElementType()->isImageType());
+	if ((expand_array_image && is_image_elem) || (expand_array_other && !is_image_elem)) {
 		const auto count = CAT->getSize().getZExtValue();
 		const auto ET = CAT->getElementType();
 		if (const auto arr_rdecl = ET->getAsCXXRecordDecl()) {
-			auto contained_ret = get_aggregate_scalar_fields(root_decl, arr_rdecl, MC, false, false, false, expand_array_image);
+			auto contained_ret = get_aggregate_scalar_fields(root_decl, arr_rdecl, MC, false, false, false, expand_array_image, expand_array_other);
 			for (auto& entry : contained_ret) {
 				entry.parents.push_back(parent_decl);
 			}
 			for (uint64_t i = 0; i < count; ++i) {
 				ret.insert(ret.end(), contained_ret.begin(), contained_ret.end());
 			}
-		} else if(ET->isArrayType()) {
+		} else if (ET->isArrayType()) {
 			const auto aoa_decl = dyn_cast<ConstantArrayType>(ET->getAsArrayTypeUnsafe());
 			assert(aoa_decl && "array type must be a constant array");
 			for (uint64_t i = 0; i < count; ++i) {
 				const auto idx_str = "_" + std::to_string(i);
 				aggregate_scalar_fields_add_array(root_decl, parent_decl, aoa_decl, attrs, parent_field_decl,
-												  name + idx_str, expand_array_image, merge_parent_field_decl, MC, ret);
+												  name + idx_str, expand_array_image, expand_array_other,
+												  merge_parent_field_decl, MC, ret);
 			}
 		} else {
 			for (uint64_t i = 0; i < count; ++i) {
@@ -12447,6 +12449,7 @@ ASTContext::get_aggregate_scalar_fields(const CXXRecordDecl* root_decl,
 										const bool ignore_vec_compat,
 										const bool ignore_bases,
 										const bool expand_array_image,
+										const bool expand_array_other,
 										const bool merge_parent_field_decl) const {
 	if (decl == nullptr) return {};
 	
@@ -12478,7 +12481,8 @@ ASTContext::get_aggregate_scalar_fields(const CXXRecordDecl* root_decl,
 	if (!ignore_bases) {
 		for (const auto& base : decl->bases()) {
 			auto base_ret = get_aggregate_scalar_fields(root_decl, base.getType()->getAsCXXRecordDecl(), MC,
-														false, false, false, expand_array_image, merge_parent_field_decl);
+														false, false, false, expand_array_image, expand_array_other,
+														merge_parent_field_decl);
 			for (auto& elem : base_ret) {
 				elem.is_in_base = true;
 			}
@@ -12489,7 +12493,7 @@ ASTContext::get_aggregate_scalar_fields(const CXXRecordDecl* root_decl,
 	}
 	
 	// TODO/NOTE: make sure attrs are correctly forwarded/inherited/passed-through
-	const auto add_field = [this, &root_decl, &decl, &expand_array_image, &merge_parent_field_decl, &ret,
+	const auto add_field = [this, &root_decl, &decl, &expand_array_image, &expand_array_other, &merge_parent_field_decl, &ret,
 							&MC, &ignore_vec_compat](RecordDecl::field_iterator field_iter) {
 		if (const auto rdecl = field_iter->getType()->getAsCXXRecordDecl()) {
 			if (rdecl->hasAttr<VectorCompatAttr>() && ignore_vec_compat) {
@@ -12529,7 +12533,7 @@ ASTContext::get_aggregate_scalar_fields(const CXXRecordDecl* root_decl,
 				});
 			} else {
 				auto contained_ret = get_aggregate_scalar_fields(root_decl, rdecl, MC, false, false, false, expand_array_image,
-																 merge_parent_field_decl);
+																 expand_array_other, merge_parent_field_decl);
 				// if we got a singular field (an we're the direct parent) and "merge_parent_field_decl" is enabled,
 				// overwrite the field decl with the current field decl (the parent)
 				if (merge_parent_field_decl &&
@@ -12550,7 +12554,8 @@ ASTContext::get_aggregate_scalar_fields(const CXXRecordDecl* root_decl,
 			assert(arr_decl && "array type must be a constant array");
 			aggregate_scalar_fields_add_array(root_decl, decl, arr_decl,
 											  field_iter->hasAttrs() ? &field_iter->getAttrs() : nullptr, *field_iter,
-											  field_iter->getName().str(), expand_array_image, merge_parent_field_decl, MC, ret);
+											  field_iter->getName().str(), expand_array_image, expand_array_other,
+											  merge_parent_field_decl, MC, ret);
 		} else {
 			ret.push_back(aggregate_scalar_entry {
 				field_iter->getType(),

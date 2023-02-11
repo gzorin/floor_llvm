@@ -4673,6 +4673,15 @@ private:
     LocalDeclMap.insert({VD, Addr});
   }
 
+  /// sets or replaces the address of a local variable
+  /// NOTE: use this with caution! this is only possible in specific situations
+  void replace_or_set_addr_of_local_var(const VarDecl *VD, Address Addr) {
+    if (auto iter = LocalDeclMap.find(VD); iter != LocalDeclMap.end()) {
+      LocalDeclMap.erase(iter);
+    }
+    LocalDeclMap.insert({VD, Addr});
+  }
+
   /// ExpandTypeFromArgs - Reconstruct a structure of type \arg Ty
   /// from function arguments into \arg Dst. See ABIArgInfo::Expand.
   ///

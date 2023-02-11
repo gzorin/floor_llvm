@@ -4609,3 +4609,49 @@ bool Type::isArrayImageType(bool single_field_arr) const {
     return st_arr_field_type->isAggregateImageType();
   }
 }
+
+bool Type::isArrayBufferType() const {
+  // simple C-style array (or pointer to one) that contains a buffer
+  do {
+    QualType elem_type;
+    if (isArrayType()) {
+      elem_type = getAsArrayTypeUnsafe()->getElementType();
+    } else if (isPointerType() && getPointeeType()->isArrayType()) {
+      elem_type = getPointeeType()->getAsArrayTypeUnsafe()->getElementType();
+    } else {
+      break;
+    }
+    if (!elem_type->isPointerType()) {
+      return false;
+    }
+    if (elem_type->getPointeeType().getAddressSpace() != LangAS::Default) {
+      return true;
+    }
+  } while (false);
+
+  // if not a C array: must be struct or class, union is not allowed
+  if (!isStructureOrClassType()) return false;
+
+  // must be a cxx rdecl
+  const auto decl = getAsCXXRecordDecl();
+  if (!decl) return false;
+
+  // must have definition
+  if (!decl->hasDefinition()) return false;
+
+  // must have exactly one field
+  const auto field_count = std::distance(decl->field_begin(), decl->field_end());
+  // NOTE: contrary to images and aggregate images, we always want this to be a single field
+  if (field_count != 1) return false;
+
+  // field must be an array
+  const QualType arr_field_type = decl->field_begin()->getType();
+  if (!arr_field_type->isArrayType()) return false;
+
+  // element type must be a buffer
+  const auto elem_type = arr_field_type->getAsArrayTypeUnsafe()->getElementType();
+  if (!elem_type->isPointerType()) {
+    return false;
+  }
+  return (elem_type->getPointeeType().getAddressSpace() != LangAS::Default);
+}
