@@ -48,6 +48,10 @@ const char *CudaVersionToString(CudaVersion V) {
     return "11.7";
   case CudaVersion::CUDA_118:
     return "11.8";
+  case CudaVersion::CUDA_120:
+    return "12.0";
+  case CudaVersion::CUDA_121:
+    return "12.1";
   case CudaVersion::NEW:
     return "";
   }
@@ -74,6 +78,8 @@ CudaVersion CudaStringToVersion(const llvm::Twine &S) {
       .Case("11.6", CudaVersion::CUDA_116)
       .Case("11.7", CudaVersion::CUDA_117)
       .Case("11.8", CudaVersion::CUDA_118)
+      .Case("12.0", CudaVersion::CUDA_120)
+      .Case("12.1", CudaVersion::CUDA_121)
       .Default(CudaVersion::UNKNOWN);
 }
 
@@ -271,6 +277,10 @@ CudaVersion ToCudaVersion(llvm::VersionTuple Version) {
     return CudaVersion::CUDA_117;
   case 118:
     return CudaVersion::CUDA_118;
+  case 120:
+    return CudaVersion::CUDA_120;
+  case 121:
+    return CudaVersion::CUDA_121;
   default:
     return CudaVersion::UNKNOWN;
   }
