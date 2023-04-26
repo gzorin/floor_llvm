@@ -92,6 +92,26 @@ void reduceChildren(std::vector<EnumInfo> &Children,
 
 } // namespace
 
+BaseRecordInfo::BaseRecordInfo() : RecordInfo() {}
+BaseRecordInfo::BaseRecordInfo(SymbolID USR, StringRef Name, StringRef Path, bool IsVirtual,
+			   AccessSpecifier Access, bool IsParent)
+	: RecordInfo(USR, Name, Path), IsVirtual(IsVirtual), Access(Access),
+	  IsParent(IsParent) {}
+
+RecordInfo::RecordInfo() : SymbolInfo(InfoType::IT_record) {}
+RecordInfo::RecordInfo(SymbolID USR) : SymbolInfo(InfoType::IT_record, USR) {}
+RecordInfo::RecordInfo(SymbolID USR, StringRef Name)
+	: SymbolInfo(InfoType::IT_record, USR, Name) {}
+RecordInfo::RecordInfo(SymbolID USR, StringRef Name, StringRef Path)
+	: SymbolInfo(InfoType::IT_record, USR, Name, Path) {}
+
+NamespaceInfo::NamespaceInfo() : Info(InfoType::IT_namespace) {}
+NamespaceInfo::NamespaceInfo(SymbolID USR) : Info(InfoType::IT_namespace, USR) {}
+NamespaceInfo::NamespaceInfo(SymbolID USR, StringRef Name)
+	: Info(InfoType::IT_namespace, USR, Name) {}
+NamespaceInfo::NamespaceInfo(SymbolID USR, StringRef Name, StringRef Path)
+	: Info(InfoType::IT_namespace, USR, Name, Path) {}
+
 // Dispatch function.
 llvm::Expected<std::unique_ptr<Info>>
 mergeInfos(std::vector<std::unique_ptr<Info>> &Values) {

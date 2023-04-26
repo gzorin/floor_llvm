@@ -631,6 +631,23 @@ public:
   void writeTo(uint8_t *buf) const override {}
 };
 
+// MinGW specific; information about one individual location in the image
+// that needs to be fixed up at runtime after loading. This represents
+// one individual element in the PseudoRelocTableChunk table.
+class RuntimePseudoReloc {
+public:
+  RuntimePseudoReloc(Defined *sym, SectionChunk *target, uint32_t targetOffset,
+                     int flags)
+      : sym(sym), target(target), targetOffset(targetOffset), flags(flags) {}
+
+  Defined *sym;
+  SectionChunk *target;
+  uint32_t targetOffset;
+  // The Flags field contains the size of the relocation, in bits. No other
+  // flags are currently defined.
+  int flags;
+};
+
 // MinGW specific, for the "automatic import of variables from DLLs" feature.
 // This provides the table of runtime pseudo relocations, for variable
 // references that turned out to need to be imported from a DLL even though
@@ -648,23 +665,6 @@ public:
 
 private:
   std::vector<RuntimePseudoReloc> relocs;
-};
-
-// MinGW specific; information about one individual location in the image
-// that needs to be fixed up at runtime after loading. This represents
-// one individual element in the PseudoRelocTableChunk table.
-class RuntimePseudoReloc {
-public:
-  RuntimePseudoReloc(Defined *sym, SectionChunk *target, uint32_t targetOffset,
-                     int flags)
-      : sym(sym), target(target), targetOffset(targetOffset), flags(flags) {}
-
-  Defined *sym;
-  SectionChunk *target;
-  uint32_t targetOffset;
-  // The Flags field contains the size of the relocation, in bits. No other
-  // flags are currently defined.
-  int flags;
 };
 
 // MinGW specific. A Chunk that contains one pointer-sized absolute value.

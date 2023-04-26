@@ -75,19 +75,7 @@ private:
   std::vector<Chunk> Chunks;
 };
 
-/// Represents a sequence of one or more documents. Knows how to print them in a
-/// list like format, e.g. by prepending with "- " and indentation.
-class BulletList : public Block {
-public:
-  void renderMarkdown(llvm::raw_ostream &OS) const override;
-  void renderPlainText(llvm::raw_ostream &OS) const override;
-  std::unique_ptr<Block> clone() const override;
-
-  class Document &addItem();
-
-private:
-  std::vector<class Document> Items;
-};
+class BulletList;
 
 /// A format-agnostic representation for structured text. Allows rendering into
 /// markdown and plaintext.
@@ -124,6 +112,21 @@ public:
 private:
   std::vector<std::unique_ptr<Block>> Children;
 };
+
+/// Represents a sequence of one or more documents. Knows how to print them in a
+/// list like format, e.g. by prepending with "- " and indentation.
+class BulletList : public Block {
+public:
+  void renderMarkdown(llvm::raw_ostream &OS) const override;
+  void renderPlainText(llvm::raw_ostream &OS) const override;
+  std::unique_ptr<Block> clone() const override;
+
+  class Document &addItem();
+
+private:
+  std::vector<class Document> Items;
+};
+
 } // namespace markup
 } // namespace clangd
 } // namespace clang
