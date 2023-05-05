@@ -1105,7 +1105,14 @@ static Value *likeBitCastFromVector(InstCombinerImpl &IC, Value *V) {
 /// the caller must erase the store instruction. We have to let the caller erase
 /// the store instruction as otherwise there is no way to signal whether it was
 /// combined or not: IC.EraseInstFromFunction returns a null pointer.
-static bool combineStoreToValueType(InstCombinerImpl &IC, StoreInst &SI) {
+static bool combineStoreToValueType(InstCombinerImpl &IC, StoreInst &SI,
+                                    const bool isVulkan) {
+  if (isVulkan) {
+    // Vulkan vendor backends do not like pointer bitcasts ...
+    // -> prefer bitcasting the value instead of the pointer
+    return false;
+  }
+
   // FIXME: We could probably with some care handle both volatile and ordered
   // atomic stores here but it isn't clear that this is important.
   if (!SI.isUnordered())
@@ -1333,7 +1340,7 @@ Instruction *InstCombinerImpl::visitStoreInst(StoreInst &SI) {
   Value *Ptr = SI.getOperand(1);
 
   // Try to canonicalize the stored type.
-  if (combineStoreToValueType(*this, SI))
+  if (combineStoreToValueType(*this, SI, isVulkan))
     return eraseInstFromFunction(SI);
 
   // Attempt to improve the alignment.

@@ -75,6 +75,10 @@ namespace {
 	struct VulkanImage : public FloorImageBasePass {
 		static char ID; // Pass identification, replacement for typeid
 		
+		//! Vulkan currently (as of Vulkan 1.3 / SPIR-V 1.6) does not actually support float16 sampling,
+		//! if this ever changes / gets supported properly, set this to true
+		static constexpr const bool can_vulkan_handle_float16 = false;
+		
 		VulkanImage(const uint32_t image_capabilities_ = 0) :
 		FloorImageBasePass(ID, IMAGE_TYPE_ID::OPAQUE, image_capabilities_) {
 			initializeVulkanImagePass(*PassRegistry::getPassRegistry());
@@ -293,21 +297,25 @@ namespace {
 			// (this is actually easy enough, since everything is very static)
 			std::string vk_func_name;
 			llvm::Type* ret_type;
-			if(func_name.endswith(".float")) {
+			bool needs_float_to_half_conversion = false;
+			if (func_name.endswith(".float")) {
 				vk_func_name = "_Z11read_imagef";
 				ret_type = llvm::FixedVectorType::get(llvm::Type::getFloatTy(*ctx), 4);
-			}
-			else if(func_name.endswith(".int")) {
+			} else if (func_name.endswith(".int")) {
 				vk_func_name = "_Z11read_imagei";
 				ret_type = llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 4);
-			}
-			else if(func_name.endswith(".uint")) {
+			} else if (func_name.endswith(".uint")) {
 				vk_func_name = "_Z12read_imageui";
 				ret_type = llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 4);
-			}
-			else if(func_name.endswith(".half")) {
+			} else if (func_name.endswith(".half")) {
 				vk_func_name = "_Z11read_imageh";
-				ret_type = llvm::FixedVectorType::get(llvm::Type::getHalfTy(*ctx), 4);
+				if constexpr (can_vulkan_handle_float16) {
+					ret_type = llvm::FixedVectorType::get(llvm::Type::getHalfTy(*ctx), 4);
+				} else {
+					// -> use float32 return type instead, but keep function name (for flagging later on)
+					ret_type = llvm::FixedVectorType::get(llvm::Type::getFloatTy(*ctx), 4);
+					needs_float_to_half_conversion = true;
+				}
 			}
 			// unknown -> ignore
 			else return;
@@ -518,9 +526,12 @@ namespace {
 			read_call->setDebugLoc(I.getDebugLoc()); // keep debug loc
 			read_call->setCallingConv(CallingConv::FLOOR_FUNC);
 			
-			// if this is a depth compare, the return type is a float -> create a float4
 			llvm::Value* read_call_result = read_call;
-			if(is_depth && is_compare) {
+			if (needs_float_to_half_conversion) {
+				// convert result from float32 to float16
+				read_call_result = builder->CreateFPTrunc(read_call, llvm::FixedVectorType::get(llvm::Type::getHalfTy(*ctx), 4));
+			} else if (is_depth && is_compare) {
+				// if this is a depth compare, the return type is a float -> create a float4
 				read_call_result = UndefValue::get(llvm::FixedVectorType::get(llvm::Type::getFloatTy(*ctx), 4));
 				read_call_result = builder->CreateInsertElement(read_call_result, read_call, builder->getInt32(0));
 				// NOTE: rest of vector is undef/zero (and will be stripped away again anyways)
@@ -571,21 +582,25 @@ namespace {
 			}
 			
 			std::string vk_func_name, dtype;
-			if(func_name.endswith(".float")) {
+			bool needs_half_to_float_conversion = false;
+			if (func_name.endswith(".float")) {
 				vk_func_name = "_Z12write_imagef";
 				dtype = "f";
-			}
-			else if(func_name.endswith(".int")) {
+			} else if (func_name.endswith(".int")) {
 				vk_func_name = "_Z12write_imagei";
 				dtype = "i";
-			}
-			else if(func_name.endswith(".uint")) {
+			} else if (func_name.endswith(".uint")) {
 				vk_func_name = "_Z13write_imageui";
 				dtype = "j";
-			}
-			else if(func_name.endswith(".half")) {
+			} else if (func_name.endswith(".half")) {
 				vk_func_name = "_Z12write_imageh";
-				dtype = "h";
+				if constexpr (can_vulkan_handle_float16) {
+					dtype = "h";
+				} else {
+					// -> use float32 data type instead, but keep function base name (for flagging later on)
+					dtype = "f";
+					needs_half_to_float_conversion = true;
+				}
 			}
 			// unknown -> ignore
 			else return;
@@ -625,8 +640,12 @@ namespace {
 			// -> data
 			// data is always a vector4
 			vk_func_name += "Dv4_" + dtype;
-			func_arg_types.push_back(data_arg->getType());
-			func_args.push_back(data_arg);
+			Value* data_arg_ptr = data_arg;
+			if (needs_half_to_float_conversion) {
+				data_arg_ptr = builder->CreateFPExt(data_arg, llvm::FixedVectorType::get(llvm::Type::getFloatTy(*ctx), 4));
+			}
+			func_arg_types.push_back(data_arg_ptr->getType());
+			func_args.push_back(data_arg_ptr);
 			
 			// -> lod
 			vk_func_name += "i";
