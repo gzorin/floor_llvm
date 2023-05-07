@@ -155,6 +155,18 @@ void cfg_translator::translate_bb(CFGNode &node) {
   }
 }
 
+bool cfg_translator::needs_fake_selection(CFGNode &node) {
+  if (node.merge == MergeType::Loop &&
+      node.ir.terminator.type == Terminator::Type::Condition &&
+      node.ir.terminator.true_block != node.ir.merge_info.merge_block &&
+      node.ir.terminator.true_block != node.ir.merge_info.continue_block &&
+      node.ir.terminator.false_block != node.ir.merge_info.merge_block &&
+      node.ir.terminator.false_block != node.ir.merge_info.continue_block) {
+    return true;
+  }
+  return false;
+}
+
 void cfg_translator::add_or_update_terminator(CFGNode &node) {
   // remove existing if there is one
   if (auto existing_term = node.BB.getTerminator(); existing_term) {
@@ -165,8 +177,32 @@ void cfg_translator::add_or_update_terminator(CFGNode &node) {
   auto &term = node.ir.terminator;
   switch (term.type) {
   case Terminator::Type::Condition: {
-    BranchInst::Create(&term.true_block->BB, &term.false_block->BB,
-                       term.condition, &node.BB);
+    if (needs_fake_selection(node)) {
+      // NOTE: need to insert these *after* the current node
+      auto fake_selection_bb = BasicBlock::Create(
+          ctx, node.name + ".fake_selection", &F, node.BB.getNextNode());
+      auto unreachable_bb = BasicBlock::Create(ctx, node.name + ".unreachable",
+                                               &F, node.BB.getNextNode());
+
+      // -> now branches to fake selection BB
+      BranchInst::Create(fake_selection_bb, &node.BB);
+
+      // must create this before calling create_selection_merge()
+      new UnreachableInst(ctx, unreachable_bb);
+
+      // -> fake selection now contains the actual conditional branch
+      auto cond_br =
+          BranchInst::Create(&term.true_block->BB, &term.false_block->BB,
+                             term.condition, fake_selection_bb);
+      create_selection_merge(cond_br, unreachable_bb);
+
+      // we need to replace PHI incoming BBs later on (from this BB to the new
+      // fake selection)
+      node.phi_override = fake_selection_bb;
+    } else {
+      BranchInst::Create(&term.true_block->BB, &term.false_block->BB,
+                         term.condition, &node.BB);
+    }
     break;
   }
   case Terminator::Type::Branch: {
@@ -248,8 +284,8 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
     } else {
       // check if the existing terminator is equal to the CFG terminator
       const auto term_type = get_terminator_type(*terminator);
-      if (term_type != node.ir.terminator.type) {
-        // different type -> update
+      if (term_type != node.ir.terminator.type || needs_fake_selection(node)) {
+        // different type or fake selection required -> update
         add_or_update_terminator(node);
       } else {
         // equal type, check if operands are the same
@@ -370,8 +406,8 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
           }
 
           // remove existing incoming values
-          // NOTE: this also ensures that unreachable BBs are cleared out -> no
-          // longer have any users
+          // NOTE: this also ensures that unreachable BBs are cleared out
+          // -> no longer have any users
           for (uint32_t idx = 0, count = phi->getNumIncomingValues();
                idx < count; ++idx) {
             phi->removeIncomingValue(0u, false /* do NOT delete the phi once no incoming values are left */);
@@ -390,8 +426,12 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
 
           // add actual/updated incoming values
           for (auto &incoming : piter->incoming) {
-            if (reachable_blocks.count(&incoming.block->BB) > 0) {
-              phi->addIncoming(incoming.value, &incoming.block->BB);
+            auto incoming_bb = &incoming.block->BB;
+            if (incoming.block->phi_override) {
+              incoming_bb = incoming.block->phi_override;
+            }
+            if (reachable_blocks.count(incoming_bb) > 0) {
+              phi->addIncoming(incoming.value, incoming_bb);
             } else {
               assert(false && "phi incoming BB unreachable");
             }
@@ -402,11 +442,9 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
           if (node.BB.hasNPredecessorsOrMore(phi->getNumIncomingValues() + 1)) {
             std::unordered_map<const BasicBlock *, Value *> unique_preds;
             std::vector<BasicBlock *> dup_preds;
-            uint32_t ignored_bbs = 0;
             for (auto pred : predecessors(&node.BB)) {
               if (reachable_blocks.count(pred) == 0) {
                 // ignore unreachable predecessors that will be removed next
-                ++ignored_bbs;
                 continue;
               }
               if (unique_preds.count(pred) == 0) {
@@ -512,8 +550,8 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
             // no selection merge block exists
             // -> create a fake unreachable one
             assert(node.ir.terminator.type == Terminator::Type::Condition);
-            auto fake_merge = BasicBlock::Create(
-                ctx, node.name + ".fake_merge", &F, &node.BB);
+            auto fake_merge = BasicBlock::Create(ctx, node.name + ".fake_merge",
+                                                 &F, &node.BB);
             new UnreachableInst(ctx, fake_merge);
             create_selection_merge(term, fake_merge);
           }
@@ -521,10 +559,15 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
           llvm_unreachable("invalid selection merge");
         }
       } else if (node.merge == MergeType::Loop) {
-        if (node.loop_merge_block != nullptr) {
-          if (node.pred_back_edge != nullptr) {
-            create_loop_merge(term, &node.loop_merge_block->BB,
-                              &node.pred_back_edge->BB);
+        if (node.ir.merge_info.merge_block != nullptr) {
+          if (node.ir.merge_info.continue_block != nullptr) {
+            auto continue_bb =
+                (&node.ir.merge_info.continue_block->BB == &node.BB &&
+                         node.phi_override
+                     ? node.phi_override
+                     : &node.ir.merge_info.continue_block->BB);
+            create_loop_merge(term, &node.ir.merge_info.merge_block->BB,
+                              continue_bb);
           } else {
             if (&node == entry) {
               // if this is the entry node, we can't simply place a fake
@@ -538,12 +581,13 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
               BranchInst::Create(&node.BB, new_entry_block);
             }
 
-            // continue block does not exist -> need to create a fake incoming
-            // block
+            // continue block does not exist
+            // -> need to create a fake incoming block
             auto continue_block = BasicBlock::Create(
                 ctx, node.name + ".fake_continue", &F, &node.BB);
             BranchInst::Create(&node.BB, continue_block);
-            create_loop_merge(term, &node.loop_merge_block->BB, continue_block);
+            create_loop_merge(term, &node.ir.merge_info.merge_block->BB,
+                              continue_block);
 
             // update phis: need to insert incoming undef value for the new
             // continue block
@@ -551,6 +595,18 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
               phi.addIncoming(UndefValue::get(phi.getType()), continue_block);
             }
           }
+        } else if (node.ir.merge_info.continue_block != nullptr) {
+          // merge block does not exist
+          // -> need to create a fake one
+          auto merge_block = BasicBlock::Create(ctx, node.name + ".fake_merge",
+                                                &F, node.BB.getNextNode());
+          new UnreachableInst(ctx, merge_block);
+          auto continue_bb =
+              (&node.ir.merge_info.continue_block->BB == &node.BB &&
+                       node.phi_override
+                   ? node.phi_override
+                   : &node.ir.merge_info.continue_block->BB);
+          create_loop_merge(term, merge_block, continue_bb);
         } else {
           llvm_unreachable("invalid loop merge");
         }
@@ -575,6 +631,7 @@ CallInst *cfg_translator::insert_merge_block_marker(BasicBlock *merge_block) {
     merge_block_func->setDoesNotRecurse();
   }
 
+  assert(merge_block->getTerminator());
   CallInst *merge_block_call =
       CallInst::Create(merge_block_func, "", merge_block->getTerminator());
   merge_block_call->setCallingConv(CallingConv::FLOOR_FUNC);
@@ -600,6 +657,7 @@ cfg_translator::insert_continue_block_marker(BasicBlock *continue_block) {
     continue_block_func->setDoesNotRecurse();
   }
 
+  assert(continue_block->getTerminator());
   CallInst *continue_block_call = CallInst::Create(
       continue_block_func, "", continue_block->getTerminator());
   continue_block_call->setCallingConv(CallingConv::FLOOR_FUNC);
@@ -627,6 +685,7 @@ void cfg_translator::create_loop_merge(Instruction *insert_before,
     loop_merge_func->setDoesNotRecurse();
   }
   llvm::Value *merge_vars[]{bb_merge, bb_continue};
+  assert(insert_before);
   CallInst *loop_merge_call =
       CallInst::Create(loop_merge_func, merge_vars, "", insert_before);
   loop_merge_call->setCallingConv(CallingConv::FLOOR_FUNC);
@@ -653,6 +712,7 @@ void cfg_translator::create_selection_merge(Instruction *insert_before,
     sel_merge_func->setDoesNotRecurse();
   }
   llvm::Value *merge_vars[]{merge_block};
+  assert(insert_before);
   CallInst *sel_merge_call =
       CallInst::Create(sel_merge_func, merge_vars, "", insert_before);
   sel_merge_call->setCallingConv(CallingConv::FLOOR_FUNC);

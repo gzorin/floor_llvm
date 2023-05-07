@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ 9e2c26d15c0eeac91fb8c6dda3aff8f6a602c0b6
+// @ 51f9c11f6a3ce01ef51c859f40d663eb3bb5883b
 //
 //===----------------------------------------------------------------------===//
 

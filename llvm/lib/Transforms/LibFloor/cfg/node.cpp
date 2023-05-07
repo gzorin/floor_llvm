@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ 9e2c26d15c0eeac91fb8c6dda3aff8f6a602c0b6
+// @ 51f9c11f6a3ce01ef51c859f40d663eb3bb5883b
 //
 //===----------------------------------------------------------------------===//
 
@@ -376,9 +376,11 @@ void CFGNode::retarget_branch_with_intermediate_node(CFGNode *to_prev,
   to_next->recompute_immediate_dominator();
 }
 
-void CFGNode::retarget_branch(CFGNode *to_prev, CFGNode *to_next) {
+void CFGNode::retarget_branch_pre_traversal(CFGNode *to_prev,
+                                            CFGNode *to_next) {
   // LOGI("Retargeting branch for %s: %s -> %s\n", name.c_str(),
   // to_prev->name.c_str(), to_next->name.c_str());
+
   assert(std::find(succ.begin(), succ.end(), to_prev) != succ.end());
   assert(std::find(to_prev->pred.begin(), to_prev->pred.end(), this) !=
          to_prev->pred.end());
@@ -398,10 +400,30 @@ void CFGNode::retarget_branch(CFGNode *to_prev, CFGNode *to_next) {
   // If to_prev now becomes unreachable, just replace pred in-place to avoid a
   // stale pred. The stale pred will be cleaned up later when recomputing CFG.
   if (to_prev->pred.empty() && !to_prev->pred_back_edge &&
-      replace_itr != to_next->pred.end())
+      replace_itr != to_next->pred.end()) {
     *replace_itr = this;
-  else
+  } else {
     to_next->add_unique_pred(this);
+  }
+
+  if (ir.terminator.direct_block == to_prev) {
+    ir.terminator.direct_block = to_next;
+  }
+  if (ir.terminator.true_block == to_prev) {
+    ir.terminator.true_block = to_next;
+  }
+  if (ir.terminator.false_block == to_prev) {
+    ir.terminator.false_block = to_next;
+  }
+  for (auto &c : ir.terminator.cases) {
+    if (c.node == to_prev) {
+      c.node = to_next;
+    }
+  }
+}
+
+void CFGNode::retarget_branch(CFGNode *to_prev, CFGNode *to_next) {
+  retarget_branch_pre_traversal(to_prev, to_next);
 
   // Branch targets have changed, so recompute immediate dominators.
   if (to_prev->forward_post_visit_order > to_next->forward_post_visit_order) {
@@ -416,16 +438,6 @@ void CFGNode::retarget_branch(CFGNode *to_prev, CFGNode *to_next) {
   // I am not sure if it's technically possible that we have to recompute the
   // entire post domination graph now?
   recompute_immediate_post_dominator();
-
-  if (ir.terminator.direct_block == to_prev)
-    ir.terminator.direct_block = to_next;
-  if (ir.terminator.true_block == to_prev)
-    ir.terminator.true_block = to_next;
-  if (ir.terminator.false_block == to_prev)
-    ir.terminator.false_block = to_next;
-  for (auto &c : ir.terminator.cases)
-    if (c.node == to_prev)
-      c.node = to_next;
 }
 
 void CFGNode::retarget_fake_succ(CFGNode *to_prev, CFGNode *to_next) {
@@ -557,6 +569,18 @@ bool CFGNode::block_is_jump_thread_ladder() const {
   // Detect a jump thread block. If the branch target directly depends on the
   // incoming blocks, we have this scenario.
   return ir.terminator.condition == (llvm::Value *)phi.phi;
+}
+
+bool CFGNode::trivially_reaches_backward_visited_node() const {
+  if (backward_visited) {
+    return true;
+  } else if (succ.size() == 1) {
+    return succ.front()->trivially_reaches_backward_visited_node();
+  } else if (fake_succ.size() == 1) {
+    return fake_succ.front()->trivially_reaches_backward_visited_node();
+  } else {
+    return false;
+  }
 }
 
 } // namespace llvm

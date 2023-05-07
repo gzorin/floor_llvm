@@ -68,6 +68,7 @@ protected:
   void translate_bb(CFGNode &node);
 
   void add_or_update_terminator(CFGNode &node);
+  bool needs_fake_selection(CFGNode &node);
 
   CallInst *insert_merge_block_marker(BasicBlock *merge_block);
   CallInst *insert_continue_block_marker(BasicBlock *continue_block);

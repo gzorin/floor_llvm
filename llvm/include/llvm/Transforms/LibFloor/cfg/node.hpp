@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ 9e2c26d15c0eeac91fb8c6dda3aff8f6a602c0b6
+// @ 51f9c11f6a3ce01ef51c859f40d663eb3bb5883b
 //
 //===----------------------------------------------------------------------===//
 
@@ -108,6 +108,7 @@ private:
   CFGNode *loop_merge_block = nullptr;
   CFGNode *loop_ladder_block = nullptr;
   CFGNode *selection_merge_block = nullptr;
+  CFGNode *split_merge_block_candidate = nullptr;
   // true if the selection merge is to be skipped because at least one BB exits
   bool selection_merge_exit = false;
   std::vector<CFGNode *> headers;
@@ -116,6 +117,9 @@ private:
   CFGNode *immediate_post_dominator = nullptr;
   std::vector<CFGNode *> succ;
   std::vector<CFGNode *> pred;
+
+  // if set, uses the specified BB instead of this BB in incoming PHI BBs
+  BasicBlock *phi_override = nullptr;
 
   // Fake successors and predecessors which only serve to make the flipped CFG
   // reducible. This makes post-domination analysis not strictly correct in all
@@ -151,8 +155,10 @@ private:
   bool post_dominates_any_work(
       const CFGNode *parent,
       std::unordered_set<const CFGNode *> &node_cache) const;
+  bool trivially_reaches_backward_visited_node() const;
 
   void retarget_branch(CFGNode *to_prev, CFGNode *to_next);
+  void retarget_branch_pre_traversal(CFGNode *to_prev, CFGNode *to_next);
   void retarget_branch_with_intermediate_node(CFGNode *to_prev,
                                               CFGNode *to_next);
 

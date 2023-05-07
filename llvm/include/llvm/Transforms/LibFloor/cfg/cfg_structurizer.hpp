@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ 9e2c26d15c0eeac91fb8c6dda3aff8f6a602c0b6
+// @ 51f9c11f6a3ce01ef51c859f40d663eb3bb5883b
 //
 //===----------------------------------------------------------------------===//
 
@@ -46,7 +46,6 @@ class BlockEmissionInterface;
 class SPIRVModule;
 struct CFGNode;
 
-// TODO: remove this
 class BlockEmissionInterface {
 public:
   virtual ~BlockEmissionInterface() = default;
@@ -61,6 +60,8 @@ public:
   bool run();
   void traverse(BlockEmissionInterface &iface);
   CFGNode *get_entry_block() const;
+
+  bool rewrite_rov_lock_region();
 
 private:
   CFGNode *entry_block;
@@ -80,6 +81,7 @@ private:
   std::unordered_set<const CFGNode *> reachable_nodes;
   std::unordered_set<const CFGNode *> structured_loop_merge_targets;
   void visit(CFGNode &entry);
+  void visit_for_back_edge_analysis(CFGNode &entry);
   void backwards_visit();
   void backwards_visit(CFGNode &entry);
   void build_immediate_dominators();
@@ -201,6 +203,7 @@ private:
   void reset_traversal();
   bool rewrite_invalid_loop_breaks();
   void recompute_cfg();
+  void rewrite_multiple_back_edges();
   void compute_dominance_frontier();
   void compute_post_dominance_frontier();
   void create_continue_block_ladders();

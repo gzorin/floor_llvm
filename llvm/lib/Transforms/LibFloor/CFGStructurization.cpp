@@ -124,6 +124,17 @@ namespace {
 			
 			CFGStructurizer structurizer(translator.get_entry_block(), node_pool, F, *ctx);
 			structurizer.run();
+			
+			// while we can't use the emission interface for actual IR emission/transformation,
+			// we still need to call this for the final merge info update
+			class dummy_block_emission_interface : public BlockEmissionInterface {
+			public:
+				void emit_basic_block(CFGNode *) override {}
+				void register_block(CFGNode *) override {}
+			};
+			dummy_block_emission_interface dummy_bei {};
+			structurizer.traverse(dummy_bei);
+			
 			translator.cfg_to_llvm_ir(structurizer.get_entry_block(), true);
 			
 #if !defined(NDEBUG) || 1 // TODO: disable in release mode later on - for now, always keep it on
