@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ 51f9c11f6a3ce01ef51c859f40d663eb3bb5883b
+// @ 830106bc2393ba7e7af67863e1c7cfa856432ec5
 //
 //===----------------------------------------------------------------------===//
 
@@ -155,7 +155,7 @@ private:
   bool post_dominates_any_work(
       const CFGNode *parent,
       std::unordered_set<const CFGNode *> &node_cache) const;
-  bool trivially_reaches_backward_visited_node() const;
+  bool reaches_backward_visited_node() const;
 
   void retarget_branch(CFGNode *to_prev, CFGNode *to_next);
   void retarget_branch_pre_traversal(CFGNode *to_prev, CFGNode *to_next);
@@ -170,6 +170,7 @@ private:
   void recompute_immediate_post_dominator();
 
   template <typename Op> void traverse_dominated_blocks(const Op &op) const;
+
   CFGNode *get_outer_selection_dominator();
   CFGNode *get_outer_header_dominator();
 
@@ -183,9 +184,12 @@ private:
   dominates_all_reachable_exits(std::unordered_set<const CFGNode *> &completed,
                                 const CFGNode &header) const;
   template <typename Op>
-  void traverse_dominated_blocks(const CFGNode &header, const Op &op) const;
+  void traverse_dominated_blocks(std::unordered_set<const CFGNode *> &completed,
+                                 const CFGNode &header, const Op &op) const;
 
   void retarget_fake_succ(CFGNode *from, CFGNode *to);
+  bool reaches_backward_visited_node(
+      std::unordered_set<const CFGNode *> &completed) const;
 };
 
 template <typename Op> void CFGNode::walk_cfg_from(const Op &op) const {
@@ -197,19 +201,27 @@ template <typename Op> void CFGNode::walk_cfg_from(const Op &op) const {
 }
 
 template <typename Op>
-void CFGNode::traverse_dominated_blocks(const CFGNode &header,
-                                        const Op &op) const {
+void CFGNode::traverse_dominated_blocks(
+    std::unordered_set<const CFGNode *> &completed, const CFGNode &header,
+    const Op &op) const {
   for (auto *node : succ) {
-    if (header.dominates(node)) {
-      if (op(node))
-        node->traverse_dominated_blocks(header, op);
+    bool can_visit = completed.count(node) == 0;
+    if (can_visit) {
+      completed.insert(node);
+    }
+
+    if (can_visit && header.dominates(node)) {
+      if (op(node)) {
+        node->traverse_dominated_blocks(completed, header, op);
+      }
     }
   }
 }
 
 template <typename Op>
 void CFGNode::traverse_dominated_blocks(const Op &op) const {
-  traverse_dominated_blocks(*this, op);
+  std::unordered_set<const CFGNode *> completed;
+  traverse_dominated_blocks(completed, *this, op);
 }
 
 } // namespace llvm

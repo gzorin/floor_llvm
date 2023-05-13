@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ 51f9c11f6a3ce01ef51c859f40d663eb3bb5883b
+// @ 830106bc2393ba7e7af67863e1c7cfa856432ec5
 //
 //===----------------------------------------------------------------------===//
 
@@ -1930,7 +1930,7 @@ void CFGStructurizer::backwards_visit() {
           // Otherwise, we'll be adding fake succs that resolve to outer
           // infinite loops again.
           for (auto *f : exits) {
-            if (f->trivially_reaches_backward_visited_node()) {
+            if (f->reaches_backward_visited_node()) {
               node->pred_back_edge->add_fake_branch(f);
             }
           }
@@ -2587,7 +2587,6 @@ void CFGStructurizer::rewrite_selection_breaks(CFGNode *header,
   // LOGI("Rewriting selection breaks %s -> %s\n", header->name.c_str(),
   // ladder_to->name.c_str());
 
-  std::unordered_set<CFGNode *> nodes;
   std::unordered_set<CFGNode *> construct;
 
   // Be careful about rewriting branches in continuing constructs.
@@ -2609,8 +2608,7 @@ void CFGStructurizer::rewrite_selection_breaks(CFGNode *header,
     // Inner loop headers are not candidates for a rewrite. They are split in
     // split_merge_blocks. Similar with switch blocks. Also, we need to stop
     // traversing when we hit the target block ladder_to.
-    if (node != ladder_to && nodes.count(node) == 0) {
-      nodes.insert(node);
+    if (node != ladder_to) {
       if (!query_reachability(*node, *ladder_to))
         return false;
 
@@ -2692,8 +2690,6 @@ bool CFGStructurizer::header_and_merge_block_have_entry_exit_relationship(
   bool found_inner_merge_target = false;
   const CFGNode *potential_inner_merge_target = nullptr;
 
-  std::unordered_set<const CFGNode *> traversed;
-
   const auto is_earlier = [](const CFGNode *candidate,
                              const CFGNode *existing) {
     return !existing || (candidate->forward_post_visit_order >
@@ -2708,9 +2704,6 @@ bool CFGStructurizer::header_and_merge_block_have_entry_exit_relationship(
   header->traverse_dominated_blocks([&](const CFGNode *node) {
     if (node == merge)
       return false;
-    if (traversed.count(node))
-      return false;
-    traversed.insert(node);
 
     // Don't analyze loops, this path is mostly for selections only.
     if (node->pred_back_edge)
@@ -2750,7 +2743,6 @@ bool CFGStructurizer::header_and_merge_block_have_entry_exit_relationship(
   const CFGNode *first_natural_breaks_to_inner = nullptr;
   const CFGNode *last_natural_breaks_to_outer = nullptr;
   const CFGNode *last_natural_breaks_to_inner = nullptr;
-  traversed.clear();
 
   header->traverse_dominated_blocks([&](const CFGNode *node) {
     if (node == merge || node == potential_inner_merge_target)
@@ -2758,9 +2750,6 @@ bool CFGStructurizer::header_and_merge_block_have_entry_exit_relationship(
     if (!query_reachability(*node, *merge) ||
         !query_reachability(*node, *potential_inner_merge_target))
       return false;
-    if (traversed.count(node))
-      return false;
-    traversed.insert(node);
 
     if (node->succ.size() < 2)
       return true;
