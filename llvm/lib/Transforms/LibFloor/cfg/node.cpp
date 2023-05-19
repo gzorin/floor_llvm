@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ 830106bc2393ba7e7af67863e1c7cfa856432ec5
+// @ f20a0fb4e984a83743baa9d863eb7b26228bcca3
 //
 //===----------------------------------------------------------------------===//
 
@@ -363,6 +363,11 @@ CFGNode *CFGNode::get_immediate_dominator_loop_header() {
 
 void CFGNode::retarget_branch_with_intermediate_node(CFGNode *to_prev,
                                                      CFGNode *to_next) {
+  // If there is no duplication, just go ahead.
+  if (std::find(succ.begin(), succ.end(), to_next) == succ.end()) {
+    return retarget_branch(to_prev, to_next);
+  }
+
   auto *intermediate =
       pool.create_node(name + ".intermediate." + to_next->name);
   intermediate->ir.terminator.type = Terminator::Type::Branch;

@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ 830106bc2393ba7e7af67863e1c7cfa856432ec5
+// @ f20a0fb4e984a83743baa9d863eb7b26228bcca3
 //
 //===----------------------------------------------------------------------===//
 
@@ -136,6 +136,11 @@ private:
                                                       CFGNode *merge) const;
   void fixup_broken_selection_merges(unsigned pass);
   bool find_switch_blocks(unsigned pass);
+  void hoist_switch_branches_to_frontier(CFGNode *node, CFGNode *merge,
+                                         CFGNode *frontier);
+  Instruction *
+  build_switch_case_equal_check(const CFGNode *header, CFGNode *insert_node,
+                                const Terminator::Case &case_label);
   CFGNode *create_switch_merge_ladder(CFGNode *header, CFGNode *merge);
   CFGNode *find_natural_switch_merge_block(CFGNode *node,
                                            CFGNode *post_dominator) const;
@@ -230,6 +235,7 @@ private:
   void insert_phi(PHINode &node);
   void fixup_phi(PHINode &node);
   void cleanup_breaking_phi_constructs();
+  bool cleanup_breaking_return_constructs();
   void eliminate_node_link_preds_to_succ(CFGNode *node);
   void prune_dead_preds();
 
