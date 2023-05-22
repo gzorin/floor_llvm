@@ -701,7 +701,7 @@ static bool block_is_control_dependent(const CFGNode *node) {
   //  * barrier
   //  * derivative function
   //  * implicit LOD image function
-  //  * TODO: sub-group function (not emitted yet by frontend)
+  //  * any sub-group operation
   static const std::unordered_set<std::string> control_dep_funcs{
       // barrier
       "_Z7barrierj",
@@ -722,8 +722,12 @@ static bool block_is_control_dependent(const CFGNode *node) {
     }
 
     // check fix function names
-    const auto func_name = func->getName().str();
+    const auto func_name_ref = func->getName();
+    const auto func_name = func_name_ref.str();
     if (control_dep_funcs.count(func_name) > 0) {
+      return true;
+    } else if (func_name_ref.startswith("floor.sub_group") ||
+               func_name_ref.startswith("floor.barrier")) {
       return true;
     }
 

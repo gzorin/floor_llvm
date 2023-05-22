@@ -79,11 +79,6 @@ namespace {
 		
 		static char ID; // Pass identification, replacement for typeid
 		
-		static constexpr const char fma_prefix[] { "_Z3fma" };
-		static constexpr const char fma_half[] { "_Z3fmaDhDhDh" };
-		static constexpr const char fma_float[] { "_Z3fmafff" };
-		static constexpr const char fma_double[] { "_Z3fmaddd" };
-		
 		std::shared_ptr<llvm::IRBuilder<>> builder;
 		
 		Module* M { nullptr };
@@ -148,9 +143,22 @@ namespace {
 			InstVisitor<FMACombiner>::visit(I);
 		}
 		
+		static bool is_fma_func(Function* func) {
+			if (!func) {
+				return false;
+			}
+			if (func->hasName() && func->getName().startswith("_Z3fma")) {
+				return true;
+			}
+			if (func->isIntrinsic() && func->getIntrinsicID() == Intrinsic::fma) {
+				return true;
+			}
+			return false;
+		}
+		
 		// fma is a function call -> forward it
 		void visitCallInst(CallInst &I) {
-			if(I.getCalledFunction()->getName().startswith(fma_prefix)) {
+			if (is_fma_func(I.getCalledFunction())) {
 				visitFMA(I);
 				return;
 			}
@@ -178,7 +186,11 @@ namespace {
 		Value* create_negate(Value* op, Instruction* insert_before) {
 			// use builder so that we can constant fold
 			builder->SetInsertPoint(insert_before);
-			return builder->CreateFNeg(op, op->hasName() ? op->getName() + ".neg" : "neg");
+			auto fneg = builder->CreateFNeg(op, op->hasName() ? op->getName() + ".neg" : "neg");
+			if (auto instr = dyn_cast_or_null<Instruction>(op); instr && instr->getDebugLoc()) {
+				((Instruction*)fneg)->setDebugLoc(instr->getDebugLoc());
+			}
+			return fneg;
 		}
 		// creates a negate instruction of either 'op_0' or 'op_1', prefering the one which is a constant value,
 		// if neither is a constant, will use 'op_0', returns the instruction and 0 or 1, depending on which op was negated
@@ -218,21 +230,17 @@ namespace {
 				// only replace with fma if all three operands have the same type
 				return nullptr;
 			}
-			if(!fp_type->isHalfTy() &&
-			   !fp_type->isFloatTy() &&
-			   !fp_type->isDoubleTy()) {
+			
+			auto scaler_fp_type = fp_type;
+			if (scaler_fp_type->isVectorTy()) {
+				scaler_fp_type = scaler_fp_type->getScalarType();
+			}
+			if (!scaler_fp_type->isHalfTy() &&
+				!scaler_fp_type->isFloatTy() &&
+				!scaler_fp_type->isDoubleTy()) {
 				// must be 16-bit, 32-bit or 64-bit fp type
 				return nullptr;
 			}
-			
-			std::vector<Type*> param_types(3, fp_type);
-			const auto func_type = llvm::FunctionType::get(fp_type, param_types, false);
-			
-			std::string func_name;
-			if(fp_type->isHalfTy()) func_name = fma_half;
-			else if(fp_type->isFloatTy()) func_name = fma_float;
-			else if(fp_type->isDoubleTy()) func_name = fma_double;
-			else llvm_unreachable("invalid fp type");
 			
 			// emit in canonical form if a is const: fma(non-const a, const b, any c)
 			const auto is_a_const = isa<ConstantFP>(a);
@@ -242,7 +250,8 @@ namespace {
 				is_a_const && !is_b_const ? a : b,
 				c
 			};
-			auto CI = CallInst::Create(M->getOrInsertFunction(func_name, func_type), args,
+			Function* fma_func = Intrinsic::getDeclaration(M, Intrinsic::fma, fp_type);
+			auto CI = CallInst::Create(fma_func, args,
 									   (repl->hasName() ? repl->getName() + ".fma" : "fma")
 #if defined(DEBUG_FMA)
 									   + "_" + std::to_string(line) + "_"
@@ -252,6 +261,25 @@ namespace {
 			CI->setDoesNotAccessMemory();
 			CI->setNotConvergent();
 			CI->setDebugLoc(repl->getDebugLoc()); // keep debug loc of first repl
+			if (!CI->getDebugLoc()) {
+				// try to always have a debug location by using these fallbacks:
+				const std::array<Instruction*, 5> instrs {{
+					opt_repl,
+					dyn_cast_or_null<Instruction>(a),
+					dyn_cast_or_null<Instruction>(b),
+					dyn_cast_or_null<Instruction>(c),
+					insert_before
+				}};
+				for (auto instr : instrs) {
+					if (!instr) {
+						continue;
+					}
+					if (instr->getDebugLoc()) {
+						CI->setDebugLoc(instr->getDebugLoc());
+						break;
+					}
+				}
+			}
 			DBG(errs() << "emitting: " << *CI << "\n";)
 			
 			if(is_remove) {
@@ -305,7 +333,7 @@ namespace {
 			
 			// fold (fadd (fma x, y, (fmul u, v)), z) -> (fma x, y (fma u, v, z))
 			if(auto FMACI = dyn_cast<CallInst>(N0)) {
-				if(FMACI->getCalledFunction()->getName().startswith(fma_prefix) &&
+				if(is_fma_func(FMACI->getCalledFunction()) &&
 				   get_opcode(FMACI->getOperand(2)) == Instruction::FMul) {
 					auto mul_op = cast<Instruction>(FMACI->getOperand(2));
 					
@@ -338,7 +366,7 @@ namespace {
 			
 			// fold (fadd x, (fma y, z, (fmul u, v)) -> (fma y, z (fma u, v, x))
 			if(auto FMACI = dyn_cast<CallInst>(N1)) {
-				if(FMACI->getCalledFunction()->getName().startswith(fma_prefix) &&
+				if(is_fma_func(FMACI->getCalledFunction()) &&
 				   get_opcode(FMACI->getOperand(2)) == Instruction::FMul) {
 					auto mul_op = cast<Instruction>(FMACI->getOperand(2));
 					
@@ -374,12 +402,12 @@ namespace {
 			{
 				auto FMACI0 = dyn_cast<CallInst>(N0);
 				auto FMACI1 = dyn_cast<CallInst>(N1);
-				auto FMACI = (FMACI0 != nullptr && FMACI0->getCalledFunction()->getName().startswith(fma_prefix) ? FMACI0 :
-							  FMACI1 != nullptr && FMACI1->getCalledFunction()->getName().startswith(fma_prefix) ? FMACI1 :
+				auto FMACI = (FMACI0 != nullptr && is_fma_func(FMACI0->getCalledFunction()) ? FMACI0 :
+							  FMACI1 != nullptr && is_fma_func(FMACI1->getCalledFunction()) ? FMACI1 :
 							  nullptr);
 				if(FMACI) {
 					auto FMA2CI = dyn_cast<CallInst>(FMACI->getOperand(2));
-					if(FMA2CI != nullptr && FMA2CI->getCalledFunction()->getName().startswith(fma_prefix)) {
+					if(FMA2CI != nullptr && is_fma_func(FMA2CI->getCalledFunction())) {
 						auto mul_op = dyn_cast<BinaryOperator>(FMA2CI->getOperand(2));
 						if(mul_op != nullptr && mul_op->getOpcode() == Instruction::FMul) {
 							DBG(errs() << "fold (fadd x, (fma a, b, (fma u, v, (fmul s t)))) -> (fma s t (fma u v (fma a b x))):\n"
@@ -468,7 +496,7 @@ namespace {
 			// fold (fsub (fma x, y, (fmul u, v)), z)
 			//   -> (fma x, y (fma u, v, (fneg z)))
 			if(auto FMACI = dyn_cast<CallInst>(N0)) {
-				if(FMACI->getCalledFunction()->getName().startswith(fma_prefix) &&
+				if(is_fma_func(FMACI->getCalledFunction()) &&
 				   get_opcode(FMACI->getOperand(2)) == Instruction::FMul) {
 					auto mul_op = cast<Instruction>(FMACI->getOperand(2));
 					
@@ -504,7 +532,7 @@ namespace {
 			//   -> (fma (fneg y), z, (fma (fneg u), v, x))
 			// NOTE: can negate either y or z, and either u or v
 			if(auto FMACI = dyn_cast<CallInst>(N1)) {
-				if(FMACI->getCalledFunction()->getName().startswith(fma_prefix) &&
+				if(is_fma_func(FMACI->getCalledFunction()) &&
 				   get_opcode(FMACI->getOperand(2)) == Instruction::FMul) {
 					auto mul_op = cast<Instruction>(FMACI->getOperand(2));
 					
@@ -782,10 +810,6 @@ namespace {
 }
 
 char FMACombiner::ID = 0;
-constexpr const char FMACombiner::fma_prefix[];
-constexpr const char FMACombiner::fma_half[];
-constexpr const char FMACombiner::fma_float[];
-constexpr const char FMACombiner::fma_double[];
 
 FunctionPass *llvm::createFMACombinerPass() {
 	return new FMACombiner();

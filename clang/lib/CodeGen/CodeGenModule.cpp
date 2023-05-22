@@ -2603,6 +2603,10 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "local_invocation_id"));
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "workgroup_id"));
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "num_workgroups"));
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "sub_group_id"));
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "sub_group_local_id"));
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "sub_group_size"));
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "num_sub_groups"));
 	} else if (is_vertex) {
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "vertex_index"));
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "view_index"));

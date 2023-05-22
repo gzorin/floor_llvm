@@ -119,6 +119,10 @@ namespace {
 		Argument* group_id { nullptr };
 		Argument* group_size { nullptr };
 		GlobalVariable* local_size { nullptr };
+		Argument* sub_group_id { nullptr };
+		Argument* sub_group_local_id { nullptr };
+		Argument* sub_group_size { nullptr };
+		Argument* num_sub_groups { nullptr };
 		
 		// added general shader function args
 		Argument* view_index { nullptr };
@@ -151,12 +155,16 @@ namespace {
 		}
 		
 		enum VULKAN_KERNEL_ARG_REV_IDX : int32_t {
-			VULKAN_GLOBAL_ID = -4,
-			VULKAN_LOCAL_ID = -3,
-			VULKAN_GROUP_ID = -2,
-			VULKAN_GROUP_SIZE = -1,
+			VULKAN_GLOBAL_ID = -8,
+			VULKAN_LOCAL_ID = -7,
+			VULKAN_GROUP_ID = -6,
+			VULKAN_GROUP_SIZE = -5,
+			VULKAN_SUB_GROUP_ID = -4,
+			VULKAN_SUB_GROUP_LOCAL_ID = -3,
+			VULKAN_SUB_GROUP_SIZE = -2,
+			VULKAN_NUM_SUB_GROUPS = -1,
 			
-			VULKAN_KERNEL_ARG_COUNT = 4,
+			VULKAN_KERNEL_ARG_COUNT = 8,
 		};
 		
 		enum VULKAN_VERTEX_ARG_REV_IDX : int32_t {
@@ -228,6 +236,10 @@ namespace {
 					local_id = get_arg_by_idx(VULKAN_LOCAL_ID);
 					group_id = get_arg_by_idx(VULKAN_GROUP_ID);
 					group_size = get_arg_by_idx(VULKAN_GROUP_SIZE);
+					sub_group_id = get_arg_by_idx(VULKAN_SUB_GROUP_ID);
+					sub_group_local_id = get_arg_by_idx(VULKAN_SUB_GROUP_LOCAL_ID);
+					sub_group_size = get_arg_by_idx(VULKAN_SUB_GROUP_SIZE);
+					num_sub_groups = get_arg_by_idx(VULKAN_NUM_SUB_GROUPS);
 					if (has_soft_printf) {
 						soft_printf = get_arg_by_idx(-(VULKAN_KERNEL_ARG_COUNT + 1));
 					}
@@ -237,6 +249,10 @@ namespace {
 					local_id = nullptr;
 					group_id = nullptr;
 					group_size = nullptr;
+					sub_group_id = nullptr;
+					sub_group_local_id = nullptr;
+					sub_group_size = nullptr;
+					num_sub_groups = nullptr;
 					soft_printf = nullptr;
 				}
 			}
@@ -335,25 +351,20 @@ namespace {
 			
 			// figure out which one we need
 			Argument* id;
-			if(func_name == "floor.builtin.global_id.i32") {
+			if (func_name == "floor.builtin.global_id.i32") {
 				id = global_id;
-			}
-			else if(func_name == "floor.builtin.local_id.i32") {
+			} else if (func_name == "floor.builtin.local_id.i32") {
 				id = local_id;
-			}
-			else if(func_name == "floor.builtin.group_id.i32") {
+			} else if (func_name == "floor.builtin.group_id.i32") {
 				id = group_id;
-			}
-			else if(func_name == "floor.builtin.group_size.i32") {
+			} else if (func_name == "floor.builtin.group_size.i32") {
 				id = group_size;
-			}
-			else if(func_name == "floor.builtin.local_size.i32") {
+			} else if (func_name == "floor.builtin.local_size.i32") {
 				// this doesn't have a direct built-in equivalent, but must be loaded from the WorkgroupSize constant
 				I.replaceAllUsesWith(builder->CreateExtractElement(builder->CreateLoad(local_size->getType()->getPointerElementType(), local_size), I.getOperand(0)));
 				I.eraseFromParent();
 				return;
-			}
-			else if(func_name == "floor.builtin.global_size.i32") {
+			} else if (func_name == "floor.builtin.global_size.i32") {
 				// this doesn't have a direct built-in equivalent, but must be computed from the WorkgroupSize constant
 				// TODO/NOTE: this might need some more work on the spir-v side, right now this is always constant folded
 				auto dim_idx = I.getOperand(0);
@@ -363,8 +374,7 @@ namespace {
 				I.replaceAllUsesWith(global_size_dim);
 				I.eraseFromParent();
 				return;
-			}
-			else if(func_name == "floor.builtin.work_dim.i32") {
+			} else if (func_name == "floor.builtin.work_dim.i32") {
 				if(group_size == nullptr) {
 					DBG(printf("failed to get group_size arg, probably not in a kernel function?\n"); fflush(stdout);)
 					return;
@@ -382,8 +392,43 @@ namespace {
 				I.replaceAllUsesWith(sel_xy_or_z);
 				I.eraseFromParent();
 				return;
-			}
-			else if(func_name == "floor.builtin.vertex_id.i32") {
+			} else if (func_name == "floor.builtin.sub_group_id.i32") {
+				if (sub_group_id == nullptr) {
+					llvm::errs() << "failed to get sub_group_id arg, not in a kernel function\n";
+					llvm::errs().flush();
+					return;
+				}
+				I.replaceAllUsesWith(builder->CreateLoad(sub_group_id->getType()->getPointerElementType(), sub_group_id, "sub_group_id"));
+				I.eraseFromParent();
+				return;
+			} else if (func_name == "floor.builtin.sub_group_local_id.i32") {
+				if (sub_group_local_id == nullptr) {
+					llvm::errs() << "failed to get sub_group_local_id arg, not in a kernel function\n";
+					llvm::errs().flush();
+					return;
+				}
+				I.replaceAllUsesWith(builder->CreateLoad(sub_group_local_id->getType()->getPointerElementType(), sub_group_local_id, "sub_group_local_id"));
+				I.eraseFromParent();
+				return;
+			} else if (func_name == "floor.builtin.sub_group_size.i32") {
+				if (sub_group_size == nullptr) {
+					llvm::errs() << "failed to get sub_group_size arg, not in a kernel function\n";
+					llvm::errs().flush();
+					return;
+				}
+				I.replaceAllUsesWith(builder->CreateLoad(sub_group_size->getType()->getPointerElementType(), sub_group_size, "sub_group_size"));
+				I.eraseFromParent();
+				return;
+			} else if (func_name == "floor.builtin.num_sub_groups.i32") {
+				if (num_sub_groups == nullptr) {
+					llvm::errs() << "failed to get num_sub_groups arg, not in a kernel function\n";
+					llvm::errs().flush();
+					return;
+				}
+				I.replaceAllUsesWith(builder->CreateLoad(num_sub_groups->getType()->getPointerElementType(), num_sub_groups, "num_sub_groups"));
+				I.eraseFromParent();
+				return;
+			} else if (func_name == "floor.builtin.vertex_id.i32") {
 				if(vertex_id == nullptr) {
 					DBG(printf("failed to get vertex_id arg, probably not in a vertex function?\n"); fflush(stdout);)
 					return;
@@ -392,8 +437,7 @@ namespace {
 				I.replaceAllUsesWith(builder->CreateLoad(vertex_id->getType()->getPointerElementType(), vertex_id, "vertex_index"));
 				I.eraseFromParent();
 				return;
-			}
-			else if(func_name == "floor.builtin.instance_id.i32") {
+			} else if (func_name == "floor.builtin.instance_id.i32") {
 				if(instance_id == nullptr) {
 					DBG(printf("failed to get instance_id arg, probably not in a vertex function?\n"); fflush(stdout);)
 					return;
@@ -402,8 +446,7 @@ namespace {
 				I.replaceAllUsesWith(builder->CreateLoad(instance_id->getType()->getPointerElementType(), instance_id, "instance_index"));
 				I.eraseFromParent();
 				return;
-			}
-			else if(func_name == "floor.builtin.point_coord.float2") {
+			} else if (func_name == "floor.builtin.point_coord.float2") {
 				if(point_coord == nullptr) {
 					DBG(printf("failed to get point_coord arg, probably not in a fragment function?\n"); fflush(stdout);)
 					return;
@@ -412,8 +455,7 @@ namespace {
 				I.replaceAllUsesWith(builder->CreateLoad(point_coord->getType()->getPointerElementType(), point_coord, "point_coord"));
 				I.eraseFromParent();
 				return;
-			}
-			else if(func_name == "floor.builtin.frag_coord.float4") {
+			} else if (func_name == "floor.builtin.frag_coord.float4") {
 				if(frag_coord == nullptr) {
 					DBG(printf("failed to get frag_coord arg, probably not in a fragment function?\n"); fflush(stdout);)
 					return;
@@ -422,8 +464,7 @@ namespace {
 				I.replaceAllUsesWith(builder->CreateLoad(frag_coord->getType()->getPointerElementType(), frag_coord, "frag_coord"));
 				I.eraseFromParent();
 				return;
-			}
-			else if(func_name == "floor.builtin.get_printf_buffer") {
+			} else if (func_name == "floor.builtin.get_printf_buffer") {
 				if(soft_printf == nullptr) {
 					DBG(printf("failed to get printf_buffer arg, probably not in a kernel/vertex/fragment function?\n"); fflush(stdout);)
 					return;
@@ -433,8 +474,7 @@ namespace {
 				I.replaceAllUsesWith(soft_printf);
 				I.eraseFromParent();
 				return;
-			}
-			else if(func_name == "floor.builtin.view_index.i32") {
+			} else if (func_name == "floor.builtin.view_index.i32") {
 				if(view_index == nullptr) {
 					DBG(printf("failed to get view_index arg, probably not in a shader function?\n"); fflush(stdout);)
 					return;
@@ -443,8 +483,7 @@ namespace {
 				I.replaceAllUsesWith(builder->CreateLoad(view_index->getType()->getPointerElementType(), view_index, "view_index"));
 				I.eraseFromParent();
 				return;
-			}
-			else if(func_name == "floor.builtin.primitive_id.i32") {
+			} else if (func_name == "floor.builtin.primitive_id.i32") {
 				if (primitive_id == nullptr) {
 					llvm::errs() << "failed to get primitive_id arg, not in a fragment function or feature is not enabled\n";
 					llvm::errs().flush();
@@ -454,8 +493,7 @@ namespace {
 				I.replaceAllUsesWith(builder->CreateLoad(primitive_id->getType()->getPointerElementType(), primitive_id, "primitive_id"));
 				I.eraseFromParent();
 				return;
-			}
-			else if(func_name == "floor.builtin.barycentric_coord.float3") {
+			} else if (func_name == "floor.builtin.barycentric_coord.float3") {
 				if (barycentric_coord == nullptr) {
 					llvm::errs() << "failed to get barycentric_coord arg, not in a fragment function or feature is not enabled\n";
 					llvm::errs().flush();
