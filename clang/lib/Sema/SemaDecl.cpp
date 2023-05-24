@@ -10158,6 +10158,14 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
       D.setInvalidType();
     }
 
+    // if this is a kernel, it must have a kernel dim attribute
+    if ((NewFD->hasAttr<ComputeKernelAttr>() || NewFD->hasAttr<GraphicsTessellationControlShaderAttr>()) &&
+        !NewFD->hasAttr<ComputeKernelDimAttr>()) {
+        unsigned diagID = Diags.getCustomDiagID(DiagnosticsEngine::Error, "%0");
+        Diags.Report(D.getIdentifierLoc(), diagID) << "kernel function must have kernel dim attribute!";
+        D.setInvalidType();
+    }
+
     // only check this for OpenCL/Metal/Vulkan
     if (getLangOpts().OpenCL) {
       llvm::SmallPtrSet<const Type *, 16> ValidTypes;

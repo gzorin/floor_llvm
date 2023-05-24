@@ -3013,6 +3013,192 @@ void Sema::AddGraphicsFBOColorLocationAttr(SourceRange AttrRange, Decl *D, Expr 
   D->addAttr(::new (Context) GraphicsFBOColorLocationAttr(TmpAttr));
 }
 
+static void handleComputeKernelDimAttr(Sema &S, Decl *D, const ParsedAttr &Attr) {
+  if (!Attr.checkExactlyNumArgs(S, 1)) {
+    Attr.setInvalid();
+    return;
+  }
+  S.AddComputeKernelDimAttr(Attr.getRange(), D, Attr.getArgAsExpr(0), Attr);
+}
+
+void Sema::AddComputeKernelDimAttr(SourceRange AttrRange, Decl *D, Expr *E, const AttributeCommonInfo &CI) {
+  ComputeKernelDimAttr TmpAttr(Context, CI, E);
+  SourceLocation AttrLoc = AttrRange.getBegin();
+
+  QualType T;
+  if (ValueDecl *VD = dyn_cast<ValueDecl>(D))
+    T = VD->getType();
+  else {
+    Diag(AttrLoc, diag::err_attribute_argument_type) <<
+      &TmpAttr << AANT_ArgumentIntegerConstant;
+    return;
+  }
+
+  // TODO: check usage
+
+  if (!E->isValueDependent()) {
+    // TODO: might want to use/check isPotentialConstantExprUnevaluated
+
+    llvm::APSInt KernelDim(32);
+    ExprResult ICE
+      = VerifyIntegerConstantExpression(E, &KernelDim, AllowFoldKind::AllowFold);
+    if (ICE.isInvalid())
+      return;
+
+    // bounds check
+    if (KernelDim.getExtValue() < 1 || KernelDim.getExtValue() > 3) {
+      unsigned diagID = Diags.getCustomDiagID(DiagnosticsEngine::Error, "%0");
+      Diags.Report(AttrRange.getBegin(), diagID) << "kernel dim must be 1, 2 or 3!";
+      return;
+    }
+
+    auto dim_attr = ::new (Context) ComputeKernelDimAttr(Context, CI, ICE.get());
+    dim_attr->setDim((unsigned int)KernelDim.getZExtValue());
+    D->addAttr(dim_attr);
+    return;
+  }
+
+  // Save dependent expressions in the AST to be instantiated.
+  D->addAttr(::new (Context) ComputeKernelDimAttr(TmpAttr));
+}
+
+static void handleComputeKernelWorkGroupSizeAttr(Sema &S, Decl *D, const ParsedAttr &Attr) {
+  if (!Attr.checkAtMostNumArgs(S, 3)) {
+    Attr.setInvalid();
+    return;
+  }
+  const auto arg_count = Attr.getNumArgs();
+  S.AddComputeKernelWorkGroupSizeAttr(Attr.getRange(), D,
+                                      arg_count > 0 ? Attr.getArgAsExpr(0) : nullptr,
+                                      arg_count > 1 ? Attr.getArgAsExpr(1) : nullptr,
+                                      arg_count > 2 ? Attr.getArgAsExpr(2) : nullptr, Attr);
+}
+
+void Sema::AddComputeKernelWorkGroupSizeAttr(SourceRange AttrRange, Decl *D,
+                                             Expr *size_x_expr, Expr *size_y_expr, Expr *size_z_expr,
+                                             const AttributeCommonInfo &CI) {
+  // if no work-group size arg is specified, entirely ignore this attribute
+  if (!size_x_expr) {
+    return;
+  }
+
+  ComputeKernelWorkGroupSizeAttr TmpAttr(Context, CI, size_x_expr, size_y_expr, size_z_expr);
+  SourceLocation AttrLoc = AttrRange.getBegin();
+
+  QualType T;
+  if (ValueDecl *VD = dyn_cast<ValueDecl>(D))
+    T = VD->getType();
+  else {
+    Diag(AttrLoc, diag::err_attribute_argument_type) <<
+      &TmpAttr << AANT_ArgumentIntegerConstant;
+    return;
+  }
+
+  // TODO: check usage
+
+  assert(size_x_expr);
+  if (!size_x_expr->isValueDependent() &&
+	  (!size_y_expr || !size_y_expr->isValueDependent()) &&
+	  (!size_z_expr || !size_z_expr->isValueDependent())) {
+	  // TODO: might want to use/check isPotentialConstantExprUnevaluated
+	  
+	  llvm::APSInt WorkGroupSizeX(32), WorkGroupSizeY(32), WorkGroupSizeZ(32);
+	  WorkGroupSizeX = 1;
+	  WorkGroupSizeY = 1;
+	  WorkGroupSizeZ = 1;
+	  
+	  Expr* size_x_res = nullptr;
+	  Expr* size_y_res = nullptr;
+	  Expr* size_z_res = nullptr;
+	  
+	  {
+		  ExprResult ICE = VerifyIntegerConstantExpression(size_x_expr, &WorkGroupSizeX, AllowFoldKind::AllowFold);
+		  if (ICE.isInvalid()) {
+			  return;
+		  }
+		  if (WorkGroupSizeX.getExtValue() <= 0) {
+			  unsigned diagID = Diags.getCustomDiagID(DiagnosticsEngine::Error, "%0");
+			  Diags.Report(AttrRange.getBegin(), diagID) << "work-group size X must be >= 1";
+			  return;
+		  }
+		  size_x_res = ICE.get();
+	  }
+	  
+	  if (size_y_expr) {
+		  ExprResult ICE = VerifyIntegerConstantExpression(size_y_expr, &WorkGroupSizeY, AllowFoldKind::AllowFold);
+		  if (ICE.isInvalid()) {
+			  return;
+		  }
+		  if (WorkGroupSizeY.getExtValue() <= 0) {
+			  unsigned diagID = Diags.getCustomDiagID(DiagnosticsEngine::Error, "%0");
+			  Diags.Report(AttrRange.getBegin(), diagID) << "work-group size Y must be >= 1";
+			  return;
+		  }
+		  size_y_res = ICE.get();
+	  }
+	  
+	  if (size_z_expr) {
+		  ExprResult ICE = VerifyIntegerConstantExpression(size_z_expr, &WorkGroupSizeZ, AllowFoldKind::AllowFold);
+		  if (ICE.isInvalid()) {
+			  return;
+		  }
+		  if (WorkGroupSizeZ.getExtValue() <= 0) {
+			  unsigned diagID = Diags.getCustomDiagID(DiagnosticsEngine::Error, "%0");
+			  Diags.Report(AttrRange.getBegin(), diagID) << "work-group size Z must be >= 1";
+			  return;
+		  }
+		  size_z_res = ICE.get();
+	  }
+	  
+	  const auto wg_size_x = uint32_t(WorkGroupSizeX.getZExtValue());
+	  const auto wg_size_y = uint32_t(WorkGroupSizeY.getZExtValue());
+	  const auto wg_size_z = uint32_t(WorkGroupSizeZ.getZExtValue());
+	  
+	  // check kernel dim
+	  auto ComputeKernelDim = D->getAttr<ComputeKernelDimAttr>();
+	  if (!ComputeKernelDim) {
+		  unsigned diagID = Diags.getCustomDiagID(DiagnosticsEngine::Error, "%0");
+		  Diags.Report(AttrRange.getBegin(), diagID) << "kernel dim attribute must be set!";
+		  return;
+	  }
+	  if (ComputeKernelDim->getDim() == 1) {
+		  if (wg_size_y > 1) {
+			  unsigned diagID = Diags.getCustomDiagID(DiagnosticsEngine::Error, "%0");
+			  Diags.Report(AttrRange.getBegin(), diagID) << "Y work-group size must either be 1 or not be specified for 1D kernels";
+			  return;
+		  }
+		  if (wg_size_z > 1) {
+			  unsigned diagID = Diags.getCustomDiagID(DiagnosticsEngine::Error, "%0");
+			  Diags.Report(AttrRange.getBegin(), diagID) << "Z work-group size must either be 1 or not be specified for 1D kernels";
+			  return;
+		  }
+	  } else if (ComputeKernelDim->getDim() == 2) {
+		  if (wg_size_z > 1) {
+			  unsigned diagID = Diags.getCustomDiagID(DiagnosticsEngine::Error, "%0");
+			  Diags.Report(AttrRange.getBegin(), diagID) << "Z work-group size must either be 1 or not be specified for 2D kernels";
+			  return;
+		  }
+	  }
+	  
+	  // all okay, add attribute
+	  auto wg_size_attr = ::new (Context) ComputeKernelWorkGroupSizeAttr(Context, CI, size_x_res, size_y_res, size_z_res);
+	  wg_size_attr->setWorkGroupSize(wg_size_x, wg_size_y, wg_size_z);
+	  D->addAttr(wg_size_attr);
+	  
+	  // add ReqdWorkGroupSizeAttr, but ensure it hasn't been specified already
+	  if (auto ExistingReqWGSize = D->getAttr<ReqdWorkGroupSizeAttr>(); ExistingReqWGSize) {
+		  unsigned diagID = Diags.getCustomDiagID(DiagnosticsEngine::Error, "%0");
+		  Diags.Report(ExistingReqWGSize->getLoc(), diagID) << "duplicate work-group size requirement attribute";
+		  return;
+	  }
+	  D->addAttr(::new (Context) ReqdWorkGroupSizeAttr(Context, CI, wg_size_x, wg_size_y, wg_size_z));
+	  return;
+  }
+
+  // Save dependent expressions in the AST to be instantiated.
+  D->addAttr(::new (Context) ComputeKernelWorkGroupSizeAttr(TmpAttr));
+}
+
 static void handleGraphicsFBODepthTypeAttr(Sema &S, Decl *D, const ParsedAttr &Attr) {
   if (!Attr.checkExactlyNumArgs(S, 1)) {
     Attr.setInvalid();
@@ -8667,6 +8853,12 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
     break;
   case ParsedAttr::AT_VectorCompat:
     handleSimpleAttribute<VectorCompatAttr>(S, D, AL);
+    break;
+  case ParsedAttr::AT_ComputeKernelDim:
+    handleComputeKernelDimAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_ComputeKernelWorkGroupSize:
+    handleComputeKernelWorkGroupSizeAttr(S, D, AL);
     break;
   case ParsedAttr::AT_GraphicsFBOColorLocation:
     handleGraphicsFBOColorLocationAttr(S, D, AL);

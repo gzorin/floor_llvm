@@ -2599,8 +2599,6 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_ssbo + "none"));
 	}
 	if (is_kernel) {
-		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "global_invocation_id"));
-		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "local_invocation_id"));
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "workgroup_id"));
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "num_workgroups"));
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "sub_group_id"));
@@ -3986,6 +3984,14 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 	}
 	if (getLangOpts().Vulkan && CGM.getCodeGenOpts().VulkanDescriptorBufferSupport) {
 		func_flags |= (1u << 1u);
+	}
+	if (is_kernel || is_tess_control) {
+		uint32_t kernel_dim = 1;
+		if (const auto kernel_dim_attr = FD->getAttr<ComputeKernelDimAttr>(); kernel_dim_attr) {
+			kernel_dim = kernel_dim_attr->getDim();
+		}
+		assert(kernel_dim >= 1 && kernel_dim <= 3);
+		func_flags |= (1u << (1u + kernel_dim));
 	}
 	info << func_flags << ",";
 	// #4,5,6: local size/dim

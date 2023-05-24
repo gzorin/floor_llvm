@@ -1219,6 +1219,45 @@ def GraphicsTessellationEvaluationShader : DeclOrTypeAttr {
   let SimpleHandler = 1;
 }
 
+// compute kernel dimensionality (1, 2 or 3)
+def ComputeKernelDim : DeclOrTypeAttr {
+  let Spellings = [GNU<"kernel_dim">, CXX11<"","kernel_dim", 200809>];
+  let Args = [ExprArgument<"KernelDim">];
+  let TemplateDependent = 1;
+  let AdditionalMembers = [{
+  unsigned int dim = 1;
+  unsigned int getDim() const {
+    return dim;
+  }
+  void setDim(unsigned int dim_) {
+    dim = dim_;
+  }
+  }];
+  let Subjects = SubjectList<[Function], ErrorDiag>;
+  let Documentation = [Undocumented];
+}
+
+// compute kernel work-group size (1D, 2D or 3D)
+// NOTE: will reuse/set reqd_work_group_size
+def ComputeKernelWorkGroupSize : DeclOrTypeAttr {
+  let Spellings = [GNU<"kernel_work_group_size">, CXX11<"","kernel_work_group_size", 200809>];
+  let Args = [ExprArgument<"WorkGroupSizeX", /*opt*/ 1>, ExprArgument<"WorkGroupSizeY", /*opt*/ 1>, ExprArgument<"WorkGroupSizeZ", /*opt*/ 1>];
+  let TemplateDependent = 1;
+  let AdditionalMembers = [{
+  unsigned int work_group_size[3] { 1, 1, 1 };
+  auto getWorkGroupSize() const {
+    return work_group_size;
+  }
+  void setWorkGroupSize(unsigned int size_x, unsigned int size_y, unsigned int size_z) {
+	work_group_size[0] = size_x;
+	work_group_size[1] = size_y;
+	work_group_size[2] = size_z;
+  }
+  }];
+  let Subjects = SubjectList<[Function], ErrorDiag>;
+  let Documentation = [Undocumented];
+}
+
 def GraphicsTessellationPatch : InheritableAttr {
   let Spellings = [CXX11<"","patch", 200809>];
   let Args = [EnumArgument<"PatchPrimitive", "PatchPrimitiveType",

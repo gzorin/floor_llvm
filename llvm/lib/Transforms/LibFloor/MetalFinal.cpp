@@ -299,33 +299,37 @@ namespace {
 		bool is_tess_control_func { false };
 		bool is_tess_eval_func { false };
 		
-		// added kernel function args
-		Argument* global_id { nullptr };
-		Argument* global_size { nullptr };
-		Argument* local_id { nullptr };
-		Argument* local_size { nullptr };
-		Argument* group_id { nullptr };
-		Argument* group_size { nullptr };
-		Argument* sub_group_id { nullptr };
-		Argument* sub_group_local_id { nullptr };
-		Argument* sub_group_size { nullptr };
-		Argument* num_sub_groups { nullptr };
-		
-		// added vertex function args
-		Argument* vertex_id { nullptr };
-		Argument* instance_id { nullptr };
-		
-		// added fragment function args
-		Argument* point_coord { nullptr };
-		Argument* primitive_id { nullptr };
-		Argument* barycentric_coord { nullptr };
-		
-		// added tessellation evaluation function args
-		Argument* patch_id { nullptr };
-		Argument* position_in_patch { nullptr };
-		
-		// any function args
-		Argument* soft_printf { nullptr };
+		struct per_function_state_t {
+			uint32_t kernel_dim { 1 };
+			
+			// added kernel function args
+			Argument* global_id { nullptr };
+			Argument* global_size { nullptr };
+			Argument* local_id { nullptr };
+			Argument* local_size { nullptr };
+			Argument* group_id { nullptr };
+			Argument* group_size { nullptr };
+			Argument* sub_group_id { nullptr };
+			Argument* sub_group_local_id { nullptr };
+			Argument* sub_group_size { nullptr };
+			Argument* num_sub_groups { nullptr };
+			
+			// added vertex function args
+			Argument* vertex_id { nullptr };
+			Argument* instance_id { nullptr };
+			
+			// added fragment function args
+			Argument* point_coord { nullptr };
+			Argument* primitive_id { nullptr };
+			Argument* barycentric_coord { nullptr };
+			
+			// added tessellation evaluation function args
+			Argument* patch_id { nullptr };
+			Argument* position_in_patch { nullptr };
+			
+			// any function args
+			Argument* soft_printf { nullptr };
+		} state;
 		
 		MetalFinal(const bool enable_intel_workarounds_ = false,
 				   const bool enable_nvidia_workarounds_ = false) :
@@ -456,6 +460,7 @@ namespace {
 			ctx = &M->getContext();
 			func = &F;
 			builder = std::make_shared<llvm::IRBuilder<>>(*ctx);
+			state = {};
 			
 			for(auto& instr : F.getEntryBlock().getInstList()) {
 				if(!isa<AllocaInst>(instr)) {
@@ -499,37 +504,34 @@ namespace {
 			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
 			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
 			if(is_kernel_func || is_tess_control_func) {
+				auto kernel_dim_node = F.getMetadata("kernel_dim");
+				assert(kernel_dim_node);
+				if (kernel_dim_node->getNumOperands() > 0) {
+					auto& op = kernel_dim_node->getOperand(0);
+					state.kernel_dim = (uint32_t)mdconst::extract<ConstantInt>(op)->getZExtValue();
+					assert((is_kernel_func && state.kernel_dim >= 1 && state.kernel_dim <= 3) ||
+						   (is_tess_control_func && state.kernel_dim == 1));
+				}
 				if (F.arg_size() >= (has_sub_group_support ? METAL_KERNEL_SUB_GROUPS_ARG_COUNT : METAL_KERNEL_ARG_COUNT) + (has_soft_printf ? 1 : 0)) {
 					int32_t rev_idx = -1;
 					if (has_sub_group_support) {
-						num_sub_groups = get_arg_by_idx(rev_idx--);
-						sub_group_size = get_arg_by_idx(rev_idx--);
-						sub_group_local_id = get_arg_by_idx(rev_idx--);
-						sub_group_id = get_arg_by_idx(rev_idx--);
+						state.num_sub_groups = get_arg_by_idx(rev_idx--);
+						state.sub_group_size = get_arg_by_idx(rev_idx--);
+						state.sub_group_local_id = get_arg_by_idx(rev_idx--);
+						state.sub_group_id = get_arg_by_idx(rev_idx--);
 					}
-					group_size = get_arg_by_idx(rev_idx--);
-					group_id = get_arg_by_idx(rev_idx--);
-					local_size = get_arg_by_idx(rev_idx--);
-					local_id = get_arg_by_idx(rev_idx--);
-					global_size = get_arg_by_idx(rev_idx--);
-					global_id = get_arg_by_idx(rev_idx--);
+					state.group_size = get_arg_by_idx(rev_idx--);
+					state.group_id = get_arg_by_idx(rev_idx--);
+					state.local_size = get_arg_by_idx(rev_idx--);
+					state.local_id = get_arg_by_idx(rev_idx--);
+					state.global_size = get_arg_by_idx(rev_idx--);
+					state.global_id = get_arg_by_idx(rev_idx--);
 					if (has_soft_printf) {
-						soft_printf = get_arg_by_idx(rev_idx--);
+						state.soft_printf = get_arg_by_idx(rev_idx--);
 					}
 				} else {
 					errs() << "invalid " << (is_kernel_func ? "kernel" : "tessellation-control");
 					errs() << " function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
-					global_id = nullptr;
-					global_size = nullptr;
-					local_id = nullptr;
-					local_size = nullptr;
-					group_id = nullptr;
-					group_size = nullptr;
-					sub_group_id = nullptr;
-					sub_group_local_id = nullptr;
-					sub_group_size = nullptr;
-					num_sub_groups = nullptr;
-					soft_printf = nullptr;
 				}
 			}
 			
@@ -538,16 +540,13 @@ namespace {
 			if(is_vertex_func) {
 				if (F.arg_size() >= METAL_VERTEX_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
 					// TODO: this should be optional / only happen on request
-					vertex_id = get_arg_by_idx(METAL_VERTEX_ID);
-					instance_id = get_arg_by_idx(METAL_VS_INSTANCE_ID);
+					state.vertex_id = get_arg_by_idx(METAL_VERTEX_ID);
+					state.instance_id = get_arg_by_idx(METAL_VS_INSTANCE_ID);
 					if (has_soft_printf) {
-						soft_printf = get_arg_by_idx(-(METAL_VERTEX_ARG_COUNT + 1));
+						state.soft_printf = get_arg_by_idx(-(METAL_VERTEX_ARG_COUNT + 1));
 					}
 				} else {
 					errs() << "invalid vertex function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
-					vertex_id = nullptr;
-					instance_id = nullptr;
-					soft_printf = nullptr;
 				}
 			}
 			
@@ -556,18 +555,14 @@ namespace {
 			if(is_tess_eval_func) {
 				if (F.arg_size() >= METAL_TESS_EVAL_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
 					// TODO: this should be optional / only happen on request
-					patch_id = get_arg_by_idx(METAL_PATCH_ID);
-					instance_id = get_arg_by_idx(METAL_TES_INSTANCE_ID);
-					position_in_patch = get_arg_by_idx(METAL_POSITION_IN_PATCH);
+					state.patch_id = get_arg_by_idx(METAL_PATCH_ID);
+					state.instance_id = get_arg_by_idx(METAL_TES_INSTANCE_ID);
+					state.position_in_patch = get_arg_by_idx(METAL_POSITION_IN_PATCH);
 					if (has_soft_printf) {
-						soft_printf = get_arg_by_idx(-(METAL_TESS_EVAL_ARG_COUNT + 1));
+						state.soft_printf = get_arg_by_idx(-(METAL_TESS_EVAL_ARG_COUNT + 1));
 					}
 				} else {
 					errs() << "invalid tessellation-evaluation function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
-					patch_id = nullptr;
-					instance_id = nullptr;
-					position_in_patch = nullptr;
-					soft_printf = nullptr;
 				}
 			}
 			
@@ -576,31 +571,21 @@ namespace {
 			if(is_fragment_func) {
 				const uint32_t opt_arg_count = (has_soft_printf ? 1u : 0u) + (has_primitive_id ? 1u : 0u) + (has_barycentric_coord ? 1u : 0u);
 				if (F.arg_size() >= METAL_FRAGMENT_ARG_COUNT + opt_arg_count) {
-					point_coord = get_arg_by_idx(METAL_POINT_COORD);
+					state.point_coord = get_arg_by_idx(METAL_POINT_COORD);
 					
 					// NOTE: reverse order!
 					uint32_t opt_arg_counter = 1;
 					if (has_barycentric_coord) {
-						barycentric_coord = get_arg_by_idx(-(METAL_FRAGMENT_ARG_COUNT + opt_arg_counter++));
-					} else {
-						barycentric_coord = nullptr;
+						state.barycentric_coord = get_arg_by_idx(-(METAL_FRAGMENT_ARG_COUNT + opt_arg_counter++));
 					}
 					if (has_primitive_id) {
-						primitive_id = get_arg_by_idx(-(METAL_FRAGMENT_ARG_COUNT + opt_arg_counter++));
-					} else {
-						primitive_id = nullptr;
+						state.primitive_id = get_arg_by_idx(-(METAL_FRAGMENT_ARG_COUNT + opt_arg_counter++));
 					}
 					if (has_soft_printf) {
-						soft_printf = get_arg_by_idx(-(METAL_FRAGMENT_ARG_COUNT + opt_arg_counter++));
-					} else {
-						soft_printf = nullptr;
+						state.soft_printf = get_arg_by_idx(-(METAL_FRAGMENT_ARG_COUNT + opt_arg_counter++));
 					}
 				} else {
 					errs() << "invalid fragment function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
-					point_coord = nullptr;
-					primitive_id = nullptr;
-					barycentric_coord = nullptr;
-					soft_printf = nullptr;
 				}
 			}
 			
@@ -877,9 +862,9 @@ namespace {
 				return;
 			}
 			
-			const auto func = I.getCalledFunction();
-			if (!func) return;
-			const auto func_name = func->getName();
+			const auto called_func = I.getCalledFunction();
+			if (!called_func) return;
+			const auto func_name = called_func->getName();
 			if (func_name.startswith("air.")) {
 				check_air_call(I);
 				return;
@@ -892,139 +877,127 @@ namespace {
 			Argument* id;
 			bool get_from_vector = false;
 			if(func_name == "floor.get_global_id.i32") {
-				id = global_id;
+				id = state.global_id;
 				get_from_vector = true;
 			}
 			else if(func_name == "floor.get_global_size.i32") {
-				id = global_size;
+				id =state. global_size;
 				get_from_vector = true;
 			}
 			else if(func_name == "floor.get_local_id.i32") {
-				id = local_id;
+				id = state.local_id;
 				get_from_vector = true;
 			}
 			else if(func_name == "floor.get_local_size.i32") {
-				id = local_size;
+				id = state.local_size;
 				get_from_vector = true;
 			}
 			else if(func_name == "floor.get_group_id.i32") {
-				id = group_id;
+				id = state.group_id;
 				get_from_vector = true;
 			}
 			else if(func_name == "floor.get_group_size.i32") {
-				id = group_size;
+				id = state.group_size;
 				get_from_vector = true;
 			}
 			else if(func_name == "floor.get_sub_group_id.i32") {
-				id = sub_group_id;
+				id = state.sub_group_id;
 			}
 			else if(func_name == "floor.get_sub_group_local_id.i32") {
-				id = sub_group_local_id;
+				id = state.sub_group_local_id;
 			}
 			else if(func_name == "floor.get_sub_group_size.i32") {
-				id = sub_group_size;
+				id = state.sub_group_size;
 			}
 			else if(func_name == "floor.get_num_sub_groups.i32") {
-				id = num_sub_groups;
+				id = state.num_sub_groups;
 			}
 			else if(func_name == "floor.get_work_dim.i32") {
-				if(group_size == nullptr) {
-					DBG(printf("failed to get group_size arg, probably not in a kernel or tessellation-control function?\n"); fflush(stdout);)
-					return;
-				}
-				
-				// special case
-				// => group_size.z == 1 ? (group_size.y == 1 ? 1 : 2) : 3
-				const auto size_z = builder->CreateExtractElement(group_size, builder->getInt32(2));
-				const auto size_y = builder->CreateExtractElement(group_size, builder->getInt32(1));
-				const auto cmp_z = builder->CreateICmp(ICmpInst::ICMP_EQ, size_z, builder->getInt32(1));
-				const auto cmp_y = builder->CreateICmp(ICmpInst::ICMP_EQ, size_y, builder->getInt32(1));
-				const auto sel_x_or_y = builder->CreateSelect(cmp_y, builder->getInt32(1), builder->getInt32(2));
-				const auto sel_xy_or_z = builder->CreateSelect(cmp_z, sel_x_or_y, builder->getInt32(3));
-				I.replaceAllUsesWith(sel_xy_or_z);
+				const auto const_kernel_dim = builder->getInt32(state.kernel_dim);
+				I.replaceAllUsesWith(const_kernel_dim);
 				I.eraseFromParent();
 				return;
 			}
 			else if(func_name == "floor.get_vertex_id.i32") {
-				if(vertex_id == nullptr) {
+				if(state.vertex_id == nullptr) {
 					DBG(printf("failed to get vertex_id arg, probably not in a vertex function?\n"); fflush(stdout);)
 					return;
 				}
 				
-				I.replaceAllUsesWith(vertex_id);
+				I.replaceAllUsesWith(state.vertex_id);
 				I.eraseFromParent();
 				return;
 			}
 			else if(func_name == "floor.get_patch_id.i32") {
-				if(patch_id == nullptr) {
+				if(state.patch_id == nullptr) {
 					DBG(printf("failed to get patch_id arg, probably not in a tessellation-evaluation function?\n"); fflush(stdout);)
 					return;
 				}
 				
-				I.replaceAllUsesWith(patch_id);
+				I.replaceAllUsesWith(state.patch_id);
 				I.eraseFromParent();
 				return;
 			}
 			else if(func_name == "floor.get_instance_id.i32") {
-				if(instance_id == nullptr) {
+				if(state.instance_id == nullptr) {
 					DBG(printf("failed to get instance_id arg, probably not in a vertex or tessellation-evaluation function?\n"); fflush(stdout);)
 					return;
 				}
 				
-				I.replaceAllUsesWith(instance_id);
+				I.replaceAllUsesWith(state.instance_id);
 				I.eraseFromParent();
 				return;
 			}
 			else if(func_name == "floor.get_position_in_patch.float3") {
-				if(position_in_patch == nullptr) {
+				if(state.position_in_patch == nullptr) {
 					DBG(printf("failed to get position_in_patch arg, probably not in a tessellation-evaluation function?\n"); fflush(stdout);)
 					return;
 				}
 			
-				I.replaceAllUsesWith(position_in_patch);
+				I.replaceAllUsesWith(state.position_in_patch);
 				I.eraseFromParent();
 				return;
 			}
 			else if(func_name == "floor.get_point_coord.float2") {
-				if(point_coord == nullptr) {
+				if(state.point_coord == nullptr) {
 					DBG(printf("failed to get point_coord arg, probably not in a fragment function?\n"); fflush(stdout);)
 					return;
 				}
 			
-				I.replaceAllUsesWith(point_coord);
+				I.replaceAllUsesWith(state.point_coord);
 				I.eraseFromParent();
 				return;
 			}
 			else if(func_name == "floor.builtin.get_printf_buffer") {
-				if(soft_printf == nullptr) {
+				if(state.soft_printf == nullptr) {
 					DBG(printf("failed to get printf_buffer arg, probably not in a kernel/vertex/fragment/tessellation function?\n"); fflush(stdout);)
 					return;
 				}
 				
 				// special case
-				I.replaceAllUsesWith(soft_printf);
+				I.replaceAllUsesWith(state.soft_printf);
 				I.eraseFromParent();
 				return;
 			}
 			else if(func_name == "floor.get_primitive_id.i32") {
-				if (primitive_id == nullptr) {
+				if (state.primitive_id == nullptr) {
 					llvm::errs() << "failed to get primitive_id arg, not in a fragment function or feature is not enabled\n";
 					llvm::errs().flush();
 					return;
 				}
 				
-				I.replaceAllUsesWith(primitive_id);
+				I.replaceAllUsesWith(state.primitive_id);
 				I.eraseFromParent();
 				return;
 			}
 			else if(func_name == "floor.get_barycentric_coord.float3") {
-				if (barycentric_coord == nullptr) {
+				if (state.barycentric_coord == nullptr) {
 					llvm::errs() << "failed to get barycentric_coord arg, not in a fragment function or feature is not enabled\n";
 					llvm::errs().flush();
 					return;
 				}
 			
-				I.replaceAllUsesWith(barycentric_coord);
+				I.replaceAllUsesWith(state.barycentric_coord);
 				I.eraseFromParent();
 				return;
 			}
@@ -1034,6 +1007,19 @@ namespace {
 			if(id == nullptr) {
 				DBG(printf("failed to get id arg, probably not in a kernel function?\n"); fflush(stdout);)
 				return;
+			}
+			
+			if (get_from_vector) {
+				const auto dim_op = I.getOperand(0);
+				if (const auto const_dim_op = dyn_cast_or_null<ConstantInt>(dim_op); dim_op) {
+					const auto dim_idx = const_dim_op->getZExtValue();
+					if ((dim_idx + 1) > state.kernel_dim) {
+						llvm::errs() << "out-of-bounds dim index " << dim_idx << " in " << state.kernel_dim << "D kernel " << func->getName() << ":\n";
+						llvm::errs() << I << "\n";
+						llvm::errs().flush();
+						return;
+					}
+				}
 			}
 			
 			// replace call with vector load / elem extraction from the appropriate vector

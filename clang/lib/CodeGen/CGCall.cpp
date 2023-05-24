@@ -483,7 +483,7 @@ uint32_t CodeGenTypes::getMetalVulkanImplicitArgCount(const FunctionDecl* FD) co
   } else if(LangOpts.Vulkan) {
     const uint32_t printf_arg = (CodeGenOpts.VulkanSoftPrintf > 0 ? 1 : 0);
     if (FD->hasAttr<ComputeKernelAttr>()) {
-      return 8 + printf_arg;
+      return 6 + printf_arg;
     } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
       return 3 + printf_arg;
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
@@ -608,8 +608,6 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       auto int3_type = Ctx.getExtVectorType(Ctx.IntTy, 3);
       auto int3_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(int3_type, LangAS::vulkan_input));
       auto int_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.IntTy, LangAS::vulkan_input));
-      add_arg(int3_ptr_type, "vulkan.global_invocation_id");
-      add_arg(int3_ptr_type, "vulkan.local_invocation_id");
       add_arg(int3_ptr_type, "vulkan.workgroup_id");
       add_arg(int3_ptr_type, "vulkan.num_workgroups");
       add_arg(int_ptr_type, "vulkan.sub_group_id");

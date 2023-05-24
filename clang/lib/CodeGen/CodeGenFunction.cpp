@@ -668,6 +668,12 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
                     llvm::MDNode::get(Context, AttrMDArgs));
   }
 
+  if (const ComputeKernelDimAttr *A = FD->getAttr<ComputeKernelDimAttr>()) {
+    llvm::Metadata *AttrMDArgs[] = {
+        llvm::ConstantAsMetadata::get(Builder.getInt32(A->getDim()))};
+    Fn->setMetadata("kernel_dim", llvm::MDNode::get(Context, AttrMDArgs));
+  }
+
   llvm::MDNode *kernelMDNode = llvm::MDNode::get(Context, kernelMDArgs);
   llvm::NamedMDNode *MainMetadataNode;
   if (!CGM.getLangOpts().Metal) {

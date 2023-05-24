@@ -113,34 +113,51 @@ namespace {
 		bool is_tess_control_func { false };
 		bool is_tess_eval_func { false };
 		
-		// added kernel function args
-		Argument* global_id { nullptr };
-		Argument* local_id { nullptr };
-		Argument* group_id { nullptr };
-		Argument* group_size { nullptr };
-		GlobalVariable* local_size { nullptr };
-		Argument* sub_group_id { nullptr };
-		Argument* sub_group_local_id { nullptr };
-		Argument* sub_group_size { nullptr };
-		Argument* num_sub_groups { nullptr };
-		
-		// added general shader function args
-		Argument* view_index { nullptr };
-		
-		// added vertex function args
-		Argument* vertex_id { nullptr };
-		Argument* instance_id { nullptr };
-		
-		// added fragment function args
-		Argument* point_coord { nullptr };
-		Argument* frag_coord { nullptr };
-		Argument* primitive_id { nullptr };
-		Argument* barycentric_coord { nullptr };
-		
-		// TODO: tessellation args!
-		
-		// any function args
-		Argument* soft_printf { nullptr };
+		struct per_function_state_t {
+			uint32_t kernel_dim { 1 };
+			
+			// added kernel function args
+			Argument* group_id { nullptr };
+			Argument* group_size { nullptr };
+			GlobalVariable* local_size { nullptr };
+			Argument* sub_group_id { nullptr };
+			Argument* sub_group_local_id { nullptr };
+			Argument* sub_group_size { nullptr };
+			Argument* num_sub_groups { nullptr };
+			
+			// added general shader function args
+			Argument* view_index { nullptr };
+			
+			// added vertex function args
+			Argument* vertex_id { nullptr };
+			Argument* instance_id { nullptr };
+			
+			// added fragment function args
+			Argument* point_coord { nullptr };
+			Argument* frag_coord { nullptr };
+			Argument* primitive_id { nullptr };
+			Argument* barycentric_coord { nullptr };
+			
+			// TODO: tessellation args!
+			
+			// any function args
+			Argument* soft_printf { nullptr };
+			
+			
+			// ID/arg handling: these contain performed loads/etc
+			std::array<Value*, 3> ld_group_id {{ nullptr, nullptr, nullptr }};
+			std::array<Value*, 3> ld_group_size {{ nullptr, nullptr, nullptr }};
+			std::array<Value*, 3> ld_local_id {{ nullptr, nullptr, nullptr }};
+			std::array<Value*, 3> ld_local_size {{ nullptr, nullptr, nullptr }};
+			std::array<Value*, 3> ld_global_id {{ nullptr, nullptr, nullptr }};
+			std::array<Value*, 3> ld_global_size {{ nullptr, nullptr, nullptr }};
+			Value* ld_sub_group_id { nullptr };
+			Value* ld_sub_group_local_id { nullptr };
+			Value* ld_sub_group_size { nullptr };
+			Value* ld_num_sub_groups { nullptr };
+			
+			std::vector<Instruction*> kill_list;
+		} state;
 		
 		VulkanBuiltinParamHandling() :
 		FunctionPass(ID) {
@@ -155,8 +172,6 @@ namespace {
 		}
 		
 		enum VULKAN_KERNEL_ARG_REV_IDX : int32_t {
-			VULKAN_GLOBAL_ID = -8,
-			VULKAN_LOCAL_ID = -7,
 			VULKAN_GROUP_ID = -6,
 			VULKAN_GROUP_SIZE = -5,
 			VULKAN_SUB_GROUP_ID = -4,
@@ -164,7 +179,7 @@ namespace {
 			VULKAN_SUB_GROUP_SIZE = -2,
 			VULKAN_NUM_SUB_GROUPS = -1,
 			
-			VULKAN_KERNEL_ARG_COUNT = 8,
+			VULKAN_KERNEL_ARG_COUNT = 6,
 		};
 		
 		enum VULKAN_VERTEX_ARG_REV_IDX : int32_t {
@@ -209,6 +224,10 @@ namespace {
 			ctx = &M->getContext();
 			func = &F;
 			builder = std::make_shared<llvm::IRBuilder<>>(*ctx);
+			state = {};
+			
+			// always insert into entry block
+			builder->SetInsertPoint(&func->getEntryBlock().front());
 			
 			const auto get_arg_by_idx = [&F](const int32_t& rev_idx) -> llvm::Argument* {
 				auto arg_iter = F.arg_end();
@@ -230,106 +249,92 @@ namespace {
 			
 			DBG(errs() << "> adding built-in args ...\n";)
 			// add args if this is a kernel function
-			if(is_kernel_func) {
+			if (is_kernel_func /* || is_tess_control_func */) {
+				auto kernel_dim_node = F.getMetadata("kernel_dim");
+				assert(kernel_dim_node);
+				if (kernel_dim_node->getNumOperands() > 0) {
+					auto& op = kernel_dim_node->getOperand(0);
+					state.kernel_dim = (uint32_t)mdconst::extract<ConstantInt>(op)->getZExtValue();
+					assert((is_kernel_func && state.kernel_dim >= 1 && state.kernel_dim <= 3) ||
+						   (is_tess_control_func && state.kernel_dim == 1));
+				}
+				
 				if (F.arg_size() >= VULKAN_KERNEL_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
-					global_id = get_arg_by_idx(VULKAN_GLOBAL_ID);
-					local_id = get_arg_by_idx(VULKAN_LOCAL_ID);
-					group_id = get_arg_by_idx(VULKAN_GROUP_ID);
-					group_size = get_arg_by_idx(VULKAN_GROUP_SIZE);
-					sub_group_id = get_arg_by_idx(VULKAN_SUB_GROUP_ID);
-					sub_group_local_id = get_arg_by_idx(VULKAN_SUB_GROUP_LOCAL_ID);
-					sub_group_size = get_arg_by_idx(VULKAN_SUB_GROUP_SIZE);
-					num_sub_groups = get_arg_by_idx(VULKAN_NUM_SUB_GROUPS);
+					state.group_id = get_arg_by_idx(VULKAN_GROUP_ID);
+					state.group_size = get_arg_by_idx(VULKAN_GROUP_SIZE);
+					state.sub_group_id = get_arg_by_idx(VULKAN_SUB_GROUP_ID);
+					state.sub_group_local_id = get_arg_by_idx(VULKAN_SUB_GROUP_LOCAL_ID);
+					state.sub_group_size = get_arg_by_idx(VULKAN_SUB_GROUP_SIZE);
+					state.num_sub_groups = get_arg_by_idx(VULKAN_NUM_SUB_GROUPS);
 					if (has_soft_printf) {
-						soft_printf = get_arg_by_idx(-(VULKAN_KERNEL_ARG_COUNT + 1));
+						state.soft_printf = get_arg_by_idx(-(VULKAN_KERNEL_ARG_COUNT + 1));
 					}
 				} else {
 					errs() << "invalid kernel function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
-					global_id = nullptr;
-					local_id = nullptr;
-					group_id = nullptr;
-					group_size = nullptr;
-					sub_group_id = nullptr;
-					sub_group_local_id = nullptr;
-					sub_group_size = nullptr;
-					num_sub_groups = nullptr;
-					soft_printf = nullptr;
 				}
 			}
 			
 			// add args if this is a vertex function
-			if(is_vertex_func) {
+			if (is_vertex_func) {
 				if (F.arg_size() >= VULKAN_VERTEX_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
 					// TODO: this should be optional / only happen on request
-					vertex_id = get_arg_by_idx(VULKAN_VERTEX_ID);
-					view_index = get_arg_by_idx(VULKAN_VERTEX_VIEW_INDEX);
-					instance_id = get_arg_by_idx(VULKAN_INSTANCE_ID);
+					state.vertex_id = get_arg_by_idx(VULKAN_VERTEX_ID);
+					state.view_index = get_arg_by_idx(VULKAN_VERTEX_VIEW_INDEX);
+					state.instance_id = get_arg_by_idx(VULKAN_INSTANCE_ID);
 					if (has_soft_printf) {
-						soft_printf = get_arg_by_idx(-(VULKAN_VERTEX_ARG_COUNT + 1));
+						state.soft_printf = get_arg_by_idx(-(VULKAN_VERTEX_ARG_COUNT + 1));
 					}
 				} else {
 					errs() << "invalid vertex function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
-					vertex_id = nullptr;
-					view_index = nullptr;
-					instance_id = nullptr;
-					soft_printf = nullptr;
 				}
 			}
 			
 			// add args if this is a fragment function
-			if(is_fragment_func) {
+			if (is_fragment_func) {
 				const uint32_t opt_arg_count = (has_soft_printf ? 1u : 0u) + (has_primitive_id ? 1u : 0u) + (has_barycentric_coord ? 1u : 0u);
 				if (F.arg_size() >= VULKAN_FRAGMENT_ARG_COUNT + opt_arg_count) {
-					point_coord = get_arg_by_idx(VULKAN_POINT_COORD);
-					frag_coord = get_arg_by_idx(VULKAN_FRAG_COORD);
-					view_index = get_arg_by_idx(VULKAN_FRAGMENT_VIEW_INDEX);
+					state.point_coord = get_arg_by_idx(VULKAN_POINT_COORD);
+					state.frag_coord = get_arg_by_idx(VULKAN_FRAG_COORD);
+					state.view_index = get_arg_by_idx(VULKAN_FRAGMENT_VIEW_INDEX);
 					
 					// NOTE: reverse order!
 					uint32_t opt_arg_counter = 1;
 					if (has_barycentric_coord) {
-						barycentric_coord = get_arg_by_idx(-(VULKAN_FRAGMENT_ARG_COUNT + opt_arg_counter++));
-					} else {
-						barycentric_coord = nullptr;
+						state.barycentric_coord = get_arg_by_idx(-(VULKAN_FRAGMENT_ARG_COUNT + opt_arg_counter++));
 					}
 					if (has_primitive_id) {
-						primitive_id = get_arg_by_idx(-(VULKAN_FRAGMENT_ARG_COUNT + opt_arg_counter++));
-					} else {
-						primitive_id = nullptr;
+						state.primitive_id = get_arg_by_idx(-(VULKAN_FRAGMENT_ARG_COUNT + opt_arg_counter++));
 					}
 					if (has_soft_printf) {
-						soft_printf = get_arg_by_idx(-(VULKAN_FRAGMENT_ARG_COUNT + opt_arg_counter++));
-					} else {
-						soft_printf = nullptr;
+						state.soft_printf = get_arg_by_idx(-(VULKAN_FRAGMENT_ARG_COUNT + opt_arg_counter++));
 					}
 				} else {
 					errs() << "invalid fragment function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
-					point_coord = nullptr;
-					frag_coord = nullptr;
-					view_index = nullptr;
-					primitive_id = nullptr;
-					barycentric_coord = nullptr;
-					soft_printf = nullptr;
 				}
 			}
 			
 			// emit local size variable for this function (initialized externally at "run-time" / SPIR-V spec)
-			if(is_kernel_func) {
+			// NOTE: if the function has a reqd_work_group_size (constant required work-group size), we don't need this
+			if (is_kernel_func && !func->hasFnAttribute("reqd_work_group_size")) {
 				auto local_size_type = llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 3);
-				local_size = new GlobalVariable(*M,
-												local_size_type,
-												true,
-												GlobalVariable::ExternalLinkage,
-												nullptr,
-												F.getName().str() + ".vulkan_constant.local_size",
-												nullptr,
-												GlobalValue::NotThreadLocal,
-												0,
-												true);
+				state.local_size = new GlobalVariable(*M,
+													  local_size_type,
+													  true,
+													  GlobalVariable::ExternalLinkage,
+													  nullptr,
+													  F.getName().str() + ".vulkan_constant.local_size",
+													  nullptr,
+													  GlobalValue::NotThreadLocal,
+													  0,
+													  true);
 			}
 			
 			// visit everything in this function
 			DBG(errs() << "> handling instructions ...\n";)
 			visit(F);
+			for (auto& instr : state.kill_list) {
+				instr->eraseFromParent();
+			}
 			
 			// always modified
 			DBG(errs() << "> " << F.getName() << " done\n";)
@@ -342,179 +347,380 @@ namespace {
 			InstVisitor<VulkanBuiltinParamHandling>::visit(I);
 		}
 		
+		llvm::Value* handle_vec_load(Argument* id, uint32_t dim_idx, std::string_view name) {
+			if (id == nullptr) {
+				llvm::errs() << "failed to get id arg, probably not in a kernel function\n";
+				llvm::errs().flush();
+				return nullptr;
+			}
+			return builder->CreateExtractElement(builder->CreateLoad(id->getType()->getPointerElementType(), id), dim_idx,
+												 std::string(name) + "_" + std::to_string(dim_idx));
+		}
+		
+		enum class id {
+			group_id,
+			group_size,
+			local_id,
+			local_size,
+			global_id,
+			global_size,
+			sub_group_id,
+			sub_group_local_id,
+			sub_group_size,
+			num_sub_groups,
+		};
+		constexpr const std::string_view id_to_str(id id_val) {
+			switch (id_val) {
+				case id::group_id:
+					return "group_id";
+				case id::group_size:
+					return "group_size";
+				case id::local_id:
+					return "local_id";
+				case id::local_size:
+					return "local_size";
+				case id::global_id:
+					return "global_id";
+				case id::global_size:
+					return "global_size";
+				case id::sub_group_id:
+					return "sub_group_id";
+				case id::sub_group_local_id:
+					return "sub_group_local_id";
+				case id::sub_group_size:
+					return "sub_group_size";
+				case id::num_sub_groups:
+					return "num_sub_groups";
+			}
+		}
+		// helper function to load a specific ID value, cache it and return it (or just return from cache)
+		template <id id_val>
+		llvm::Value* get_id(uint32_t dim_idx) {
+			if constexpr (id_val == id::group_id ||
+						  id_val == id::group_size) {
+				std::array<Value*, 3>* ld = nullptr;
+				Argument* id = nullptr;
+				
+				switch (id_val) {
+					case id::group_id:
+						ld = &state.ld_group_id;
+						id = state.group_id;
+						break;
+					case id::group_size:
+						ld = &state.ld_group_size;
+						id = state.group_size;
+						break;
+				}
+				
+				if (!(*ld)[dim_idx]) {
+					(*ld)[dim_idx] = handle_vec_load(id, dim_idx, id_to_str(id_val));
+				}
+				return (*ld)[dim_idx];
+			} else if constexpr (id_val == id::sub_group_id ||
+								 id_val == id::sub_group_local_id ||
+								 id_val == id::sub_group_size ||
+								 id_val == id::num_sub_groups) {
+				Value** ld = nullptr;
+				Argument* id = nullptr;
+				
+				switch (id_val) {
+					case id::sub_group_id:
+						ld = &state.ld_sub_group_id;
+						id = state.sub_group_id;
+						break;
+					case id::sub_group_local_id:
+						ld = &state.ld_sub_group_local_id;
+						id = state.sub_group_local_id;
+						break;
+					case id::sub_group_size:
+						ld = &state.ld_sub_group_size;
+						id = state.sub_group_size;
+						break;
+					case id::num_sub_groups:
+						ld = &state.ld_num_sub_groups;
+						id = state.num_sub_groups;
+						break;
+				}
+				
+				if (!(*ld)) {
+					*ld = builder->CreateLoad(id->getType()->getPointerElementType(), id, id_to_str(id_val));
+				}
+				return *ld;
+			} else if constexpr (id_val == id::local_size) {
+				if (!state.ld_local_size[dim_idx]) {
+					// this doesn't have a direct built-in equivalent, but must be loaded from the WorkgroupSize run-time constant
+					// however: if a fixed work-group size is set, we can use a constant
+					if (MDNode* wg_size_node = func->getMetadata("reqd_work_group_size");
+						wg_size_node && wg_size_node->getNumOperands() == 3) {
+						state.ld_local_size[dim_idx] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(dim_idx));
+					} else {
+						assert(state.local_size);
+						state.ld_local_size[dim_idx] = builder->CreateExtractElement(builder->CreateLoad(state.local_size->getType()->getPointerElementType(), state.local_size), dim_idx,
+																					 std::string(id_to_str(id_val)) + "_" + std::to_string(dim_idx));
+					}
+				}
+				return state.ld_local_size[dim_idx];
+			} else if constexpr (id_val == id::global_size) {
+				if (!state.ld_global_size[dim_idx]) {
+					// this doesn't have a direct built-in equivalent, but must be computed from the WorkgroupSize constant
+					// TODO/NOTE: this might need some more work on the spir-v side, right now this is always constant folded
+					state.ld_global_size[dim_idx] = builder->CreateMul(get_id<id::group_size>(dim_idx), get_id<id::local_size>(dim_idx), "global_size_" + std::to_string(dim_idx));
+				}
+				return state.ld_global_size[dim_idx];
+			} else if constexpr (id_val == id::local_id) {
+				if (!state.ld_local_id[dim_idx]) {
+					// since sub-group functionality is always enabled, we can no longer make use of LocalInvocationId, because:
+					// Vulkan (1.3 spec): 15.9. Built-In Variables: "There is no direct relationship between SubgroupLocalInvocationId and LocalInvocationId"
+					// we do however need to guarantee a direct relationshop -> need to compute the local id from the sub-group IDs/sizes
+					auto sglid = get_id<id::sub_group_local_id>(0);
+					auto sgid = get_id<id::sub_group_id>(0);
+					auto sgsize = get_id<id::sub_group_size>(0);
+					auto linear_idx = builder->CreateAdd(builder->CreateMul(sgid, sgsize), sglid, "local_linear_id");
+					
+					const auto handle_const_2D_lsize = [this, &linear_idx](const uint32_t lsize_x, Value* const_lsize_0, uint32_t dim) {
+						// NOTE: since the SIMD width must be a power-of-two and work-group X dim must be a multiple of it
+						//       -> work-group X dim must also be a power-of-two
+						if (__builtin_popcount(lsize_x) != 1) {
+							llvm::errs() << "work-group dim X must always be a power-of-two: in kernel function" << func->getName() << ":\n";
+							llvm::errs() << *const_lsize_0 << " is not a power-of-two\n";
+							llvm::errs().flush();
+							return false;
+						}
+						// with POT work-group size: X = idx & (local-size-x - 1), Y = idx >> log2(local-size-x)
+						if (dim == 0) {
+							state.ld_local_id[0] = builder->CreateAnd(linear_idx, builder->getInt32(lsize_x - 1u), "local_id_0");
+						} else if (dim == 1) {
+							state.ld_local_id[1] = builder->CreateAShr(linear_idx, builder->getInt32(__builtin_ctz(lsize_x)), "local_id_1");
+						} else if (dim == 2) {
+							state.ld_local_id[2] = builder->getInt32(0);
+						} else {
+							assert(false);
+							return false;
+						}
+						return true;
+					};
+					
+					switch (state.kernel_dim) {
+						case 1:
+							// trivial case
+							state.ld_local_id[dim_idx] = linear_idx;
+							break;
+						case 2: {
+							// need to distribute 1D index to 2D dim (for now: sequentially, TODO: might want to try quad/morton/hilbert?)
+							auto lsize_0 = get_id<id::local_size>(0);
+							if (auto const_lsize_0 = dyn_cast_or_null<ConstantInt>(lsize_0); const_lsize_0) {
+								// -> if the local size is constant, we can do this more optimally
+								const auto lsize_x = uint32_t(const_lsize_0->getZExtValue());
+								assert(lsize_x >= 1);
+								auto const_lsize_1 = dyn_cast_or_null<ConstantInt>(get_id<id::local_size>(1));
+								assert(const_lsize_1 && const_lsize_1->getZExtValue() >= 1);
+								const auto lsize_y = uint32_t(const_lsize_1->getZExtValue());
+								if (lsize_y == 1) {
+									// -> nothing to do here
+									state.ld_local_id[dim_idx] = (dim_idx == 0 ? linear_idx : builder->getInt32(0));
+									break;
+								}
+								if (!handle_const_2D_lsize(lsize_x, const_lsize_0, dim_idx)) {
+									return nullptr;
+								}
+							} else {
+								// -> dynamic: similar to the constant variant, but at run-time
+								// NOTE: we can't check/enforce the power-of-twoness of the work-group X dim (-> must rely on run-time)
+								if (dim_idx == 0) {
+									state.ld_local_id[0] = builder->CreateAnd(linear_idx, builder->CreateNUWSub(lsize_0, builder->getInt32(1)), "local_id_0");
+								} else {
+									state.ld_local_id[1] = builder->CreateAShr(linear_idx, builder->CreateIntrinsic(Intrinsic::cttz, { lsize_0->getType() }, { lsize_0, builder->getInt1(0) }), "local_id_1");
+								}
+							}
+							break;
+						}
+						case 3: {
+							// need to distribute 1D index to 3D dim (for now: sequentially)
+							auto lsize_0 = get_id<id::local_size>(0);
+							auto lsize_1 = get_id<id::local_size>(1);
+							if (auto const_lsize_0 = dyn_cast_or_null<ConstantInt>(lsize_0); const_lsize_0) {
+								// -> if the local size is constant, we can do this more optimally
+								const auto lsize_x = uint32_t(const_lsize_0->getZExtValue());
+								assert(lsize_x >= 1);
+								auto const_lsize_1 = dyn_cast_or_null<ConstantInt>(get_id<id::local_size>(1));
+								assert(const_lsize_1 && const_lsize_1->getZExtValue() >= 1);
+								auto const_lsize_2 = dyn_cast_or_null<ConstantInt>(get_id<id::local_size>(2));
+								assert(const_lsize_2 && const_lsize_2->getZExtValue() >= 1);
+								const auto lsize_y = uint32_t(const_lsize_1->getZExtValue());
+								const auto lsize_z = uint32_t(const_lsize_2->getZExtValue());
+								if (lsize_y == 1 && lsize_z == 1) {
+									// -> nothing to do here
+									state.ld_local_id[dim_idx] = (dim_idx == 0 ? linear_idx : builder->getInt32(0));
+									break;
+								} else if (lsize_z == 1) {
+									// same as 2D
+									if (!handle_const_2D_lsize(lsize_x, const_lsize_0, dim_idx)) {
+										return nullptr;
+									}
+									break;
+								}
+								// NOTE: see 2D
+								if (__builtin_popcount(lsize_x) != 1) {
+									llvm::errs() << "work-group dim X must always be a power-of-two: in kernel function" << func->getName() << ":\n";
+									llvm::errs() << *const_lsize_0 << " is not a power-of-two\n";
+									llvm::errs().flush();
+									return nullptr;
+								}
+								if (lsize_y == 1) {
+									// almost the same as 2D
+									if (dim_idx == 0) {
+										state.ld_local_id[0] = builder->CreateAnd(linear_idx, builder->getInt32(lsize_x - 1u), "local_id_0");
+									} else if (dim_idx == 1) {
+										state.ld_local_id[1] = builder->getInt32(0);
+									} else if (dim_idx == 2) {
+										state.ld_local_id[2] = builder->CreateAShr(linear_idx, builder->getInt32(__builtin_ctz(lsize_x)), "local_id_2");
+									}
+									break;
+								}
+								// -> full 3D local size dim
+								// X = idx & (local-size-x - 1) // same as before, since X is POT
+								// Y = (idx >> log2(local-size-x)) % local-size-y
+								// Z = (idx >> log2(local-size-x)) / local-size-y
+								// NOTE/TODO: could be optimized further if local-size-y is POT + could use magic div (but let other optimizers deal with it for now)
+								if (dim_idx == 0) {
+									state.ld_local_id[0] = builder->CreateAnd(linear_idx, builder->getInt32(lsize_x - 1u), "local_id_0");
+								} else if (dim_idx == 1) {
+									state.ld_local_id[1] = builder->CreateURem(builder->CreateAShr(linear_idx, builder->getInt32(__builtin_ctz(lsize_x))), builder->getInt32(lsize_y), "local_id_1");
+								} else if (dim_idx == 2) {
+									state.ld_local_id[2] = builder->CreateUDiv(builder->CreateAShr(linear_idx, builder->getInt32(__builtin_ctz(lsize_x))), builder->getInt32(lsize_y), "local_id_2");
+								}
+							} else {
+								// -> dynamic: similar to the constant variant, but at run-time
+								// NOTE: we can't check/enforce the power-of-twoness of the work-group X dim (-> must rely on run-time)
+								if (dim_idx == 0) {
+									state.ld_local_id[0] = builder->CreateAnd(linear_idx, builder->CreateNUWSub(lsize_0, builder->getInt32(1)), "local_id_0");
+								} else if (dim_idx == 1) {
+									state.ld_local_id[1] = builder->CreateURem(builder->CreateAShr(linear_idx, builder->CreateIntrinsic(Intrinsic::cttz, { lsize_0->getType() }, { lsize_0, builder->getInt1(0) })), lsize_1, "local_id_1");
+								} else if (dim_idx == 2) {
+									state.ld_local_id[2] = builder->CreateUDiv(builder->CreateAShr(linear_idx, builder->CreateIntrinsic(Intrinsic::cttz, { lsize_0->getType() }, { lsize_0, builder->getInt1(0) })), lsize_1, "local_id_2");
+								}
+							}
+							break;
+						}
+					}
+				}
+				return state.ld_local_id[dim_idx];
+			} else if constexpr (id_val == id::global_id) {
+				if (!state.ld_global_id[dim_idx]) {
+					state.ld_global_id[dim_idx] = builder->CreateAdd(builder->CreateMul(get_id<id::group_id>(dim_idx), get_id<id::local_size>(dim_idx)), get_id<id::local_id>(dim_idx), "global_id_" + std::to_string(dim_idx));
+				}
+				return state.ld_global_id[dim_idx];
+			} else {
+				static_assert([]() constexpr { return false; }(), "unhandled id value");
+			}
+		}
+		
 		//
 		void visitCallInst(CallInst &I) {
 			const auto func_name = I.getCalledFunction()->getName();
 			if(!func_name.startswith("floor.builtin.")) return;
 			
-			builder->SetInsertPoint(&I);
-			
-			// figure out which one we need
-			Argument* id;
-			if (func_name == "floor.builtin.global_id.i32") {
-				id = global_id;
-			} else if (func_name == "floor.builtin.local_id.i32") {
-				id = local_id;
-			} else if (func_name == "floor.builtin.group_id.i32") {
-				id = group_id;
-			} else if (func_name == "floor.builtin.group_size.i32") {
-				id = group_size;
-			} else if (func_name == "floor.builtin.local_size.i32") {
-				// this doesn't have a direct built-in equivalent, but must be loaded from the WorkgroupSize constant
-				I.replaceAllUsesWith(builder->CreateExtractElement(builder->CreateLoad(local_size->getType()->getPointerElementType(), local_size), I.getOperand(0)));
-				I.eraseFromParent();
-				return;
-			} else if (func_name == "floor.builtin.global_size.i32") {
-				// this doesn't have a direct built-in equivalent, but must be computed from the WorkgroupSize constant
-				// TODO/NOTE: this might need some more work on the spir-v side, right now this is always constant folded
-				auto dim_idx = I.getOperand(0);
-				auto wg_size_dim = builder->CreateExtractElement(builder->CreateLoad(local_size->getType()->getPointerElementType(), local_size), dim_idx);
-				auto grp_count_dim = builder->CreateExtractElement(builder->CreateLoad(group_size->getType()->getPointerElementType(), group_size), dim_idx);
-				auto global_size_dim = builder->CreateMul(wg_size_dim, grp_count_dim);
-				I.replaceAllUsesWith(global_size_dim);
-				I.eraseFromParent();
-				return;
-			} else if (func_name == "floor.builtin.work_dim.i32") {
-				if(group_size == nullptr) {
-					DBG(printf("failed to get group_size arg, probably not in a kernel function?\n"); fflush(stdout);)
-					return;
+			// helper function to retrieve a constant dim index for a id variable load
+			const auto get_dim_idx = [this](Value* dim_op, Instruction* originating_call_or_null) {
+				const auto const_dim_op = dyn_cast_or_null<ConstantInt>(dim_op);
+				if (!const_dim_op) {
+					llvm::errs() << "dim index in " << state.kernel_dim << "D kernel " << func->getName() << " is not constant:\n";
+					if (originating_call_or_null) {
+						llvm::errs() << *originating_call_or_null << "\n";
+					}
+					llvm::errs().flush();
+					return 0u;
 				}
 				
-				// special case
-				// => group_size.z == 1 ? (group_size.y == 1 ? 1 : 2) : 3
-				const auto loaded_group_size = builder->CreateLoad(group_size->getType()->getPointerElementType(), group_size);
-				const auto size_z = builder->CreateExtractElement(loaded_group_size, builder->getInt32(2));
-				const auto size_y = builder->CreateExtractElement(loaded_group_size, builder->getInt32(1));
-				const auto cmp_z = builder->CreateICmp(ICmpInst::ICMP_EQ, size_z, builder->getInt32(1));
-				const auto cmp_y = builder->CreateICmp(ICmpInst::ICMP_EQ, size_y, builder->getInt32(1));
-				const auto sel_x_or_y = builder->CreateSelect(cmp_y, builder->getInt32(1), builder->getInt32(2));
-				const auto sel_xy_or_z = builder->CreateSelect(cmp_z, sel_x_or_y, builder->getInt32(3));
-				I.replaceAllUsesWith(sel_xy_or_z);
-				I.eraseFromParent();
-				return;
+				const auto dim_idx = const_dim_op->getZExtValue();
+				if ((dim_idx + 1) > state.kernel_dim) {
+					llvm::errs() << "out-of-bounds dim index " << dim_idx << " in " << state.kernel_dim << "D kernel " << func->getName() << ":\n";
+					if (originating_call_or_null) {
+						llvm::errs() << *originating_call_or_null << "\n";
+					}
+					llvm::errs().flush();
+					return 0u;
+				}
+				return uint32_t(dim_idx);
+			};
+			
+			// figure out which one we need
+			if (func_name == "floor.builtin.global_id.i32") {
+				I.replaceAllUsesWith(get_id<id::global_id>(get_dim_idx(I.getOperand(0), &I)));
+			} else if (func_name == "floor.builtin.local_id.i32") {
+				I.replaceAllUsesWith(get_id<id::local_id>(get_dim_idx(I.getOperand(0), &I)));
+			} else if (func_name == "floor.builtin.group_id.i32") {
+				I.replaceAllUsesWith(get_id<id::group_id>(get_dim_idx(I.getOperand(0), &I)));
+			} else if (func_name == "floor.builtin.group_size.i32") {
+				I.replaceAllUsesWith(get_id<id::group_size>(get_dim_idx(I.getOperand(0), &I)));
+			} else if (func_name == "floor.builtin.local_size.i32") {
+				I.replaceAllUsesWith(get_id<id::local_size>(get_dim_idx(I.getOperand(0), &I)));
+			} else if (func_name == "floor.builtin.global_size.i32") {
+				I.replaceAllUsesWith(get_id<id::global_size>(get_dim_idx(I.getOperand(0), &I)));
+			} else if (func_name == "floor.builtin.work_dim.i32") {
+				I.replaceAllUsesWith(builder->getInt32(state.kernel_dim));
 			} else if (func_name == "floor.builtin.sub_group_id.i32") {
-				if (sub_group_id == nullptr) {
-					llvm::errs() << "failed to get sub_group_id arg, not in a kernel function\n";
-					llvm::errs().flush();
-					return;
-				}
-				I.replaceAllUsesWith(builder->CreateLoad(sub_group_id->getType()->getPointerElementType(), sub_group_id, "sub_group_id"));
-				I.eraseFromParent();
-				return;
+				I.replaceAllUsesWith(get_id<id::sub_group_id>(0));
 			} else if (func_name == "floor.builtin.sub_group_local_id.i32") {
-				if (sub_group_local_id == nullptr) {
-					llvm::errs() << "failed to get sub_group_local_id arg, not in a kernel function\n";
-					llvm::errs().flush();
-					return;
-				}
-				I.replaceAllUsesWith(builder->CreateLoad(sub_group_local_id->getType()->getPointerElementType(), sub_group_local_id, "sub_group_local_id"));
-				I.eraseFromParent();
-				return;
+				I.replaceAllUsesWith(get_id<id::sub_group_local_id>(0));
 			} else if (func_name == "floor.builtin.sub_group_size.i32") {
-				if (sub_group_size == nullptr) {
-					llvm::errs() << "failed to get sub_group_size arg, not in a kernel function\n";
-					llvm::errs().flush();
-					return;
-				}
-				I.replaceAllUsesWith(builder->CreateLoad(sub_group_size->getType()->getPointerElementType(), sub_group_size, "sub_group_size"));
-				I.eraseFromParent();
-				return;
+				I.replaceAllUsesWith(get_id<id::sub_group_size>(0));
 			} else if (func_name == "floor.builtin.num_sub_groups.i32") {
-				if (num_sub_groups == nullptr) {
-					llvm::errs() << "failed to get num_sub_groups arg, not in a kernel function\n";
-					llvm::errs().flush();
-					return;
-				}
-				I.replaceAllUsesWith(builder->CreateLoad(num_sub_groups->getType()->getPointerElementType(), num_sub_groups, "num_sub_groups"));
-				I.eraseFromParent();
-				return;
+				I.replaceAllUsesWith(get_id<id::num_sub_groups>(0));
 			} else if (func_name == "floor.builtin.vertex_id.i32") {
-				if(vertex_id == nullptr) {
+				if(state.vertex_id == nullptr) {
 					DBG(printf("failed to get vertex_id arg, probably not in a vertex function?\n"); fflush(stdout);)
 					return;
 				}
-				
-				I.replaceAllUsesWith(builder->CreateLoad(vertex_id->getType()->getPointerElementType(), vertex_id, "vertex_index"));
-				I.eraseFromParent();
-				return;
+				I.replaceAllUsesWith(builder->CreateLoad(state.vertex_id->getType()->getPointerElementType(), state.vertex_id, "vertex_index"));
 			} else if (func_name == "floor.builtin.instance_id.i32") {
-				if(instance_id == nullptr) {
+				if(state.instance_id == nullptr) {
 					DBG(printf("failed to get instance_id arg, probably not in a vertex function?\n"); fflush(stdout);)
 					return;
 				}
-				
-				I.replaceAllUsesWith(builder->CreateLoad(instance_id->getType()->getPointerElementType(), instance_id, "instance_index"));
-				I.eraseFromParent();
-				return;
+				I.replaceAllUsesWith(builder->CreateLoad(state.instance_id->getType()->getPointerElementType(), state.instance_id, "instance_index"));
 			} else if (func_name == "floor.builtin.point_coord.float2") {
-				if(point_coord == nullptr) {
+				if(state.point_coord == nullptr) {
 					DBG(printf("failed to get point_coord arg, probably not in a fragment function?\n"); fflush(stdout);)
 					return;
 				}
-				
-				I.replaceAllUsesWith(builder->CreateLoad(point_coord->getType()->getPointerElementType(), point_coord, "point_coord"));
-				I.eraseFromParent();
-				return;
+				I.replaceAllUsesWith(builder->CreateLoad(state.point_coord->getType()->getPointerElementType(), state.point_coord, "point_coord"));
 			} else if (func_name == "floor.builtin.frag_coord.float4") {
-				if(frag_coord == nullptr) {
+				if(state.frag_coord == nullptr) {
 					DBG(printf("failed to get frag_coord arg, probably not in a fragment function?\n"); fflush(stdout);)
 					return;
 				}
-				
-				I.replaceAllUsesWith(builder->CreateLoad(frag_coord->getType()->getPointerElementType(), frag_coord, "frag_coord"));
-				I.eraseFromParent();
-				return;
+				I.replaceAllUsesWith(builder->CreateLoad(state.frag_coord->getType()->getPointerElementType(), state.frag_coord, "frag_coord"));
 			} else if (func_name == "floor.builtin.get_printf_buffer") {
-				if(soft_printf == nullptr) {
+				if(state.soft_printf == nullptr) {
 					DBG(printf("failed to get printf_buffer arg, probably not in a kernel/vertex/fragment function?\n"); fflush(stdout);)
 					return;
 				}
-				
 				// special case
-				I.replaceAllUsesWith(soft_printf);
-				I.eraseFromParent();
-				return;
+				I.replaceAllUsesWith(state.soft_printf);
 			} else if (func_name == "floor.builtin.view_index.i32") {
-				if(view_index == nullptr) {
+				if(state.view_index == nullptr) {
 					DBG(printf("failed to get view_index arg, probably not in a shader function?\n"); fflush(stdout);)
 					return;
 				}
-				
-				I.replaceAllUsesWith(builder->CreateLoad(view_index->getType()->getPointerElementType(), view_index, "view_index"));
-				I.eraseFromParent();
-				return;
+				I.replaceAllUsesWith(builder->CreateLoad(state.view_index->getType()->getPointerElementType(), state.view_index, "view_index"));
 			} else if (func_name == "floor.builtin.primitive_id.i32") {
-				if (primitive_id == nullptr) {
+				if (state.primitive_id == nullptr) {
 					llvm::errs() << "failed to get primitive_id arg, not in a fragment function or feature is not enabled\n";
 					llvm::errs().flush();
 					return;
 				}
-				
-				I.replaceAllUsesWith(builder->CreateLoad(primitive_id->getType()->getPointerElementType(), primitive_id, "primitive_id"));
-				I.eraseFromParent();
-				return;
+				I.replaceAllUsesWith(builder->CreateLoad(state.primitive_id->getType()->getPointerElementType(), state.primitive_id, "primitive_id"));
 			} else if (func_name == "floor.builtin.barycentric_coord.float3") {
-				if (barycentric_coord == nullptr) {
+				if (state.barycentric_coord == nullptr) {
 					llvm::errs() << "failed to get barycentric_coord arg, not in a fragment function or feature is not enabled\n";
 					llvm::errs().flush();
 					return;
 				}
-				
-				I.replaceAllUsesWith(builder->CreateLoad(barycentric_coord->getType()->getPointerElementType(), barycentric_coord, "barycentric_coord"));
-				I.eraseFromParent();
-				return;
+				I.replaceAllUsesWith(builder->CreateLoad(state.barycentric_coord->getType()->getPointerElementType(), state.barycentric_coord, "barycentric_coord"));
 			}
-			// unknown -> ignore for now
-			else return;
-			
-			if(id == nullptr) {
-				DBG(printf("failed to get id arg, probably not in a kernel function?\n"); fflush(stdout);)
-				return;
-			}
-			
-			// replace call with vector load / elem extraction from the appropriate vector
-			I.replaceAllUsesWith(builder->CreateExtractElement(builder->CreateLoad(id->getType()->getPointerElementType(), id), I.getOperand(0)));
-			I.eraseFromParent();
+			// NOTE: we can't erase "I" from the parent directly, because this will mess up the builder insertion point -> need to do it at the end
+			state.kill_list.emplace_back(&I);
 		}
 	};
 	

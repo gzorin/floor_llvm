@@ -674,6 +674,53 @@ static void instantiateDependentGraphicsFBOColorLocationAttr(
     S.AddGraphicsFBOColorLocationAttr(A->getLocation(), New, Result.getAs<Expr>(), *A);
 }
 
+static void instantiateDependentComputeKernelDimAttr(
+    Sema &S, const MultiLevelTemplateArgumentList &TemplateArgs,
+    const ComputeKernelDimAttr *A, const Decl *Tmpl, Decl *New) {
+  // TODO: check Tmpl with isPotentialConstantExprUnevaluated?
+  EnterExpressionEvaluationContext Unevaluated(S, Sema::ExpressionEvaluationContext::ConstantEvaluated);
+  ExprResult Result = S.SubstExpr(A->getKernelDim(), TemplateArgs);
+  if (!Result.isInvalid())
+    S.AddComputeKernelDimAttr(A->getLocation(), New, Result.getAs<Expr>(), *A);
+}
+
+static void instantiateDependentComputeKernelWorkGroupSizeAttr(
+    Sema &S, const MultiLevelTemplateArgumentList &TemplateArgs,
+    const ComputeKernelWorkGroupSizeAttr *A, const Decl *Tmpl, Decl *New) {
+  // TODO: check Tmpl with isPotentialConstantExprUnevaluated?
+  EnterExpressionEvaluationContext Unevaluated(S, Sema::ExpressionEvaluationContext::ConstantEvaluated);
+
+  Expr* size_x = nullptr;
+  Expr* size_y = nullptr;
+  Expr* size_z = nullptr;
+
+  if (A->getWorkGroupSizeX()) {
+    ExprResult ResultX = S.SubstExpr(A->getWorkGroupSizeX(), TemplateArgs);
+    if (ResultX.isInvalid()) {
+      return;
+    }
+    size_x = ResultX.getAs<Expr>();
+  }
+
+  if (A->getWorkGroupSizeY()) {
+    ExprResult ResultY = S.SubstExpr(A->getWorkGroupSizeY(), TemplateArgs);
+    if (ResultY.isInvalid()) {
+      return;
+    }
+    size_y = ResultY.getAs<Expr>();
+  }
+
+  if (A->getWorkGroupSizeZ()) {
+    ExprResult ResultZ = S.SubstExpr(A->getWorkGroupSizeZ(), TemplateArgs);
+    if (ResultZ.isInvalid()) {
+      return;
+    }
+    size_z = ResultZ.getAs<Expr>();
+  }
+
+  S.AddComputeKernelWorkGroupSizeAttr(A->getLocation(), New, size_x, size_y, size_z, *A);
+}
+
 void Sema::InstantiateAttrs(const MultiLevelTemplateArgumentList &TemplateArgs,
                             const Decl *Tmpl, Decl *New,
                             LateInstantiatedAttrVec *LateAttrs,
@@ -805,6 +852,16 @@ void Sema::InstantiateAttrs(const MultiLevelTemplateArgumentList &TemplateArgs,
 
     if (auto *ColorLoc = dyn_cast<GraphicsFBOColorLocationAttr>(TmplAttr)) {
       instantiateDependentGraphicsFBOColorLocationAttr(*this, TemplateArgs, ColorLoc, Tmpl, New);
+      continue;
+    }
+
+    if (auto *KernelDim = dyn_cast<ComputeKernelDimAttr>(TmplAttr)) {
+      instantiateDependentComputeKernelDimAttr(*this, TemplateArgs, KernelDim, Tmpl, New);
+      continue;
+    }
+
+    if (auto *KernelWorkGroupSize = dyn_cast<ComputeKernelWorkGroupSizeAttr>(TmplAttr)) {
+      instantiateDependentComputeKernelWorkGroupSizeAttr(*this, TemplateArgs, KernelWorkGroupSize, Tmpl, New);
       continue;
     }
 
