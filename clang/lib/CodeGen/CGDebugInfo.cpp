@@ -580,6 +580,9 @@ void CGDebugInfo::CreateCompileUnit() {
       case 300:
         Producer = "Apple metal version 31001.638 (metalfe-31001.638.1)";
         break;
+      case 310:
+        Producer = "Apple metal version 32023.22 (metalfe-32023.22.4)";
+        break;
     }
   }
 

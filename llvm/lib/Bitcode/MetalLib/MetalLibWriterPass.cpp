@@ -334,6 +334,8 @@ static const unordered_map<uint32_t,
         {240, {{{2, 4, 0}}, {{2, 4, 0}}}},
         // Metal 3.0 uses AIR 2.5
         {250, {{{2, 5, 0}}, {{3, 0, 0}}}},
+        // Metal 3.1 uses AIR 2.6
+        {260, {{{2, 6, 0}}, {{3, 0, 0}}}},
     };
 
 static std::string make_abs_file_name(const std::string &file_name_in) {
@@ -411,7 +413,7 @@ compress_source_archive(const void *archive_ptr, const uint32_t archive_size) {
            << '\n';
     return {nullptr, 0};
   }
-  return {move(dst), dst_len};
+  return {std::move(dst), dst_len};
 }
 
 //
@@ -433,6 +435,8 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       target_air_version = 240;
     } else if (ios_version.getMajor() >= 16) {
       target_air_version = 250;
+    } else if (ios_version.getMajor() >= 17) {
+      target_air_version = 260;
     }
 
     auto ios_minor = ios_version.getMinor().hasValue() ? ios_version.getMinor().getValue() : 0;
@@ -450,10 +454,12 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     } else if ((osx_version.getMajor() == 11 && osx_minor >= 0) ||
                (osx_version.getMajor() == 10 && osx_minor >= 16)) {
       target_air_version = 230;
-    } else if (osx_version.getMajor() == 12 && osx_minor >= 0) {
+    } else if (osx_version.getMajor() == 12) {
       target_air_version = 240;
-    } else if ((osx_version.getMajor() == 13 && osx_minor >= 0) || osx_version.getMajor() > 13) {
+    } else if (osx_version.getMajor() == 13) {
       target_air_version = 250;
+    } else if (osx_version.getMajor() >= 14) {
+      target_air_version = 260;
     }
 
     M.setSDKVersion(VersionTuple{osx_version.getMajor(), osx_minor});
@@ -819,6 +825,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
                   {230, "Apple LLVM version 31001.143 (metalfe-31001.143)"},
                   {240, "Apple metal version 31001.363 (metalfe-31001.363)"},
                   {250, "Apple metal version 31001.638 (metalfe-31001.638.1)"},
+                  {260, "Apple metal version 32023.22 (metalfe-32023.22.4)"},
               };
           ident_op->replaceOperandWith(
               0, llvm::MDString::get(cloned_mod->getContext(),

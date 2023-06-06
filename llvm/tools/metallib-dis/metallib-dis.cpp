@@ -644,7 +644,7 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 		
 		// only set this debug entry if it actually contains anything
 		if (!dbg_entry.source_file_name.empty() || !dbg_entry.dependent_file.empty()) {
-			entry.debug = move(dbg_entry);
+			entry.debug = std::move(dbg_entry);
 		}
 	}
 	
@@ -744,7 +744,7 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 		
 		// only set this extended md entry if it actually contains anything
 		if (!ext_md_entry.vertex_attributes.empty()) {
-			entry.extended_md = move(ext_md_entry);
+			entry.extended_md = std::move(ext_md_entry);
 		}
 	}
 	
@@ -814,7 +814,7 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 			
 			// only set this reflection list entry if it actually contains anything
 			if (refl_entry._not_implemented_yet) {
-				entry.reflection = move(refl_entry);
+				entry.reflection = std::move(refl_entry);
 			}
 		}
 	}
