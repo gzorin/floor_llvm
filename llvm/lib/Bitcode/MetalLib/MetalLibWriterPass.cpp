@@ -17,6 +17,7 @@
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "../Writer50/ValueEnumerator50.h"
 #include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Pass.h"
@@ -31,6 +32,7 @@
 #define BZ_NO_STDIO 1
 #include "bzip2/bzlib.h"
 #include "tar/microtar.h"
+#include <stack>
 #include <string>
 #include <unordered_set>
 #include <unordered_map>
@@ -183,6 +185,7 @@ struct metallib_program_info {
     } tess;
 
     std::vector<vertex_attribute> vertex_attributes;
+    std::vector<function_constant> function_constants;
 
     // output in same order as Apple:
     //  * NAME
@@ -712,6 +715,12 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       if (GV == func) {
         return true;
       }
+      if (GV->hasSection() && GV->getSection() == "air.static_init") {
+        return true;
+      }
+      if (GV->getName() == "llvm.global_ctors") {
+        return true;
+      }
       // only clone global vars if they are needed in a specific function
       if (const GlobalVariable *GVar = dyn_cast<GlobalVariable>(GV)) {
         return is_used_in_function(func, GVar);
@@ -743,12 +752,71 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       }
     }
 
+    auto cloned_func = cloned_mod->getFunction(func->getName());
+
     for (auto I = cloned_mod->global_begin(), E = cloned_mod->global_end();
          I != E;) {
-      GlobalVariable &GV = *I++;
-      if (GV.isDeclaration() && GV.use_empty()) {
-        GV.eraseFromParent();
+      GlobalVariable *GV = &*I++;
+      if (!GV->isDeclaration()) {
         continue;
+      }
+
+      bool used_in_function = false;
+
+      unordered_set<Value *> visited;
+
+      struct Frame {
+        Value *value = nullptr;
+        bool back = false;
+      };
+
+      stack<Frame> value_stack;
+
+      value_stack.push({ GV, false });
+
+      while (!value_stack.empty()) {
+        auto [ value, back ] = value_stack.top();
+        value_stack.pop();
+
+        if (back) {
+          if (!used_in_function) {
+            if (auto instr = dyn_cast<Instruction>(value)) {
+              instr->eraseFromParent();
+            }
+          }
+          continue;
+        }
+
+        visited.insert(value);
+
+        value_stack.push({ value, true });
+
+        if (auto instr = dyn_cast<Instruction>(value);
+            instr && instr->getFunction() == cloned_func) {
+            used_in_function = true;
+        }
+
+        if (auto store_instr = dyn_cast<StoreInst>(value)) {
+          auto next_value = store_instr->getOperand(1);
+          if (!visited.count(next_value)) {
+            value_stack.push({ next_value, false });
+          }
+        }
+        else {
+          for (auto next_value : value->users()) {
+            if (!visited.count(next_value)) {
+              value_stack.push({ next_value, false });
+            }
+          }
+        }
+      }
+
+      if (used_in_function) {
+        GV->setLinkage(GlobalValue::InternalLinkage);
+        GV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+        GV->setInitializer(UndefValue::get(GV->getValueType()));
+      } else if (GV->use_empty()) {
+        GV->eraseFromParent();
       }
     }
 
@@ -864,6 +932,52 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       }
     }
 
+    if (auto vertex_md = cloned_mod->getNamedMetadata("air.vertex");
+        vertex_md && vertex_md->getNumOperands() > 0) {
+      assert(vertex_md->getNumOperands() == 1u);
+      auto node = dyn_cast<MDNode>(vertex_md->getOperand(0));
+
+      if (auto inputs = dyn_cast_or_null<MDNode>(node->getOperand(2))) {
+        for (auto attr_iter = inputs->op_begin();
+             attr_iter != inputs->op_end(); ++attr_iter) {
+          auto attr_md = dyn_cast_or_null<MDNode>(*attr_iter);
+          if (!attr_md) {
+            continue;
+          }
+
+          if (auto second_md = dyn_cast_or_null<MDString>(attr_md->getOperand(1));
+              second_md && second_md->getString().equals("air.vertex_input")) {
+
+            auto attr_idx =
+              dyn_cast_or_null<ConstantAsMetadata>(attr_md->getOperand(3));
+            auto attr_type = dyn_cast_or_null<MDString>(attr_md->getOperand(6));
+            auto attr_name = dyn_cast_or_null<MDString>(attr_md->getOperand(8));
+            if (!attr_idx || !attr_type || !attr_name) {
+              continue;
+            }
+            auto attr_idx_int =
+                dyn_cast_or_null<ConstantInt>(attr_idx->getValue());
+            if (!attr_idx_int) {
+              continue;
+            }
+            vertex_attribute vattr{
+                .name = attr_name->getString().str(),
+                .index = (uint32_t)attr_idx_int->getZExtValue(),
+                .type = data_type_from_string(attr_type->getString().str()),
+                .use = VERTEX_USE::STANDARD,
+                .active = true, // always flag as active
+            };
+            if (vattr.type == DATA_TYPE::INVALID) {
+              errs() << "invalid data type in control point vertex attribute: "
+                     << vattr.name << ", index " << vattr.index << "\n";
+              continue;
+            }
+            entry.vertex_attributes.emplace_back(std::move(vattr));
+          }
+        }
+      }
+    }
+
     // extract tessellation info
     if (auto vertex_md = cloned_mod->getNamedMetadata("air.vertex");
         vertex_md && vertex_md->getNumOperands() > 0) {
@@ -953,6 +1067,55 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       }
     }
 
+    // function constants
+    if (auto fc_md = cloned_mod->getNamedMetadata("air.function_constants");
+        fc_md && fc_md->getNumOperands() > 0) {
+      vector<MDNode *> kept_fcs;
+
+      for (auto op_iter = fc_md->op_begin();
+           op_iter != fc_md->op_end(); ++op_iter) {
+        auto node = dyn_cast_or_null<MDNode>(*op_iter);
+        if (!node ||
+            node->getOperand(0).get() == nullptr) {
+          continue;
+        }
+
+        kept_fcs.push_back(node);
+
+        auto cnst_idx =
+            dyn_cast_or_null<ConstantAsMetadata>(node->getOperand(3));
+        auto cnst_type =
+            dyn_cast_or_null<MDString>(node->getOperand(1));
+        auto cnst_name =
+            dyn_cast_or_null<MDString>(node->getOperand(2));
+        if (!cnst_idx || !cnst_type || !cnst_name) {
+          continue;
+        }
+        auto cnst_idx_int =
+            dyn_cast_or_null<ConstantInt>(cnst_idx->getValue());
+        if (!cnst_idx_int) {
+          continue;
+        }
+        function_constant cnst{
+            .name = cnst_name->getString().str(),
+            .index = (uint32_t)cnst_idx_int->getZExtValue(),
+            .type = data_type_from_string(cnst_type->getString().str()),
+            .active = true
+        };
+        entry.function_constants.emplace_back(std::move(cnst));
+      }
+
+      fc_md->dropAllReferences();
+      if (kept_fcs.empty()) {
+        fc_md->eraseFromParent();
+      }
+      else {
+        for (auto node : kept_fcs) {
+          fc_md->addOperand(node);
+        }
+      }
+    }
+
     // write module / bitcode
     raw_string_ostream bitcode_stream{entry.bitcode_data};
     WriteBitcode50ToFile(cloned_mod.get(), bitcode_stream);
@@ -970,42 +1133,84 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
 
     raw_string_ostream ext_md_stream{entry.extended_md_data};
     uint32_t ext_md_length = tag_length + sizeof(uint32_t);
-    if (!entry.vertex_attributes.empty()) {
+
+    if (!entry.vertex_attributes.empty() || !entry.function_constants.empty()) {
+      //
       const auto attr_count = (uint16_t)entry.vertex_attributes.size();
-      ext_md_length += 2u * (tag_length + sizeof(uint16_t)); // VATT and VATY
-      uint16_t vatt_len = sizeof(uint16_t) /* attr count */ +
-                          2u * attr_count /* per-attr info */;
-      uint16_t vaty_len =
-          sizeof(uint16_t) /* attr count */ + attr_count /* per-attr type */;
-      for (const auto &vattr : entry.vertex_attributes) {
-        vatt_len += vattr.name.size() + 1u;
+      uint16_t vatt_len = 0, vaty_len = 0;
+
+      if (attr_count) {
+        ext_md_length += 2u * (tag_length + sizeof(uint16_t)); // VATT and VATY
+        vatt_len = sizeof(uint16_t) /* attr count */ +
+                   2u * attr_count /* per-attr info */;
+        vaty_len =
+            sizeof(uint16_t) /* attr count */ + attr_count /* per-attr type */;
+        for (const auto &vattr : entry.vertex_attributes) {
+          vatt_len += vattr.name.size() + 1u;
+        }
+        ext_md_length += vatt_len + vaty_len;
       }
-      ext_md_length += vatt_len + vaty_len;
+
+      //
+      const auto cnst_count = (uint16_t)entry.function_constants.size();
+      uint16_t cnst_len = 0;
+
+      if (cnst_count) {
+        ext_md_length += tag_length + sizeof(uint16_t); // CNST
+        cnst_len = sizeof(uint16_t) + /* cnst count */
+                   ((sizeof(uint8_t) + sizeof(uint16_t) + sizeof(uint8_t)) * cnst_count) /* per-cnst info */;
+        for (const auto& cnst : entry.function_constants) {
+          cnst_len += cnst.name.size() + 1u;
+        }
+        ext_md_length += cnst_len;
+      }
+
       ext_md_stream.write((const char *)&ext_md_length, sizeof(uint32_t));
 
-      static const auto vatt_tag = TAG_TYPE::VATT;
-      static const auto vaty_tag = TAG_TYPE::VATY;
+      if (attr_count) {
+        static const auto vatt_tag = TAG_TYPE::VATT;
+        static const auto vaty_tag = TAG_TYPE::VATY;
 
-      // VATT
-      ext_md_stream.write((const char *)&vatt_tag, tag_length);
-      ext_md_stream.write((const char *)&vatt_len, sizeof(vatt_len));
-      ext_md_stream.write((const char *)&attr_count, sizeof(attr_count));
-      for (const auto &vattr : entry.vertex_attributes) {
-        ext_md_stream.write(vattr.name.c_str(), vattr.name.size());
-        ext_md_stream.write('\0');
+        // VATT
+        ext_md_stream.write((const char *)&vatt_tag, tag_length);
+        ext_md_stream.write((const char *)&vatt_len, sizeof(vatt_len));
+        ext_md_stream.write((const char *)&attr_count, sizeof(attr_count));
+        for (const auto &vattr : entry.vertex_attributes) {
+          ext_md_stream.write(vattr.name.c_str(), vattr.name.size());
+          ext_md_stream.write('\0');
 
-        uint16_t info = vattr.index & 0x1FFFu;
-        info |= (uint16_t(vattr.use) & 0x3u) << 13u;
-        info |= (vattr.active ? 0x8000u : 0u);
-        ext_md_stream.write((const char *)&info, sizeof(info));
+          uint16_t info = vattr.index & 0x1FFFu;
+          info |= (uint16_t(vattr.use) & 0x3u) << 13u;
+          info |= (vattr.active ? 0x8000u : 0u);
+          ext_md_stream.write((const char *)&info, sizeof(info));
+        }
+
+        // VATY
+        ext_md_stream.write((const char *)&vaty_tag, tag_length);
+        ext_md_stream.write((const char *)&vaty_len, sizeof(vaty_len));
+        ext_md_stream.write((const char *)&attr_count, sizeof(attr_count));
+        for (const auto &vattr : entry.vertex_attributes) {
+          ext_md_stream.write((const char *)&vattr.type, sizeof(DATA_TYPE));
+        }
       }
 
-      // VATY
-      ext_md_stream.write((const char *)&vaty_tag, tag_length);
-      ext_md_stream.write((const char *)&vaty_len, sizeof(vaty_len));
-      ext_md_stream.write((const char *)&attr_count, sizeof(attr_count));
-      for (const auto &vattr : entry.vertex_attributes) {
-        ext_md_stream.write((const char *)&vattr.type, sizeof(DATA_TYPE));
+      if (cnst_count) {
+        static const auto cnst_tag = TAG_TYPE::CNST;
+
+        // CNST
+        ext_md_stream.write((const char *)&cnst_tag, tag_length);
+        ext_md_stream.write((const char *)&cnst_len, sizeof(cnst_len));
+        ext_md_stream.write((const char *)&cnst_count, sizeof(cnst_count));
+        for (const auto& cnst : entry.function_constants) {
+          ext_md_stream.write(cnst.name.c_str(), cnst.name.size());
+          ext_md_stream.write('\0');
+
+          ext_md_stream.write((const char *)&cnst.type, sizeof(DATA_TYPE));
+
+          uint16_t index = (uint16_t)cnst.index;
+          ext_md_stream.write((const char *)&index, sizeof(index));
+          ext_md_stream.write((const char *)&cnst.active, sizeof(uint8_t));
+        }
       }
     } else {
       ext_md_stream.write((const char *)&ext_md_length, sizeof(uint32_t));
