@@ -76,10 +76,10 @@ enum TAG_TYPE : uint32_t {
 
 enum class DATA_TYPE : uint8_t {
 	INVALID = 0,
-	
+
 	STRUCT = 1,
 	ARRAY = 2,
-	
+
 	FLOAT1 = 3,
 	FLOAT2 = 4,
 	FLOAT3 = 5,
@@ -93,7 +93,7 @@ enum class DATA_TYPE : uint8_t {
 	FLOAT4X2 = 13,
 	FLOAT4X3 = 14,
 	FLOAT4X4 = 15,
-	
+
 	HALF1 = 16,
 	HALF2 = 17,
 	HALF3 = 18,
@@ -107,50 +107,50 @@ enum class DATA_TYPE : uint8_t {
 	HALF4X2 = 26,
 	HALF4X3 = 27,
 	HALF4X4 = 28,
-	
+
 	INT1 = 29,
 	INT2 = 30,
 	INT3 = 31,
 	INT4 = 32,
-	
+
 	UINT1 = 33,
 	UINT2 = 34,
 	UINT3 = 35,
 	UINT4 = 36,
-	
+
 	SHORT1 = 37,
 	SHORT2 = 38,
 	SHORT3 = 39,
 	SHORT4 = 40,
-	
+
 	USHORT1 = 41,
 	USHORT2 = 42,
 	USHORT3 = 43,
 	USHORT4 = 44,
-	
+
 	CHAR1 = 45,
 	CHAR2 = 46,
 	CHAR3 = 47,
 	CHAR4 = 48,
-	
+
 	UCHAR1 = 49,
 	UCHAR2 = 50,
 	UCHAR3 = 51,
 	UCHAR4 = 52,
-	
+
 	BOOL1 = 53,
 	BOOL2 = 54,
 	BOOL3 = 55,
 	BOOL4 = 56,
-	
+
 	_UNUSED_0 = 57,
-	
+
 	TEXTURE = 58,
 	SAMPLER = 59,
 	POINTER = 60,
-	
+
 	_UNUSED_1 = 61,
-	
+
 	R8UNORM = 62,
 	R8SNORM = 63,
 	R16UNORM = 64,
@@ -167,26 +167,26 @@ enum class DATA_TYPE : uint8_t {
 	RGB10A2UNORM = 75,
 	RG11B10FLOAT = 76,
 	RGB9E5FLOAT = 77,
-	
+
 	RENDER_PIPELINE = 78,
 	COMPUTE_PIPELINE = 79,
 	INDIRECT_CMD_BUFFER = 80,
-	
+
 	LONG1 = 81,
 	LONG2 = 82,
 	LONG3 = 83,
 	LONG4 = 84,
-	
+
 	ULONG1 = 85,
 	ULONG2 = 86,
 	ULONG3 = 87,
 	ULONG4 = 88,
-	
+
 	DOUBLE1 = 89,
 	DOUBLE2 = 90,
 	DOUBLE3 = 91,
 	DOUBLE4 = 92,
-	
+
 	FLOAT8 = 93,
 	FLOAT16 = 94,
 	HALF8 = 95,
@@ -209,12 +209,12 @@ enum class DATA_TYPE : uint8_t {
 	ULONG16 = 112,
 	DOUBLE8 = 113,
 	DOUBLE16 = 114,
-	
+
 	VISIBLE_FUNCTION_TABLE = 115,
 	INTERSECTION_FUNCTION_TABLE = 116,
 	PRIMITIVE_ACCELERATION_STRUCTURE = 117,
 	INSTANCE_ACCELERATION_STRUCTURE = 118,
-	
+
 	BOOL8 = 119,
 	BOOL16 = 120,
 };
@@ -550,6 +550,12 @@ struct vertex_attribute {
 	uint32_t index { 0u };
 	DATA_TYPE type { DATA_TYPE::INVALID };
 	VERTEX_USE use { VERTEX_USE::STANDARD };
+	bool active { false };
+};
+struct function_constant {
+	std::string name;
+	uint32_t index { 0u };
+	DATA_TYPE type { DATA_TYPE::INVALID };
 	bool active { false };
 };
 
