@@ -236,6 +236,10 @@ struct metallib_program_info {
 			} info;
 			uint8_t data;
 		} tess;
+		union layer_data_t {
+			// TODO: actual info
+			uint8_t data;
+		} layer;
 		uint64_t source_offset { 0 };
 		std::optional<debug_entry> debug;
 		std::optional<extended_md_entry> extended_md;
@@ -416,8 +420,12 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 		case 4:
 			os << "watchOS";
 			break;
+		case 11:
+		case 12:
+			os << "visionOS";
+			break;
 		default:
-			os << "unknown";
+			os << "unknown (" << (uint32_t)header.version.platform << ")";
 			break;
 	}
 	os << '\n';
@@ -531,6 +539,14 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 													   inconvertibleErrorCode());
 					}
 					entry.reflection_offset = *(const uint64_t*)program_ptr;
+					break;
+				}
+				case TAG_TYPE::LAYR: {
+					if (tag_length != 1) {
+						return make_error<StringError>("invalid LAYR size: " + to_string(tag_length),
+													   inconvertibleErrorCode());
+					}
+					entry.layer.data = *(const uint8_t*)program_ptr;
 					break;
 				}
 				case TAG_TYPE::END: {
@@ -867,6 +883,9 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 				os << "<unknown: " << (uint32_t)prog.tess.info.primitive_type << ">";
 			}
 			os << ", " << (uint32_t)prog.tess.info.control_point_count << " control points\n";
+		}
+		if (prog.layer.data != 0) {
+			os << "\tlayer info: " << uint32_t(prog.layer.data) << "\n";
 		}
 		os << "\tsource offset: " << uint32_t(prog.source_offset) << '\n';
 		

@@ -1091,6 +1091,11 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   } else if (TT.isWatchOS()) {
     header.platform = 4u;
     platform_version = TT.getWatchOSVersion();
+#if 0 // some day
+  } else if (TT.isXROS()) {
+    header.platform = 12u;
+    platform_version = TT.getXROSVersion();
+#endif
   } else {
     header.platform = 0u;
   }

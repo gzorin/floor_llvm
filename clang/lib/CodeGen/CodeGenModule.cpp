@@ -8000,6 +8000,11 @@ llvm::Type* CodeGenModule::GraphicsExpandIOType(const QualType& type,
 		}
 		llvm_fields.push_back(llvm_field_type);
 	}
+	if (llvm_fields.empty()) {
+		auto err_diagID = getDiags().getCustomDiagID(DiagnosticsEngine::Fatal, "%0");
+		getDiags().Report(cxx_rdecl->getSourceRange().getBegin(), err_diagID) << "graphics I/O types/structs must never be empty";
+		return nullptr;
+	}
 	
 	llvm::StructType* ret = nullptr;
 	if (!create_unnamed) {
