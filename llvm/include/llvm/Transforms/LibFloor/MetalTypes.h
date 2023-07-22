@@ -553,6 +553,13 @@ struct vertex_attribute {
 	bool active { false };
 };
 
+struct function_constant {
+	std::string name;
+	uint32_t index { 0u };
+	DATA_TYPE type { DATA_TYPE::INVALID };
+	bool active { false };
+};
+
 } // namespace metal
 
 #endif

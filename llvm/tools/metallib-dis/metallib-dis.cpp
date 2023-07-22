@@ -211,6 +211,7 @@ struct metallib_program_info {
 	
 	struct extended_md_entry {
 		std::vector<vertex_attribute> vertex_attributes;
+		std::vector<function_constant> function_constants;
 	};
 	
 	struct reflection_entry {
@@ -736,7 +737,26 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 					break;
 				}
 				case TAG_TYPE::CNST: {
-					// TODO: handle this
+					// function constant data
+					auto tag_extended_md_ptr = extended_md_ptr;
+					const auto cnst_end_ptr = tag_extended_md_ptr + tag_length;
+					const auto cnst_count = (uint32_t)*(const uint16_t*)tag_extended_md_ptr; tag_extended_md_ptr += 2;
+					ext_md_entry.function_constants.resize(cnst_count);
+					for (auto& cnst : ext_md_entry.function_constants) {
+						// parse name
+						const auto name_end_ptr = find(tag_extended_md_ptr, cnst_end_ptr, '\0');
+						if (name_end_ptr == cnst_end_ptr) {
+							return make_error<StringError>("failed to find name end terminator for function constant",
+														   inconvertibleErrorCode());
+						}
+						cnst.name = std::string((const char*)tag_extended_md_ptr, (const char*)name_end_ptr);
+						tag_extended_md_ptr = name_end_ptr + 1;
+						
+						// parse other
+						cnst.type = *(const DATA_TYPE*)tag_extended_md_ptr; ++tag_extended_md_ptr;
+						cnst.index = *(const uint16_t*)tag_extended_md_ptr; tag_extended_md_ptr += 2;
+						cnst.active = ((*tag_extended_md_ptr & 0x1u) != 0u); ++tag_extended_md_ptr;
+					}
 					break;
 				}
 				case TAG_TYPE::RETR: {
@@ -759,7 +779,7 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 		}
 		
 		// only set this extended md entry if it actually contains anything
-		if (!ext_md_entry.vertex_attributes.empty()) {
+		if (!ext_md_entry.vertex_attributes.empty() || !ext_md_entry.function_constants.empty()) {
 			entry.extended_md = std::move(ext_md_entry);
 		}
 	}
@@ -920,6 +940,14 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 					}
 					os << "[" << vattr.index << "]: " << data_type_to_string(vattr.type) << " " << vattr.name;
 					os << (vattr.active ? "" : " (inactive)") << '\n';
+				}
+			}
+			if (!prog.extended_md->function_constants.empty()) {
+				os << "\tfunction constants:\n";
+				for (const auto& cnst : prog.extended_md->function_constants) {
+					os << "\t\t";
+					os << "[" << cnst.index << "]: " << data_type_to_string(cnst.type) << " " << cnst.name;
+					os << (cnst.active ? "" : " (inactive)") << '\n';
 				}
 			}
 		}
