@@ -232,8 +232,13 @@ namespace {
 							new_ptr_type = PointerType::get(phi->getType()->getPointerElementType(), address_space);
 						}
 						DBG(errs() << ">> PHI: " << *phi << ", type: " << *phi->getType();)
-						phi->mutateType(new_ptr_type);
-						DBG(errs() << " -> " << *phi->getType() << "\n";)
+						if (phi->getType() != new_ptr_type) {
+							phi->mutateType(new_ptr_type);
+							DBG(errs() << " -> " << *phi->getType() << "\n";)
+						} else {
+							DBG(errs() << " -> no update needed: " << *phi->getType() << "\n";)
+							need_users_update = false;
+						}
 					} else {
 						need_users_update = false;
 					}
@@ -565,18 +570,25 @@ namespace {
 					if (elem_type->isArrayTy()) {
 						is_clonable = false;
 					} else if (elem_type->isStructTy()) {
-						const auto st_type = cast<llvm::StructType>(elem_type);
-						for (const auto& field_type : st_type->elements()) {
-							if (field_type->isArrayTy() || (field_type->isPointerTy() && field_type->getPointerElementType()->isArrayTy())) {
-								is_clonable = false;
-								break;
-							}
-						}
-						if (is_clonable) {
+						// if this is a struct type, we need to fully traverse it to figure out if it may be cloneable or not
+						const std::function<void(const llvm::StructType*)> traverse_st_type = [&traverse_st_type, &is_clonable](const llvm::StructType* st_type) {
 							if (st_type->getName().startswith("class.floor_image::image")) {
 								is_clonable = false;
+								return;
 							}
-						}
+							for (const auto& field_type : st_type->elements()) {
+								if (field_type->isArrayTy() || (field_type->isPointerTy() && field_type->getPointerElementType()->isArrayTy())) {
+									is_clonable = false;
+									return;
+								} else if (field_type->isStructTy()) {
+									traverse_st_type(cast<llvm::StructType>(field_type));
+									if (is_clonable) {
+										return;
+									}
+								}
+							}
+						};
+						traverse_st_type(cast<llvm::StructType>(elem_type));
 					}
 					
 					DBG(errs() << "\tread-only: " << is_constant_as << ", " << is_readonly << ", " << is_load << "; " << is_clonable << "\n";)
