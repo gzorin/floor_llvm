@@ -244,6 +244,20 @@ namespace {
 					}
 					break;
 				}
+				case Instruction::Select: {
+					auto sel = cast<SelectInst>(instr);
+					if (sel->getType()->isPointerTy()) {
+						if (address_space != instr->getType()->getPointerAddressSpace()) {
+							auto new_ptr_type = PointerType::get(sel->getType()->getPointerElementType(), address_space);
+							DBG(errs() << ">> select: " << *sel << ", type: " << *sel->getType();)
+							sel->mutateType(new_ptr_type);
+							DBG(errs() << " -> " << *sel->getType() << "\n";)
+						} else {
+							need_users_update = false;
+						}
+					}
+					break;
+				}
 
 				case Instruction::AddrSpaceCast:
 				case Instruction::Invoke:
@@ -274,6 +288,7 @@ namespace {
 						case Instruction::Load:
 						case Instruction::Store:
 						case Instruction::PHI:
+						case Instruction::Select:
 							fix_users<fix_call_instrs>(asfix_pass, ctx, user_instr, instr, address_space, fix_inner_ptr, returns);
 							break;
 						case Instruction::AddrSpaceCast:
