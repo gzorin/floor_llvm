@@ -109,6 +109,7 @@ static const CudaArchToStringMap arch_names[] = {
     SM(70), SM(72), SM(73),          // Volta
     SM(75),                          // Turing
     SM(80), SM(82), SM(86), SM(87), SM(88), // Ampere
+    SM(89),                          // Ada
     SM(90),                          // Hopper
     GFX(600),  // gfx600
     GFX(601),  // gfx601
