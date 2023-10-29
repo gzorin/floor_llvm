@@ -588,18 +588,38 @@ namespace {
 							is_clonable = false;
 						} else if (elem_type->isStructTy()) {
 							// if this is a struct type, we need to fully traverse it to figure out if it may be cloneable or not
-							const std::function<void(const llvm::StructType*)> traverse_st_type = [&traverse_st_type, &is_clonable](const llvm::StructType* st_type) {
+							const std::function<void(const llvm::StructType*)> traverse_st_type = [&traverse_st_type, &is_clonable, &is_constant_as](const llvm::StructType* st_type) {
 								if (st_type->getName().startswith("class.floor_image::image")) {
 									is_clonable = false;
 									return;
 								}
 								for (const auto& field_type : st_type->elements()) {
-									if (field_type->isArrayTy() || (field_type->isPointerTy() && field_type->getPointerElementType()->isArrayTy())) {
-										is_clonable = false;
-										return;
+									const auto array_type = (field_type->isArrayTy() ? cast<llvm::ArrayType>(field_type) :
+															 (field_type->isPointerTy() && field_type->getPointerElementType()->isArrayTy() ?
+															  cast<llvm::ArrayType>(field_type->getPointerElementType()) : nullptr));
+									if (array_type) {
+										const auto elem_type = array_type->getElementType();
+										if (!elem_type->isSized()) {
+											// -> can only clone sized types
+											is_clonable = false;
+										} else {
+											if (elem_type->isStructTy()) {
+												// -> recurse
+												traverse_st_type(cast<llvm::StructType>(elem_type));
+											}
+											// -> don't clone arrays that are too large and don't originate from the constant address space
+											if (!is_constant_as && !is_clonable) {
+												if (array_type->getNumElements() > 128) {
+													is_clonable = false;
+												}
+											}
+										}
+										if (!is_clonable) {
+											return;
+										}
 									} else if (field_type->isStructTy()) {
 										traverse_st_type(cast<llvm::StructType>(field_type));
-										if (is_clonable) {
+										if (!is_clonable) {
 											return;
 										}
 									}
