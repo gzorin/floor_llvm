@@ -579,31 +579,34 @@ namespace {
 					const bool is_constant_as = (as_ptr->getPointerAddressSpace() == 2);
 					const bool is_readonly = CI.onlyReadsMemory(i);
 					const bool is_load = isa<LoadInst>(arg);
-					// don't allow cloning/alloca-read-only-fix for certain constructs (e.g. too expensive or not allowed, especially arrays)
-					bool is_clonable = true;
+					const auto is_intrinsic = CI.getCalledFunction()->isIntrinsic();
+					// don't allow cloning/alloca-read-only-fix for certain constructs (e.g. intrinsics or too expensive or not allowed, especially arrays)
+					bool is_clonable = !is_intrinsic;
 					const auto elem_type = as_ptr->getPointerElementType();
-					if (elem_type->isArrayTy()) {
-						is_clonable = false;
-					} else if (elem_type->isStructTy()) {
-						// if this is a struct type, we need to fully traverse it to figure out if it may be cloneable or not
-						const std::function<void(const llvm::StructType*)> traverse_st_type = [&traverse_st_type, &is_clonable](const llvm::StructType* st_type) {
-							if (st_type->getName().startswith("class.floor_image::image")) {
-								is_clonable = false;
-								return;
-							}
-							for (const auto& field_type : st_type->elements()) {
-								if (field_type->isArrayTy() || (field_type->isPointerTy() && field_type->getPointerElementType()->isArrayTy())) {
+					if (is_clonable) {
+						if (elem_type->isArrayTy()) {
+							is_clonable = false;
+						} else if (elem_type->isStructTy()) {
+							// if this is a struct type, we need to fully traverse it to figure out if it may be cloneable or not
+							const std::function<void(const llvm::StructType*)> traverse_st_type = [&traverse_st_type, &is_clonable](const llvm::StructType* st_type) {
+								if (st_type->getName().startswith("class.floor_image::image")) {
 									is_clonable = false;
 									return;
-								} else if (field_type->isStructTy()) {
-									traverse_st_type(cast<llvm::StructType>(field_type));
-									if (is_clonable) {
+								}
+								for (const auto& field_type : st_type->elements()) {
+									if (field_type->isArrayTy() || (field_type->isPointerTy() && field_type->getPointerElementType()->isArrayTy())) {
+										is_clonable = false;
 										return;
+									} else if (field_type->isStructTy()) {
+										traverse_st_type(cast<llvm::StructType>(field_type));
+										if (is_clonable) {
+											return;
+										}
 									}
 								}
-							}
-						};
-						traverse_st_type(cast<llvm::StructType>(elem_type));
+							};
+							traverse_st_type(cast<llvm::StructType>(elem_type));
+						}
 					}
 					
 					DBG(errs() << "\tread-only: " << is_constant_as << ", " << is_readonly << ", " << is_load << "; " << is_clonable << "\n";)

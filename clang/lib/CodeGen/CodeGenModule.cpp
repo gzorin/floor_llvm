@@ -3128,15 +3128,16 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		};
 		
 		// "forward decl"
-		std::function<SmallVector<llvm::Metadata*, 16>(const clang::QualType&, const NamedDecl&, const bool, const bool, uint32_t&, uint32_t&, const uint32_t)> add_buffer_arg;
+		std::function<SmallVector<llvm::Metadata*, 16>(const clang::QualType&, const NamedDecl&, const bool, const bool, const bool, uint32_t&, uint32_t&, const uint32_t)> add_buffer_arg;
 		
 		// handle "air.struct_type_info" metadata
-		const std::function<SmallVector<llvm::Metadata*, 16>(const CXXRecordDecl&, const Decl&, const bool, const bool, uint32_t&, uint32_t&)> add_struct_type_info =
+		const std::function<SmallVector<llvm::Metadata*, 16>(const CXXRecordDecl&, const Decl&, const bool, const bool, const bool, uint32_t&, uint32_t&)> add_struct_type_info =
 		[this, &add_struct_type_info, &add_buffer_arg, &make_type_name, &add_indirect_constant, &Builder,
 		 &add_image_arg](const CXXRecordDecl& struct_rdecl,
 						 const Decl& parent_decl,
 						 const bool is_indirect, // specifies if we're within an indirect buffer
 						 const bool indirect_buffer,
+						 const bool indirect_struct_type_info,
 						 uint32_t& arg_idx_child,
 						 // NOTE: buffer and texture location indices use the same space
 						 uint32_t& buffer_or_tex_idx_child) -> SmallVector<llvm::Metadata*, 16> {
@@ -3170,7 +3171,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				
 				bool is_inline_struct = false;
 				const auto buffer_idx_offset = buffer_or_tex_idx_child;
-				if (indirect_buffer || is_indirect) {
+				if (indirect_buffer || is_indirect || indirect_struct_type_info) {
 					if (!field_type->isPointerType() &&
 						!field_type->isReferenceType() &&
 						!field_type->isImageType() &&
@@ -3185,7 +3186,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 							struct_info.push_back(llvm::MDString::get(VMContext, "air.struct_type_info"));
 							// #-1: metadata of struct type
 							uint32_t struct_arg_idx_child = 0, struct_buf_idx_child = 0;
-							auto struct_type_info = add_struct_type_info(*inline_struct_rdecl, struct_rdecl, is_indirect, indirect_buffer, struct_arg_idx_child, struct_buf_idx_child);
+							auto struct_type_info = add_struct_type_info(*inline_struct_rdecl, struct_rdecl, is_indirect, indirect_buffer, indirect_struct_type_info, struct_arg_idx_child, struct_buf_idx_child);
 							assert(!struct_type_info.empty());
 							struct_info.push_back(llvm::MDNode::get(VMContext, struct_type_info));
 							
@@ -3218,7 +3219,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 					} else if (field_type->isPointerType() || field_type->isReferenceType()) {
 						// buffer field
 						auto field_arg_info = add_buffer_arg(field_type, **field, false, false /* this is a pointer and not inline */,
-															 arg_idx_child, buffer_or_tex_idx_child, array_size);
+															 true /* still recursively write struct type info */, arg_idx_child, buffer_or_tex_idx_child, array_size);
 						if (field_arg_info.empty()) {
 							return {};
 						}
@@ -3291,6 +3292,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 																				  const NamedDecl& decl,
 																				  const bool is_top_level,
 																				  const bool is_indirect, // specifies if we're within an indirect buffer
+																				  const bool indirect_struct_type_info,
 																				  uint32_t& arg_idx_at_level,
 																				  uint32_t& buffer_idx_at_level,
 																				  const uint32_t buffer_array_size) -> SmallVector<llvm::Metadata*, 16> {
@@ -3340,7 +3342,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			// #6/#7: struct info
 			if (const auto pointee_rdecl = clang_pointee_type->getAsCXXRecordDecl()) {
 				uint32_t arg_idx_child = 0, buffer_or_tex_idx_child = 0; // for indirect/arg buffers
-				auto struct_type_info = add_struct_type_info(*pointee_rdecl, decl, is_indirect, indirect_buffer,
+				auto struct_type_info = add_struct_type_info(*pointee_rdecl, decl, is_indirect, indirect_buffer, indirect_struct_type_info,
 															 arg_idx_child, buffer_or_tex_idx_child);
 				if (!struct_type_info.empty()) {
 					arg_info.push_back(llvm::MDString::get(VMContext, "air.struct_type_info"));
@@ -3369,7 +3371,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		};
 		
 		if (clang_type->isPointerType() || clang_type->isReferenceType()) { // pointer / buffer
-			auto arg_info = add_buffer_arg(clang_type, *parm, true, false, arg_idx, buffer_idx, 0);
+			auto arg_info = add_buffer_arg(clang_type, *parm, true, false, false, arg_idx, buffer_idx, 0);
 			if (arg_info.empty()) {
 				return;
 			}
