@@ -14304,7 +14304,11 @@ static void AggregateTypeCompleter(Sema& S, const CXXRecordDecl* decl) {
 	
 	// iterate over and complete all fields
 	for(const auto& field : decl->fields()) {
-		S.RequireCompleteType(field->getBeginLoc(), field->getType(),
+		auto field_type = field->getType();
+		if (field_type->isPointerType() || field_type->isReferenceType()) {
+			field_type = field_type->getPointeeType();
+		}
+		S.RequireCompleteType(field->getBeginLoc(), field_type,
 							  diag::err_typecheck_decl_incomplete_type);
 	}
 }
@@ -14648,7 +14652,7 @@ Decl *Sema::ActOnStartOfFunctionDef(Scope *FnBodyScope, Decl *D,
     for (const auto& Param : FD->parameters()) {
       const auto param_type = Param->getType();
       const CXXRecordDecl* cxx_rdecl = nullptr;
-      if(param_type->isPointerType()) {
+      if (param_type->isPointerType() || param_type->isReferenceType()) {
         const auto pointee_type = param_type->getPointeeType();
         RequireCompleteType(Param->getLocation(), pointee_type,
                             diag::err_typecheck_decl_incomplete_type);
