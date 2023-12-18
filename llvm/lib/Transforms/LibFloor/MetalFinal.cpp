@@ -681,15 +681,25 @@ namespace {
 					break;
 					
 				// single arguments cases
-				case Intrinsic::abs: {
+				case Intrinsic::abs:
+				case Intrinsic::fabs: {
 					auto op_val = I.getOperand(0);
 					
 					// handled signedness and AIR function name
 					bool is_signed = true;
 					std::string func_name = "air.";
+					const bool is_fast = (op_val->getType()->isFloatTy() ||
+										  (op_val->getType()->isVectorTy() &&
+										   cast<FixedVectorType>(op_val->getType())->getElementType()->isFloatTy()));
 					switch (I.getIntrinsicID()) {
 						case Intrinsic::abs:
 							func_name += "abs";
+							break;
+						case Intrinsic::fabs:
+							if (is_fast) {
+								func_name += "fast_";
+							}
+							func_name += "fabs";
 							break;
 						default:
 							ctx->emitError(&I, "unexpected intrinsic:\n" + print_instr(I));
