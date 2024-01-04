@@ -686,11 +686,8 @@ namespace {
 				}
 				I.replaceAllUsesWith(builder->CreateLoad(state.point_coord->getType()->getPointerElementType(), state.point_coord, "point_coord"));
 			} else if (func_name == "floor.builtin.frag_coord.float4") {
-				if(state.frag_coord == nullptr) {
-					DBG(printf("failed to get frag_coord arg, probably not in a fragment function?\n"); fflush(stdout);)
-					return;
-				}
-				I.replaceAllUsesWith(builder->CreateLoad(state.frag_coord->getType()->getPointerElementType(), state.frag_coord, "frag_coord"));
+				llvm::errs() << "direct use of frag coord is not allowed: in function" << func->getName() << "\n";
+				return;
 			} else if (func_name == "floor.builtin.get_printf_buffer") {
 				if(state.soft_printf == nullptr) {
 					DBG(printf("failed to get printf_buffer arg, probably not in a kernel/vertex/fragment function?\n"); fflush(stdout);)
