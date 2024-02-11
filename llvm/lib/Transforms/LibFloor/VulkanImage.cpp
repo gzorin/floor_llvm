@@ -141,7 +141,40 @@ namespace {
 			}
 		}
 		
-		void handle_vk_coord(Instruction& I,
+		SmallVector<llvm::Value*, 3> get_image_dim(llvm::Value* img_handle_arg,
+												   llvm::FixedVectorType* coord_vec_type,
+												   const std::string& geom) {
+			SmallVector<llvm::Value*, 3> ret;
+			
+			static const char* img_dim_funcs[] {
+				"_Z15get_image_width",
+				"_Z16get_image_height",
+				"_Z15get_image_depth"
+			};
+			
+			const auto dim = coord_vec_type->getNumElements();
+			SmallVector<llvm::Type*, 8> get_dim_arg_types;
+			SmallVector<llvm::Value*, 8> get_dim_func_args;
+			get_dim_arg_types.push_back(img_handle_arg->getType());
+			get_dim_func_args.push_back(img_handle_arg);
+			for(uint32_t i = 0; i < dim; ++i) {
+				auto get_dim_func = get_or_create_spirv_function(img_dim_funcs[i] + geom,
+																 builder->getInt32Ty(),
+																 get_dim_arg_types,
+																 true);
+				llvm::CallInst* get_dim_call = builder->CreateCall(get_dim_func, get_dim_func_args);
+				get_dim_call->setDoesNotAccessMemory();
+				get_dim_call->setConvergent();
+				get_dim_call->setDoesNotThrow();
+				get_dim_call->setCallingConv(CallingConv::FLOOR_FUNC);
+				ret.push_back(get_dim_call);
+			}
+			
+			return ret;
+		}
+		
+		void handle_vk_coord(llvm::Value* img_handle_arg,
+							 Instruction& I,
 							 llvm::Value* coord_arg,
 							 llvm::Value* layer_arg,
 							 const bool is_array,
@@ -149,19 +182,22 @@ namespace {
 							 const bool is_non_cube_array_depth_compare,
 							 // must have: true: int coords, false: float coords
 							 const bool must_have_int_args,
+							 const bool is_offset_dynamic,
+							 llvm::Value* offset_arg,
+							 const std::string& geom,
 							 std::string& vk_func_name,
 							 SmallVector<llvm::Type*, 8>& func_arg_types,
 							 SmallVector<llvm::Value*, 8>& func_args) {
 			auto coord_vec_type = dyn_cast_or_null<FixedVectorType>(coord_arg->getType());
 			const auto coord_dim = coord_vec_type->getNumElements();
-			if(!coord_vec_type) {
+			if (!coord_vec_type) {
 				ctx->emitError(&I, "invalid image coordinate argument (cast to vector failed)");
 				return;
 			}
 			
 			const auto coord_type = coord_vec_type->getElementType();
 			const auto is_int_coord = coord_type->isIntegerTy();
-			if(!is_int_coord && !coord_type->isFloatTy()) {
+			if (!is_int_coord && !coord_type->isFloatTy()) {
 				ctx->emitError(&I, "invalid coordinate type (neither int nor float)");
 				return;
 			}
@@ -175,10 +211,9 @@ namespace {
 			
 			//
 			bool convert_to_int = false, convert_to_float = false;
-			if(must_have_int_args && !is_int_coord) {
+			if (must_have_int_args && !is_int_coord) {
 				convert_to_int = true;
-			}
-			else if(!must_have_int_args && is_int_coord) {
+			} else if (!must_have_int_args && is_int_coord) {
 				convert_to_float = true;
 			}
 			const auto convert_val = [&convert_to_int, &convert_to_float,
@@ -192,16 +227,52 @@ namespace {
 			
 			// start with the specified coord arg, there are some cases where we can just use it without rebuilding
 			auto vk_coord_arg = coord_arg;
-			if(vk_coord_type != coord_vec_type) {
-				if(vk_coord_dim == 1) {
+			
+			// add dynamic offset if there is one
+			if (is_offset_dynamic && offset_arg) {
+				if (is_int_coord) {
+					vk_coord_arg = builder->CreateAdd(coord_arg, offset_arg);
+				} else {
+					// need to fallback to s/w for fp coords
+					auto img_dims = get_image_dim(img_handle_arg, coord_vec_type, geom);
+					
+					// float_offset_i = float(offset_i) / float(dim_i)
+					llvm::Value* fp_offset = UndefValue::get(coord_vec_type);
+					for (uint32_t i = 0; i < coord_dim; ++i) {
+						auto offset_i = builder->CreateExtractElement(offset_arg, builder->getInt32(i));
+						
+						// one offset elem is often 0
+						// -> add some special handling since the si->fp conversion and fdiv are unnecessary here
+						// (this might later also get rid of unnecessary get_image_* calls)
+						if (const auto const_offset_i = dyn_cast_or_null<ConstantInt>(offset_i)) {
+							if (const_offset_i->getSExtValue() == 0) {
+								builder->CreateInsertElement(fp_offset, ConstantFP::get(builder->getFloatTy(), 0.0),
+															 builder->getInt32(i));
+								continue;
+							}
+						}
+						
+						auto offset_i_fp = builder->CreateSIToFP(offset_i, builder->getFloatTy());
+						auto dim_i = builder->CreateSIToFP(img_dims[i], builder->getFloatTy());
+						fp_offset = builder->CreateInsertElement(fp_offset,
+																 builder->CreateFDiv(offset_i_fp, dim_i),
+																 builder->getInt32(i));
+					}
+					
+					// finally: add the compute fp offset
+					vk_coord_arg = builder->CreateFAdd(coord_arg, fp_offset);
+				}
+			}
+			
+			if (vk_coord_type != coord_vec_type) {
+				if (vk_coord_dim == 1) {
 					// just a scalar
 					vk_coord_arg = convert_val(builder->CreateExtractElement(coord_arg, builder->getInt32(0)));
-				}
-				else {
+				} else {
 					// create a new tmp coord, then copy coord elements (keep unused undef)
 					vk_coord_arg = UndefValue::get(vk_coord_type);
 					uint32_t coord_idx = 0;
-					for(; coord_idx < coord_dim; ++coord_idx) {
+					for (; coord_idx < coord_dim; ++coord_idx) {
 						vk_coord_arg = builder->CreateInsertElement(vk_coord_arg,
 																	convert_val(builder->CreateExtractElement(coord_arg,
 																											  builder->getInt32(coord_idx))),
@@ -209,9 +280,9 @@ namespace {
 					}
 					
 					// need to pull the layer index into the coordinate, including possible int -> float conversion
-					if(is_array) {
+					if (is_array) {
 						auto layer = layer_arg;
-						if(!must_have_int_args) {
+						if (!must_have_int_args) {
 							// need to convert
 							layer = builder->CreateUIToFP(layer_arg, vk_coord_scalar_type);
 						}
@@ -220,7 +291,7 @@ namespace {
 					
 					// workaround a bug in nvidia drivers where another coord component is expected when doing depth comparison
 					// (this seems to be a remnant of glsl where Dref was stored as the last component instead of an additional argument)
-					if(is_non_cube_array_depth_compare) {
+					if (is_non_cube_array_depth_compare) {
 						vk_coord_arg = builder->CreateInsertElement(vk_coord_arg,
 																	ConstantFP::get(llvm::Type::getFloatTy(*ctx), 0.0f),
 																	builder->getInt32(coord_idx++));
@@ -230,7 +301,7 @@ namespace {
 			func_arg_types.push_back(vk_coord_arg->getType());
 			func_args.push_back(vk_coord_arg);
 			
-			if(vk_coord_dim > 1) {
+			if (vk_coord_dim > 1) {
 				vk_func_name += "Dv" + std::to_string(vk_coord_dim) + "_";
 			}
 			vk_func_name += (must_have_int_args ? "i" : "f");
@@ -292,6 +363,9 @@ namespace {
 			const auto is_cube = has_flag<COMPUTE_IMAGE_TYPE::FLAG_CUBE>(image_type);
 			const auto is_depth = has_flag<COMPUTE_IMAGE_TYPE::FLAG_DEPTH>(image_type);
 			
+			// unless the offset is constant, it is not allowed on image read instructions (only gather)
+			const bool is_offset_dynamic = (is_offset && !isa<Constant>(offset_arg));
+			
 			// -> return data and vulkan function name
 			// NOTE: we don't have a c++ mangling support in here, so do it manually
 			// (this is actually easy enough, since everything is very static)
@@ -331,7 +405,8 @@ namespace {
 			func_args.push_back(const_sampler_arg);
 			
 			// -> coord
-			handle_vk_coord(I,
+			handle_vk_coord(img_handle_arg,
+							I,
 							coord_arg,
 							layer_arg,
 							is_array,
@@ -339,6 +414,9 @@ namespace {
 							is_depth && is_compare && !(is_cube && is_array),
 							// fetch: always int coords, sample: always float coords
 							is_fetch,
+							is_offset_dynamic,
+							offset_arg,
+							geom,
 							vk_func_name,
 							func_arg_types,
 							func_args);
@@ -457,34 +535,36 @@ namespace {
 			}
 			
 			// -> offset
+			// Vulkan doesn't support dynamic offsets on non-gather read instructions
+			// -> if the offset is dynamic, it is already handled during coordinate handling
 			vk_func_name += "b";
-			const auto is_offset_arg = (is_offset ? ConstantInt::getTrue(*ctx) : ConstantInt::getFalse(*ctx));
+			const auto is_offset_arg = (!is_offset_dynamic ? ConstantInt::getTrue(*ctx) : ConstantInt::getFalse(*ctx));
 			func_arg_types.push_back(is_offset_arg->getType());
 			func_args.push_back(is_offset_arg);
 			
-			if(is_offset) {
+			if (!is_offset_dynamic) {
 				// offset coord_dim must be equal to image coord dim (- layer)
 				const auto coord_dim = coord_vec_type->getNumElements();
-				if(coord_dim == 1) {
+				if (coord_dim == 1) {
 					// extract scalar
 					vk_func_name += "i";
 					auto extracted_arg = builder->CreateExtractElement(offset_arg, builder->getInt32(0));
+					assert(isa<Constant>(extracted_arg));
 					func_arg_types.push_back(extracted_arg->getType());
 					func_args.push_back(extracted_arg);
-				}
-				else if(coord_dim == 2) {
+				} else if(coord_dim == 2) {
 					// just pass-through
 					vk_func_name += "Dv2_i";
 					func_arg_types.push_back(offset_arg->getType());
 					func_args.push_back(offset_arg);
-				}
-				else if(coord_dim == 3) {
+				} else if(coord_dim == 3) {
 					// just pass-through
 					vk_func_name += "Dv3_i";
 					func_arg_types.push_back(offset_arg->getType());
 					func_args.push_back(offset_arg);
+				} else {
+					llvm_unreachable("invalid coord dim");
 				}
-				else llvm_unreachable("invalid coord dim");
 			}
 			// else: no arg
 			
@@ -626,13 +706,18 @@ namespace {
 			func_args.push_back(img_handle_arg);
 			
 			// -> coord
-			handle_vk_coord(I,
+			handle_vk_coord(img_handle_arg,
+							I,
 							coord_arg,
 							layer_arg,
 							is_array,
 							is_msaa,
 							false,
 							true, // must always have int coords for writes
+							// write has no offset
+							false,
+							nullptr,
+							geom,
 							vk_func_name,
 							func_arg_types,
 							func_args);
