@@ -363,8 +363,8 @@ namespace {
 			const auto is_cube = has_flag<COMPUTE_IMAGE_TYPE::FLAG_CUBE>(image_type);
 			const auto is_depth = has_flag<COMPUTE_IMAGE_TYPE::FLAG_DEPTH>(image_type);
 			
-			// unless the offset is constant, it is not allowed on image read instructions (only gather)
-			const bool is_offset_dynamic = (is_offset && !isa<Constant>(offset_arg));
+			// unless the offset is constant (and not a cube map), it is not allowed on image read instructions (only gather)
+			const bool is_offset_dynamic = is_offset && (!isa<Constant>(offset_arg) || is_cube);
 			
 			// -> return data and vulkan function name
 			// NOTE: we don't have a c++ mangling support in here, so do it manually
@@ -538,11 +538,11 @@ namespace {
 			// Vulkan doesn't support dynamic offsets on non-gather read instructions
 			// -> if the offset is dynamic, it is already handled during coordinate handling
 			vk_func_name += "b";
-			const auto is_offset_arg = (!is_offset_dynamic ? ConstantInt::getTrue(*ctx) : ConstantInt::getFalse(*ctx));
+			const auto is_offset_arg = (!is_offset_dynamic && is_offset ? ConstantInt::getTrue(*ctx) : ConstantInt::getFalse(*ctx));
 			func_arg_types.push_back(is_offset_arg->getType());
 			func_args.push_back(is_offset_arg);
 			
-			if (!is_offset_dynamic) {
+			if (!is_offset_dynamic && is_offset) {
 				// offset coord_dim must be equal to image coord dim (- layer)
 				const auto coord_dim = coord_vec_type->getNumElements();
 				if (coord_dim == 1) {
