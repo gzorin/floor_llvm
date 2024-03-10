@@ -1931,13 +1931,19 @@ static bool handle_arg_buffer_ref_alloca(CodeGenModule& CGM, CodeGenFunction& CG
 	
 	// lhs must be an alloca of ptr type
 	auto lhs = dyn_cast_or_null<llvm::AllocaInst>(lvalue.getPointer(CGF));
+	if (!lhs) {
+		return false;
+	}
 	auto lhs_type = lhs->getType();
-	if (!lhs || !lhs_type->isPointerTy()) {
+	if (!lhs_type->isPointerTy()) {
 		return false;
 	}
 	
 	// rhs must be a pointer of ptr type
 	auto rhs = rvalue.getScalarVal();
+	if (!rhs) {
+		return false;
+	}
 	auto rhs_type = rhs->getType();
 	if (!rhs_type->isPointerTy() ||
 		// if this already matches, we can abort
