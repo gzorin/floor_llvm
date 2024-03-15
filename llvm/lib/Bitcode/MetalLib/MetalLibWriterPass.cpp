@@ -18,6 +18,7 @@
 #include "../Writer50/ValueEnumerator50.h"
 #include "../Writer140/ValueEnumerator140.h"
 #include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Pass.h"
@@ -26,6 +27,7 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/VersionTuple.h"
+#include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/LibFloor/MetalTypes.h"
 #include "llvm/Transforms/LibFloor/FloorUtils.h"
@@ -309,18 +311,6 @@ struct metallib_program_info {
   };
   vector<entry> entries;
 };
-
-//
-static bool is_used_in_function(const Function *F, const GlobalVariable *GV) {
-  bool used = false;
-  libfloor_utils::for_all_instruction_users(
-      *GV, [&F, &used](const Instruction &I) {
-        if (I.getParent()->getParent() == F) {
-          used = true;
-        }
-      });
-  return used;
-}
 
 // version -> { AIR version, language version }
 static const unordered_map<uint32_t,
@@ -718,17 +708,9 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
 
     // clone the module with the current entry point function and any global
     // vars that we need
+    unordered_set<const Function *> funcs;
     ValueToValueMapTy VMap;
-    auto cloned_mod = CloneModule(M, VMap, [&func](const GlobalValue *GV) {
-      if (GV == func) {
-        return true;
-      }
-      // only clone global vars if they are needed in a specific function
-      if (const GlobalVariable *GVar = dyn_cast<GlobalVariable>(GV)) {
-        return is_used_in_function(func, GVar);
-      }
-      return false;
-    });
+    auto cloned_mod = CloneModule(M, VMap);
 
     // metallib uses the function name as the source file name
     cloned_mod->setSourceFileName(func->getName());
@@ -744,22 +726,15 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     // unused vars to external linkage and unused funcs are declarations only
     // NOTE: this also removes entry points that are now unused (metadata is
     // removed later)
-    for (auto I = cloned_mod->begin(), E = cloned_mod->end(); I != E;) {
-      Function &F = *I++;
-      if (F.isDeclaration() && F.use_empty()) {
-        F.eraseFromParent();
-        continue;
-      }
-    }
+    llvm::legacy::PassManager mpm;
 
-    for (auto I = cloned_mod->global_begin(), E = cloned_mod->global_end();
-         I != E;) {
-      GlobalVariable &GV = *I++;
-      if (GV.isDeclaration() && GV.use_empty()) {
-        GV.eraseFromParent();
-        continue;
-      }
-    }
+    mpm.add(createInternalizePass([&func](const GlobalValue& GV) -> bool {
+        return GV.getName() == func->getName();
+    }));
+
+    mpm.add(createGlobalOptimizerPass());
+
+    mpm.run(*cloned_mod);
 
     // clean up metadata
     // * metadata of all entry points that no longer exist
