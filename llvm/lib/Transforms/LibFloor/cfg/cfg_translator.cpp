@@ -194,7 +194,8 @@ void cfg_translator::add_or_update_terminator(CFGNode &node) {
       auto cond_br =
           BranchInst::Create(&term.true_block->BB, &term.false_block->BB,
                              term.condition, fake_selection_bb);
-      create_selection_merge(cond_br, unreachable_bb);
+      create_selection_merge(cond_br, unreachable_bb,
+                             node.ir.merge_info.selection_control_mask);
 
       // we need to replace PHI incoming BBs later on (from this BB to the new
       // fake selection)
@@ -517,10 +518,12 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
                 br->getSuccessor(1)->getTerminator());
             if (unreach_0 && !unreach_1) {
               // 0 is unreachable, 1 is not -> merge to 1
-              create_selection_merge(term, br->getSuccessor(1));
+              create_selection_merge(term, br->getSuccessor(1),
+                                     node.ir.merge_info.selection_control_mask);
             } else if (!unreach_0 && unreach_1) {
               // 1 is unreachable, 0 is not -> merge to 0
-              create_selection_merge(term, br->getSuccessor(0));
+              create_selection_merge(term, br->getSuccessor(0),
+                                     node.ir.merge_info.selection_control_mask);
             }
             // else: ignore this
             return;
@@ -545,7 +548,8 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
             assert(sw->getNumSuccessors() > 0);
           }
           if (node.selection_merge_block) {
-            create_selection_merge(term, &node.selection_merge_block->BB);
+            create_selection_merge(term, &node.selection_merge_block->BB,
+                                   node.ir.merge_info.selection_control_mask);
           } else {
             // no selection merge block exists
             // -> create a fake unreachable one
@@ -553,7 +557,8 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
             auto fake_merge = BasicBlock::Create(ctx, node.name + ".fake_merge",
                                                  &F, &node.BB);
             new UnreachableInst(ctx, fake_merge);
-            create_selection_merge(term, fake_merge);
+            create_selection_merge(term, fake_merge,
+                                   node.ir.merge_info.selection_control_mask);
           }
         } else {
           llvm_unreachable("invalid selection merge");
@@ -567,7 +572,8 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
                      ? node.phi_override
                      : &node.ir.merge_info.continue_block->BB);
             create_loop_merge(term, &node.ir.merge_info.merge_block->BB,
-                              continue_bb);
+                              continue_bb,
+                              node.ir.merge_info.loop_control_mask);
           } else {
             if (&node == entry) {
               // if this is the entry node, we can't simply place a fake
@@ -587,7 +593,8 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
                 ctx, node.name + ".fake_continue", &F, &node.BB);
             BranchInst::Create(&node.BB, continue_block);
             create_loop_merge(term, &node.ir.merge_info.merge_block->BB,
-                              continue_block);
+                              continue_block,
+                              node.ir.merge_info.loop_control_mask);
 
             // update phis: need to insert incoming undef value for the new
             // continue block
@@ -606,7 +613,8 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
                        node.phi_override
                    ? node.phi_override
                    : &node.ir.merge_info.continue_block->BB);
-          create_loop_merge(term, merge_block, continue_bb);
+          create_loop_merge(term, merge_block, continue_bb,
+                            node.ir.merge_info.loop_control_mask);
         } else {
           llvm_unreachable("invalid loop merge");
         }
@@ -668,11 +676,13 @@ cfg_translator::insert_continue_block_marker(BasicBlock *continue_block) {
 
 void cfg_translator::create_loop_merge(Instruction *insert_before,
                                        BasicBlock *bb_merge,
-                                       BasicBlock *bb_continue) {
+                                       BasicBlock *bb_continue,
+                                       SpvLoopControlMask loop_control) {
   Function *loop_merge_func = M.getFunction("floor.loop_merge");
   if (loop_merge_func == nullptr) {
     llvm::Type *loop_merge_arg_types[]{llvm::Type::getLabelTy(ctx),
-                                       llvm::Type::getLabelTy(ctx)};
+                                       llvm::Type::getLabelTy(ctx),
+                                       llvm::Type::getInt32Ty(ctx)};
     FunctionType *loop_merge_type = FunctionType::get(
         llvm::Type::getVoidTy(ctx), loop_merge_arg_types, false);
     loop_merge_func =
@@ -684,7 +694,11 @@ void cfg_translator::create_loop_merge(Instruction *insert_before,
     loop_merge_func->setNotConvergent();
     loop_merge_func->setDoesNotRecurse();
   }
-  llvm::Value *merge_vars[]{bb_merge, bb_continue};
+  llvm::Value *merge_vars[]{
+      bb_merge, bb_continue,
+      ConstantInt::get(
+          llvm::Type::getInt32Ty(ctx),
+          (std::underlying_type_t<SpvLoopControlMask>)loop_control)};
   assert(insert_before);
   CallInst *loop_merge_call =
       CallInst::Create(loop_merge_func, merge_vars, "", insert_before);
@@ -694,11 +708,13 @@ void cfg_translator::create_loop_merge(Instruction *insert_before,
   insert_continue_block_marker(bb_continue);
 }
 
-void cfg_translator::create_selection_merge(Instruction *insert_before,
-                                            BasicBlock *merge_block) {
+void cfg_translator::create_selection_merge(
+    Instruction *insert_before, BasicBlock *merge_block,
+    SpvSelectionControlMask sel_control) {
   Function *sel_merge_func = M.getFunction("floor.selection_merge");
   if (sel_merge_func == nullptr) {
-    llvm::Type *sel_merge_arg_types[]{llvm::Type::getLabelTy(ctx)};
+    llvm::Type *sel_merge_arg_types[]{llvm::Type::getLabelTy(ctx),
+                                      llvm::Type::getInt32Ty(ctx)};
     FunctionType *sel_merge_type = FunctionType::get(
         llvm::Type::getVoidTy(ctx), sel_merge_arg_types, false);
     sel_merge_func =
@@ -711,7 +727,11 @@ void cfg_translator::create_selection_merge(Instruction *insert_before,
     sel_merge_func->setNotConvergent();
     sel_merge_func->setDoesNotRecurse();
   }
-  llvm::Value *merge_vars[]{merge_block};
+  llvm::Value *merge_vars[]{
+      merge_block,
+      ConstantInt::get(
+          llvm::Type::getInt32Ty(ctx),
+          (std::underlying_type_t<SpvSelectionControlMask>)sel_control)};
   assert(insert_before);
   CallInst *sel_merge_call =
       CallInst::Create(sel_merge_func, merge_vars, "", insert_before);

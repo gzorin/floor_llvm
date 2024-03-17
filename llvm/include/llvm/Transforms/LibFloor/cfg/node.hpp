@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ f20a0fb4e984a83743baa9d863eb7b26228bcca3
+// @ d6cff9039956d6f461625b01981c541eb724088c
 //
 //===----------------------------------------------------------------------===//
 
@@ -103,6 +103,7 @@ private:
   bool backward_visited = false;
   bool traversing = false;
   bool freeze_structured_analysis = false;
+  bool is_pseudo_back_edge = false;
 
   MergeType merge = MergeType::None;
   CFGNode *loop_merge_block = nullptr;
@@ -161,6 +162,8 @@ private:
   void retarget_branch_pre_traversal(CFGNode *to_prev, CFGNode *to_next);
   void retarget_branch_with_intermediate_node(CFGNode *to_prev,
                                               CFGNode *to_next);
+  CFGNode *rewrite_branch_through_intermediate_node(CFGNode *to_prev,
+                                                    CFGNode *to_next);
 
   void fixup_merge_info_after_branch_rewrite(CFGNode *from, CFGNode *to);
 

@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ f20a0fb4e984a83743baa9d863eb7b26228bcca3
+// @ d6cff9039956d6f461625b01981c541eb724088c
 //
 //===----------------------------------------------------------------------===//
 
@@ -48,10 +48,43 @@ enum class MergeType { None, Loop, Selection };
 class ConstantInt;
 struct CFGNode;
 
+enum class SpvLoopControlMask : uint32_t {
+  None = 0,
+  Unroll = 0x00000001,
+  DontUnroll = 0x00000002,
+  DependencyInfinite = 0x00000004,
+  DependencyLength = 0x00000008,
+  MinIterations = 0x00000010,
+  MaxIterations = 0x00000020,
+  IterationMultiple = 0x00000040,
+  PeelCount = 0x00000080,
+  PartialCount = 0x00000100,
+  InitiationIntervalINTEL = 0x00010000,
+  MaxConcurrencyINTEL = 0x00020000,
+  DependencyArrayINTEL = 0x00040000,
+  PipelineEnableINTEL = 0x00080000,
+  LoopCoalesceINTEL = 0x00100000,
+  MaxInterleavingINTEL = 0x00200000,
+  SpeculatedIterationsINTEL = 0x00400000,
+  NoFusionINTEL = 0x00800000,
+  LoopCountINTEL = 0x01000000,
+  MaxReinvocationDelayINTEL = 0x02000000,
+};
+
+enum class SpvSelectionControlMask : uint32_t {
+  None = 0,
+  Flatten = 0x00000001,
+  DontFlatten = 0x00000002,
+};
+
 struct MergeInfo {
   MergeType merge_type = MergeType::None;
   CFGNode *merge_block = nullptr;
   CFGNode *continue_block = nullptr;
+  SpvLoopControlMask loop_control_mask = SpvLoopControlMask::None;
+  // by default, we always want flatten
+  SpvSelectionControlMask selection_control_mask =
+      SpvSelectionControlMask::Flatten;
 };
 
 struct IncomingValue {
@@ -94,6 +127,11 @@ struct Terminator {
 
   // Return
   Value *return_value = nullptr;
+
+  bool force_unroll = false;
+  bool force_loop = false;
+  bool force_flatten = false;
+  bool force_branch = false;
 };
 
 struct IRBlock {

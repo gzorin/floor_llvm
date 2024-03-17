@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ f20a0fb4e984a83743baa9d863eb7b26228bcca3
+// @ d6cff9039956d6f461625b01981c541eb724088c
 //
 //===----------------------------------------------------------------------===//
 
@@ -151,9 +151,11 @@ private:
                                         const CFGNode *loop_exit) const;
 
   void split_merge_blocks();
+  void eliminate_degenerate_switch_merges();
   bool merge_candidate_is_on_breaking_path(const CFGNode *node) const;
   bool continue_block_can_merge(CFGNode *node) const;
   static bool block_is_plain_continue(const CFGNode *node);
+  static const CFGNode *scan_plain_continue_block(const CFGNode *node);
 
   // Create a new block. Rewrite all branches to node from blocks that are
   // dominated by header to that block.
@@ -209,6 +211,7 @@ private:
   bool rewrite_invalid_loop_breaks();
   void recompute_cfg();
   void rewrite_multiple_back_edges();
+  bool rewrite_impossible_back_edges();
   void compute_dominance_frontier();
   void compute_post_dominance_frontier();
   void create_continue_block_ladders();
@@ -266,6 +269,16 @@ private:
   template <typename Op>
   void traverse_dominated_blocks_and_rewrite_branch(
       const CFGNode *dominator, CFGNode *candidate, CFGNode *from, CFGNode *to,
-      const Op &op, std::unordered_set<const CFGNode *> &visitation_cache);
+      const Op &op, std::unordered_set<CFGNode *> &visitation_cache);
+
+  CFGNode *transpose_code_path_through_ladder_block(CFGNode *header,
+                                                    CFGNode *merge,
+                                                    CFGNode *succ);
+  void rewrite_ladder_conditional_branch_from_incoming_blocks(
+      CFGNode *ladder, CFGNode *true_block, CFGNode *false_block,
+      const std::function<bool(const CFGNode *)> &path_cb,
+      const std::string &name);
+
+  void propagate_branch_control_hints();
 };
 } // namespace llvm

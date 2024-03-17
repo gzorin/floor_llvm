@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ f20a0fb4e984a83743baa9d863eb7b26228bcca3
+// @ d6cff9039956d6f461625b01981c541eb724088c
 //
 //===----------------------------------------------------------------------===//
 
@@ -62,11 +62,17 @@ void CFGNode::add_branch(CFGNode *to) {
 }
 
 void CFGNode::add_fake_branch(CFGNode *to) {
+  if (std::find(succ.begin(), succ.end(), to) != succ.end()) {
+    return;
+  }
+
   add_unique_fake_succ(to);
   to->add_unique_fake_pred(this);
 }
 
 void CFGNode::add_unique_succ(CFGNode *node) {
+  assert(std::find(fake_succ.begin(), fake_succ.end(), node) ==
+         fake_succ.end());
   auto itr = std::find(succ.begin(), succ.end(), node);
   if (itr == succ.end())
     succ.push_back(node);
@@ -225,15 +231,14 @@ bool CFGNode::dominates_all_reachable_exits(
     std::unordered_set<const CFGNode *> &completed,
     const CFGNode &header) const {
   if (!completed.count(this)) {
-    if (succ_back_edge)
+    completed.insert(this);
+    if (succ_back_edge && !header.dominates(succ_back_edge))
       return false;
 
     for (auto *node : succ)
       if (!header.dominates(node) ||
           !node->dominates_all_reachable_exits(completed, header))
         return false;
-
-    completed.insert(this);
   }
 
   return true;
@@ -361,12 +366,9 @@ CFGNode *CFGNode::get_immediate_dominator_loop_header() {
   return node;
 }
 
-void CFGNode::retarget_branch_with_intermediate_node(CFGNode *to_prev,
-                                                     CFGNode *to_next) {
-  // If there is no duplication, just go ahead.
-  if (std::find(succ.begin(), succ.end(), to_next) == succ.end()) {
-    return retarget_branch(to_prev, to_next);
-  }
+CFGNode *CFGNode::rewrite_branch_through_intermediate_node(CFGNode *to_prev,
+                                                           CFGNode *to_next) {
+  assert(std::find(succ.begin(), succ.end(), to_next) != succ.end());
 
   auto *intermediate =
       pool.create_node(name + ".intermediate." + to_next->name);
@@ -379,6 +381,17 @@ void CFGNode::retarget_branch_with_intermediate_node(CFGNode *to_prev,
   intermediate->backward_post_visit_order = backward_post_visit_order;
   retarget_branch(to_prev, intermediate);
   to_next->recompute_immediate_dominator();
+
+  return intermediate;
+}
+
+void CFGNode::retarget_branch_with_intermediate_node(CFGNode *to_prev,
+                                                     CFGNode *to_next) {
+  if (std::find(succ.begin(), succ.end(), to_next) == succ.end()) {
+    retarget_branch(to_prev, to_next);
+  } else {
+    rewrite_branch_through_intermediate_node(to_prev, to_next);
+  }
 }
 
 void CFGNode::retarget_branch_pre_traversal(CFGNode *to_prev,

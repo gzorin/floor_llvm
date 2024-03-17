@@ -73,9 +73,11 @@ protected:
   CallInst *insert_merge_block_marker(BasicBlock *merge_block);
   CallInst *insert_continue_block_marker(BasicBlock *continue_block);
   void create_loop_merge(Instruction *insert_before, BasicBlock *bb_merge,
-                         BasicBlock *bb_continue);
+                         BasicBlock *bb_continue,
+                         SpvLoopControlMask loop_control);
   void create_selection_merge(Instruction *insert_before,
-                              BasicBlock *merge_block);
+                              BasicBlock *merge_block,
+                              SpvSelectionControlMask sel_control);
 };
 
 } // namespace llvm
