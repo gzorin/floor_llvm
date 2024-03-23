@@ -57,6 +57,8 @@
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/LibFloor.h"
+#include "llvm/Transforms/LibFloor/AddressSpaceFix.h"
+#include "llvm/Transforms/LibFloor/FloorUtils.h"
 #include <algorithm>
 #include <cstdarg>
 #include <memory>
@@ -211,13 +213,14 @@ namespace {
 			vec_to_scalar_ops<Instruction::SIToFP>(I);
 		}
 		
-		// SPIR doesn't support LLVM lifetime and assume intrinsics
+		// SPIR doesn't support various LLVM intrinsics
 		// -> simply remove them
 		// TODO: should probably kill the global decl as well
 		void visitIntrinsicInst(IntrinsicInst &I) {
 			if (I.getIntrinsicID() == Intrinsic::lifetime_start ||
 				I.getIntrinsicID() == Intrinsic::lifetime_end ||
-				I.getIntrinsicID() == Intrinsic::assume) {
+				I.getIntrinsicID() == Intrinsic::assume ||
+				I.getIntrinsicID() == Intrinsic::experimental_noalias_scope_decl) {
 				I.eraseFromParent();
 				was_modified = true;
 			}
@@ -336,6 +339,74 @@ namespace {
 			}
 		}
 	};
+
+	// SPIRFinalModule:
+	// * fix address spaces of global variables
+	struct SPIRFinalModule : public ModulePass {
+		static char ID; // Pass identification, replacement for typeid
+		
+		static const uint32_t SPIRAS_Global = 1;
+		static const uint32_t SPIRAS_Constant = 2;
+		static const uint32_t SPIRAS_Local = 3;
+		
+		Module* M { nullptr };
+		LLVMContext* ctx { nullptr };
+		
+		SPIRFinalModule() : ModulePass(ID) {
+			initializeSPIRFinalModulePass(*PassRegistry::getPassRegistry());
+		}
+		
+		bool runOnModule(Module& Mod) override {
+			M = &Mod;
+			ctx = &M->getContext();
+			
+			// ignore this pass when generating SPIR-V
+			if (M->getNamedMetadata("floor.generating_spirv") != nullptr) {
+				return false;
+			}
+			
+			bool module_modified = false;
+			
+			// ensure globals are in the correct address space
+			for (auto& GV : M->globals()) {
+				const auto gv_type = GV.getType();
+				if (!gv_type->isPointerTy()) {
+					continue;
+				}
+				
+				const auto addr_space = gv_type->getPointerAddressSpace();
+				if (addr_space == SPIRAS_Constant || addr_space == SPIRAS_Local) {
+					// -> all okay
+					continue;
+				}
+				
+				if (addr_space == SPIRAS_Global) {
+					// -> can't fix variables in global address space, this is fundamentally wrong
+					std::string gv_str;
+					llvm::raw_string_ostream rso(gv_str);
+					GV.print(rso);
+					ctx->emitError("global variables must not be in global address space: " + rso.str());
+					return false;
+				}
+				
+				// -> put into constant address space
+				assert(addr_space == 0 && "GV must not be in an address space yet");
+				const auto new_gv_type = gv_type->getPointerElementType()->getPointerTo(SPIRAS_Constant);
+				GV.mutateType(new_gv_type);
+				
+				// update users
+				std::vector<ReturnInst*> returns; // returns to fix -> there shouldn't be any here
+				libfloor_utils::for_all_instruction_users(GV, [this, &returns, &GV](Instruction& instr) {
+					fix_instruction_users(*ctx, instr, GV, SPIRAS_Constant, false, returns);
+				});
+				assert(returns.empty() && "unexpected return type change");
+				module_modified = true;
+			}
+			
+			return module_modified;
+		}
+		
+	};
 }
 
 char SPIRFinal::ID = 0;
@@ -345,3 +416,10 @@ INITIALIZE_PASS_END(SPIRFinal, "SPIRFinal", "SPIRFinal Pass", false, false)
 FunctionPass *llvm::createSPIRFinalPass() {
 	return new SPIRFinal();
 }
+
+char SPIRFinalModule::ID = 0;
+ModulePass *llvm::createSPIRFinalModulePass() {
+	return new SPIRFinalModule();
+}
+INITIALIZE_PASS_BEGIN(SPIRFinalModule, "SPIRFinal module", "SPIRFinal module Pass", false, false)
+INITIALIZE_PASS_END(SPIRFinalModule, "SPIRFinal module", "SPIRFinal module Pass", false, false)

@@ -62,6 +62,7 @@
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/LibFloor.h"
+#include "llvm/Transforms/LibFloor/FloorUtils.h"
 #include <algorithm>
 #include <cstdarg>
 #include <memory>
@@ -1193,51 +1194,51 @@ namespace {
 			// recursively find all users of this alloca + store all select and phi instructions that select/choose based on the alloca pointer
 			std::vector<Instruction*> users;
 			std::unordered_set<Instruction*> visited;
-			const std::function<void(Instruction&)> collect_users = [&users, &collect_users, &visited, &AI, &AA](Instruction& I) {
-				for(auto user : I.users()) {
-					auto instr = cast<Instruction>(user);
-					const auto has_visited = visited.insert(instr);
-					if(!has_visited.second) continue;
-					
-					// TODO: ideally, we want to track all GEPs and bitcasts to/of the alloca and only add select/phi instructions that
-					//       either use these or directly use the alloca (and not all pointers) - for now, AA will do
-					if(SelectInst* SI = dyn_cast<SelectInst>(user)) {
-						DBG(errs() << ">> select: " << *SI << "\n";)
-						DBG(errs() << "cond: " << *SI->getCondition() << "\n";)
-						DBG(errs() << "ops: " << *SI->getTrueValue() << ", " << *SI->getFalseValue() << "\n";)
-						
-						// skip immediately if not a pointer type
-						if(SI->getTrueValue()->getType()->isPointerTy() /* false val has the same type */) {
-							// check if either true or false alias with our alloca
-							const auto aa_res_true = AA.alias(SI->getTrueValue(), &AI);
-							const auto aa_res_false = AA.alias(SI->getFalseValue(), &AI);
-							DBG(errs() << "aa: " << aa_res_true << ", " << aa_res_false << "\n";)
-							if(aa_res_true != AliasResult::NoAlias ||
-							   aa_res_false != AliasResult::NoAlias) {
-								// if so, add this select
-								users.push_back(SI);
-							}
-						}
-					}
-					else if(PHINode* PHI = dyn_cast<PHINode>(user)) {
-						DBG(errs() << ">> phi: " << *PHI << "\n";)
-						DBG(errs() << "type: " << *PHI->getType() << "\n";)
-						
-						// skip immediately if not a pointer type
-						if(PHI->getType()->isPointerTy()) {
-							// check if it aliases with our alloca
-							const auto aa_res = AA.alias(PHI, &AI);
-							DBG(errs() << "aa: " << aa_res << "\n";)
-							if(aa_res != AliasResult::NoAlias) {
-								// if so, add this phi node
-								users.push_back(PHI);
-							}
-						}
-					}
-					collect_users(*instr);
+			// -> collect users
+			std::function<void(Instruction&)> collect_users_cb = [&collect_users_cb, &AI, &AA, &visited, &users](Instruction& instr) {
+				const auto has_visited = visited.insert(&instr);
+				if (!has_visited.second) {
+					return;
 				}
+				
+				// TODO: ideally, we want to track all GEPs and bitcasts to/of the alloca and only add select/phi instructions that
+				//       either use these or directly use the alloca (and not all pointers) - for now, AA will do
+				if (SelectInst* SI = dyn_cast<SelectInst>(&instr)) {
+					DBG(errs() << ">> select: " << *SI << "\n";)
+					DBG(errs() << "cond: " << *SI->getCondition() << "\n";)
+					DBG(errs() << "ops: " << *SI->getTrueValue() << ", " << *SI->getFalseValue() << "\n";)
+					
+					// skip immediately if not a pointer type
+					if (SI->getTrueValue()->getType()->isPointerTy() /* false val has the same type */) {
+						// check if either true or false alias with our alloca
+						const auto aa_res_true = AA.alias(SI->getTrueValue(), &AI);
+						const auto aa_res_false = AA.alias(SI->getFalseValue(), &AI);
+						DBG(errs() << "aa: " << aa_res_true << ", " << aa_res_false << "\n";)
+						if (aa_res_true != AliasResult::NoAlias ||
+							aa_res_false != AliasResult::NoAlias) {
+							// if so, add this select
+							users.push_back(SI);
+						}
+					}
+				} else if (PHINode* PHI = dyn_cast<PHINode>(&instr)) {
+					DBG(errs() << ">> phi: " << *PHI << "\n";)
+					DBG(errs() << "type: " << *PHI->getType() << "\n";)
+					
+					// skip immediately if not a pointer type
+					if (PHI->getType()->isPointerTy()) {
+						// check if it aliases with our alloca
+						const auto aa_res = AA.alias(PHI, &AI);
+						DBG(errs() << "aa: " << aa_res << "\n";)
+						if (aa_res != AliasResult::NoAlias) {
+							// if so, add this phi node
+							users.push_back(PHI);
+						}
+					}
+				}
+				
+				libfloor_utils::for_all_instruction_users(instr, collect_users_cb);
 			};
-			collect_users(AI);
+			libfloor_utils::for_all_instruction_users(AI, collect_users_cb);
 			
 			DBG({
 				errs() << "####### users ##\n";

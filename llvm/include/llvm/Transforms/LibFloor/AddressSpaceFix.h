@@ -44,4 +44,4 @@ namespace llvm {
 	                           std::vector<ReturnInst *> &returns);
 } // namespace llvm
 
-#endif //LLVM_TRANSFORMS_ADDRESSSPACEFIX_HPP
+#endif // LLVM_TRANSFORMS_LIBFLOOR_ADDRESSSPACEFIX_H

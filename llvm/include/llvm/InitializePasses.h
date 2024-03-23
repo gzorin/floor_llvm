@@ -478,6 +478,7 @@ void initializeMetalFinalPass(PassRegistry&);
 void initializeMetalFinalModuleCleanupPass(PassRegistry&);
 void initializeMetalImagePass(PassRegistry&);
 void initializeSPIRFinalPass(PassRegistry&);
+void initializeSPIRFinalModulePass(PassRegistry&);
 void initializeSPIRImagePass(PassRegistry&);
 void initializeCFGStructurizationPass(PassRegistry&);
 void initializeVulkanImagePass(PassRegistry&);

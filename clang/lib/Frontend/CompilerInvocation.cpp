@@ -1851,6 +1851,8 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
   Opts.SPIRCompileOptions = Args.getLastArgValue(OPT_cl_spir_compile_options).trim("\t\n\v\f\r\" ");
   Opts.GraphicsPrimitiveID = Args.hasArg(OPT_graphics_primitive_id);
   Opts.GraphicsBarycentricCoord = Args.hasArg(OPT_graphics_barycentric_coord);
+  Opts.floor_generating_spirv = (Args.hasArg(OPT_emit_spirv) ||
+                                 Args.hasArg(OPT_emit_spirv_container));
 
   if (Args.getLastArg(OPT_femulated_tls) ||
       Args.getLastArg(OPT_fno_emulated_tls)) {

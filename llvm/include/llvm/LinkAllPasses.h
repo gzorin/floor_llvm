@@ -261,6 +261,7 @@ namespace {
       (void) llvm::createMetalFinalModuleCleanupPass();
       (void) llvm::createMetalImagePass(0);
       (void) llvm::createSPIRFinalPass();
+      (void) llvm::createSPIRFinalModulePass();
       (void) llvm::createSPIRImagePass(0, false);
       (void) llvm::createCFGStructurizationPass();
       (void) llvm::createVulkanImagePass();

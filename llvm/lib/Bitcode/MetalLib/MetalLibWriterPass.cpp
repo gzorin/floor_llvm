@@ -27,6 +27,7 @@
 #include "llvm/Support/VersionTuple.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/LibFloor/MetalTypes.h"
+#include "llvm/Transforms/LibFloor/FloorUtils.h"
 #include "sha256.hpp"
 #define BZ_NO_STDIO 1
 #include "bzip2/bzlib.h"
@@ -220,8 +221,8 @@ struct metallib_program_info {
       extended_md_size = extended_md_data.size();
       debug_size = debug_data.size();
     }
-    void update_offsets(uint64_t &running_ext_md_size, uint64_t &running_dbg_size,
-                        uint64_t &running_bc_size) {
+    void update_offsets(uint64_t &running_ext_md_size,
+                        uint64_t &running_dbg_size, uint64_t &running_bc_size) {
       offset.extended_md_offset = running_ext_md_size;
       offset.debug_offset = running_dbg_size;
       offset.bitcode_offset = running_bc_size;
@@ -307,35 +308,29 @@ struct metallib_program_info {
 
 //
 static bool is_used_in_function(const Function *F, const GlobalVariable *GV) {
-  for (const auto &user : GV->users()) {
-    if (const auto instr = dyn_cast<Instruction>(user)) {
-      if (instr->getParent()->getParent() == F) {
-        return true;
-      }
-    } else if (const auto const_expr = dyn_cast<ConstantExpr>(user)) {
-      for (const auto &ce_user : const_expr->users()) {
-        if (const auto ce_instr = dyn_cast<Instruction>(ce_user)) {
-          if (ce_instr->getParent()->getParent() == F) {
-            return true;
-          }
+  bool used = false;
+  libfloor_utils::for_all_instruction_users(
+      *GV, [&F, &used](const Instruction &I) {
+        if (I.getParent()->getParent() == F) {
+          used = true;
         }
-      }
-    }
-  }
-  return false;
+      });
+  return used;
 }
 
 // version -> { AIR version, language version }
 static const unordered_map<uint32_t,
                            pair<array<uint32_t, 3>, array<uint32_t, 3>>>
     metal_versions{
-        {200, {{{2, 0, 0}}, {{2, 0, 0}}}}, {210, {{{2, 1, 0}}, {{2, 1, 0}}}},
-        {220, {{{2, 2, 0}}, {{2, 2, 0}}}}, {230, {{{2, 3, 0}}, {{2, 3, 0}}}},
+        {200, {{{2, 0, 0}}, {{2, 0, 0}}}},
+        {210, {{{2, 1, 0}}, {{2, 1, 0}}}},
+        {220, {{{2, 2, 0}}, {{2, 2, 0}}}},
+        {230, {{{2, 3, 0}}, {{2, 3, 0}}}},
         {240, {{{2, 4, 0}}, {{2, 4, 0}}}},
         // Metal 3.0 uses AIR 2.5
         {250, {{{2, 5, 0}}, {{3, 0, 0}}}},
         // Metal 3.1 uses AIR 2.6
-        {260, {{{2, 6, 0}}, {{3, 0, 0}}}},
+        {260, {{{2, 6, 0}}, {{3, 1, 0}}}},
     };
 
 static std::string make_abs_file_name(const std::string &file_name_in) {
@@ -439,12 +434,16 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       target_air_version = 260;
     }
 
-    auto ios_minor = ios_version.getMinor().hasValue() ? ios_version.getMinor().getValue() : 0;
+    auto ios_minor = ios_version.getMinor().hasValue()
+                         ? ios_version.getMinor().getValue()
+                         : 0;
     M.setSDKVersion(VersionTuple{ios_version.getMajor(), ios_minor});
   } else {
-    VersionTuple osx_version {};
+    VersionTuple osx_version{};
     TT.getMacOSXVersion(osx_version);
-    auto osx_minor = osx_version.getMinor().hasValue() ? osx_version.getMinor().getValue() : 0;
+    auto osx_minor = osx_version.getMinor().hasValue()
+                         ? osx_version.getMinor().getValue()
+                         : 0;
     if (osx_version.getMajor() == 10 && osx_minor <= 13) {
       target_air_version = 200;
     } else if (osx_version.getMajor() == 10 && osx_minor == 14) {
@@ -825,7 +824,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
                   {230, "Apple LLVM version 31001.143 (metalfe-31001.143)"},
                   {240, "Apple metal version 31001.363 (metalfe-31001.363)"},
                   {250, "Apple metal version 31001.638 (metalfe-31001.638.1)"},
-                  {260, "Apple metal version 32023.22 (metalfe-32023.22.4)"},
+                  {260, "Apple metal version 32023.155 (metalfe-32023.155)"},
               };
           ident_op->replaceOperandWith(
               0, llvm::MDString::get(cloned_mod->getContext(),
@@ -1062,7 +1061,8 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   uint64_t running_ext_md_size = 0, running_dbg_size = 0, running_bc_size = 0;
   for (uint32_t i = 0; i < function_count; ++i) {
     auto &entry = prog_info.entries[i];
-    entry.update_offsets(running_ext_md_size, running_dbg_size, running_bc_size);
+    entry.update_offsets(running_ext_md_size, running_dbg_size,
+                         running_bc_size);
   }
 
   //// start writing
@@ -1073,7 +1073,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       .container_version_major = 1,
       .is_macos_target = TT.isMacOSX(),
       .container_version_minor = 2,
-	  .container_version_bugfix = uint16_t(target_air_version < 250 ? 6u : 7u),
+      .container_version_bugfix = uint16_t(target_air_version < 250 ? 6u : 7u),
       .file_type = 0,    // always "execute"
       .is_stub = false,  // never stub
       .is_64_bit = true, // always 64-bit
@@ -1100,8 +1100,13 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     header.platform = 0u;
   }
   header.platform_version_major = platform_version.getMajor();
-  header.platform_version_minor = platform_version.getMinor().hasValue() ? platform_version.getMinor().getValue() : 0;
-  header.platform_version_update = platform_version.getSubminor().hasValue() ? platform_version.getSubminor().getValue() : 0;
+  header.platform_version_minor = platform_version.getMinor().hasValue()
+                                      ? platform_version.getMinor().getValue()
+                                      : 0;
+  header.platform_version_update =
+      platform_version.getSubminor().hasValue()
+          ? platform_version.getSubminor().getValue()
+          : 0;
 
   OS.write((const char *)&header, sizeof(metallib_version));
 

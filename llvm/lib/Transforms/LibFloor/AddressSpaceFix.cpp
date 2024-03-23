@@ -69,6 +69,7 @@
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/LibFloor.h"
+#include "llvm/Transforms/LibFloor/FloorUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include <algorithm>
 #include <unordered_set>
@@ -145,7 +146,8 @@ namespace {
 		}
 
 		template <bool fix_call_instrs = true>
-		static void fix_users(AddressSpaceFix* asfix_pass, LLVMContext& ctx, Instruction* instr, Value* parent, const uint32_t address_space,
+		static void fix_users(AddressSpaceFix* asfix_pass, LLVMContext& ctx, std::shared_ptr<llvm::IRBuilder<>>& builder,
+							  Instruction* instr, Value* parent, const uint32_t address_space,
 							  const bool fix_inner_ptr, std::vector<ReturnInst*>& returns) {
 			// fix instruction
 			bool need_users_update = true;
@@ -178,6 +180,36 @@ namespace {
 					break;
 				}
 				case Instruction::Call: {
+					// always allow trivial fixes of memcpy
+					// TODO: memset, memmove
+					if (auto memcpy_instr = dyn_cast_or_null<MemCpyInst>(instr); memcpy_instr) {
+						builder->SetInsertPoint(memcpy_instr);
+						CallInst* new_memcpy_instr = nullptr;
+						if (memcpy_instr->getIntrinsicID() != Intrinsic::memcpy_inline) {
+							assert(memcpy_instr->getIntrinsicID() == Intrinsic::memcpy);
+							new_memcpy_instr = builder->CreateMemCpy(memcpy_instr->getDest(), memcpy_instr->getDestAlign(),
+																	 memcpy_instr->getSource(), memcpy_instr->getSourceAlign(),
+																	 memcpy_instr->getLength(), memcpy_instr->isVolatile(),
+																	 memcpy_instr->getMetadata(LLVMContext::MD_tbaa),
+																	 memcpy_instr->getMetadata(LLVMContext::MD_tbaa_struct),
+																	 memcpy_instr->getMetadata(LLVMContext::MD_alias_scope),
+																	 memcpy_instr->getMetadata(LLVMContext::MD_noalias));
+						} else {
+							new_memcpy_instr = builder->CreateMemCpyInline(memcpy_instr->getDest(), memcpy_instr->getDestAlign(),
+																		   memcpy_instr->getSource(), memcpy_instr->getSourceAlign(),
+																		   memcpy_instr->getLength(), memcpy_instr->isVolatile(),
+																		   memcpy_instr->getMetadata(LLVMContext::MD_tbaa),
+																		   memcpy_instr->getMetadata(LLVMContext::MD_tbaa_struct),
+																		   memcpy_instr->getMetadata(LLVMContext::MD_alias_scope),
+																		   memcpy_instr->getMetadata(LLVMContext::MD_noalias));
+						}
+						new_memcpy_instr->setDebugLoc(memcpy_instr->getDebugLoc());
+						memcpy_instr->replaceAllUsesWith(new_memcpy_instr);
+						memcpy_instr->eraseFromParent();
+						need_users_update = false;
+						break;
+					}
+					
 					if constexpr (fix_call_instrs) {
 						// TODO: should accumulate all users to *this* call instruction (there can be multiple), might want to delay this until done with the function?
 						auto CI = cast<CallInst>(instr);
@@ -277,29 +309,28 @@ namespace {
 			}
 			
 			// recursively fix all users
-			for(auto user : instr->users()) {
-				DBG(errs() << ">> replacing rec use: " << *user << " -> as: " << address_space << "\n";)
-				if(auto user_instr = dyn_cast<Instruction>(user)) {
-					switch(user_instr->getOpcode()) {
-						case Instruction::GetElementPtr:
-						case Instruction::BitCast:
-						case Instruction::Call:
-						case Instruction::Ret:
-						case Instruction::Load:
-						case Instruction::Store:
-						case Instruction::PHI:
-						case Instruction::Select:
-							fix_users<fix_call_instrs>(asfix_pass, ctx, user_instr, instr, address_space, fix_inner_ptr, returns);
-							break;
-						case Instruction::AddrSpaceCast:
-						case Instruction::Invoke:
-							// bad, should never happen
-							ctx.emitError(user_instr, "encountered unsupported instruction");
-							break;
-						default: break;
-					}
-				}
-			}
+			libfloor_utils::for_all_instruction_users(*instr, [&asfix_pass, &ctx, &builder, &instr, &address_space,
+																&fix_inner_ptr, &returns](Instruction& user_instr) {
+				DBG(errs() << ">> replacing rec use: " << user_instr << " -> as: " << address_space << "\n";)
+				switch (user_instr.getOpcode()) {
+					   case Instruction::GetElementPtr:
+					   case Instruction::BitCast:
+					   case Instruction::Call:
+					   case Instruction::Ret:
+					   case Instruction::Load:
+					   case Instruction::Store:
+					   case Instruction::PHI:
+					   case Instruction::Select:
+						   fix_users<fix_call_instrs>(asfix_pass, ctx, builder, &user_instr, instr, address_space, fix_inner_ptr, returns);
+						   break;
+					   case Instruction::AddrSpaceCast:
+					   case Instruction::Invoke:
+						   // bad, should never happen
+						   ctx.emitError(&user_instr, "encountered unsupported instruction");
+						   break;
+					   default: break;
+				   }
+			});
 		}
 		
 		struct as_fix_arg_info {
@@ -315,15 +346,10 @@ namespace {
 				if(arg.read_only_fix) continue;
 				
 				Argument& func_arg = *(std::next(func->arg_begin(), arg.index));
-				for(auto user : func_arg.users()) {
-					DBG(errs() << ">> replacing use: " << *user << "\n";)
-					if(auto instr = dyn_cast<Instruction>(user)) {
-						fix_users(this, *ctx, instr, &func_arg, arg.address_space, fix_inner_ptr, returns);
-					}
-					else {
-						DBG(errs() << "   not an instruction\n";)
-					}
-				}
+				libfloor_utils::for_all_instruction_users(func_arg, [this, &func_arg, &arg, fix_inner_ptr, &returns](Instruction& instr) {
+					DBG(errs() << ">> replacing use: " << instr << "\n";)
+					fix_users(this, *ctx, builder, &instr, &func_arg, arg.address_space, fix_inner_ptr, returns);
+				});
 				DBG(errs() << "<< fixed arg: " << arg.index << "\n";)
 			}
 			
@@ -695,7 +721,8 @@ namespace llvm {
 	                           const bool fix_inner_ptr,
 	                           std::vector<ReturnInst *> &returns) {
 		// NOTE: we can't fix call instructions here
-		AddressSpaceFix::fix_users<false>(nullptr, ctx, &instr, &parent, address_space, fix_inner_ptr, returns);
+		auto builder = std::make_shared<llvm::IRBuilder<>>(ctx);
+		AddressSpaceFix::fix_users<false>(nullptr, ctx, builder, &instr, &parent, address_space, fix_inner_ptr, returns);
 	}
 }
 

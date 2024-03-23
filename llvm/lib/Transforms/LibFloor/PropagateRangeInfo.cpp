@@ -61,6 +61,7 @@
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/LibFloor.h"
+#include "llvm/Transforms/LibFloor/FloorUtils.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
@@ -131,14 +132,14 @@ namespace {
 		// we always start at call instructions, because this is where range info originates from
 		void visitCallInst(CallInst &CI) {
 			MDNode* range = CI.getMetadata(LLVMContext::MD_range);
-			if(range == nullptr) return;
-			
-			for(User* user : CI.users()) {
-				if(Instruction* I = dyn_cast<Instruction>(user)) {
-					DBG(errs() << "adding range info to user: " << *I << "\n";)
-					addRangeInfo(*I, range);
-				}
+			if (range == nullptr) {
+				return;
 			}
+			
+			libfloor_utils::for_all_instruction_users(CI, [this, &range](Instruction& instr) {
+				DBG(errs() << "adding range info to user: " << instr << "\n";)
+				addRangeInfo(instr, range);
+			});
 		}
 		
 		void addRangeInfo(Instruction& I, MDNode* range) {
@@ -198,12 +199,10 @@ namespace {
 			}
 			
 			// continue the recursion
-			for(User* user : I.users()) {
-				if(Instruction* UI = dyn_cast<Instruction>(user)) {
-					DBG(errs() << "> adding range info to user: " << *UI << "\n";)
-					addRangeInfo(*UI, apply_range);
-				}
-			}
+			libfloor_utils::for_all_instruction_users(I, [this, &apply_range](Instruction& instr) {
+				DBG(errs() << "> adding range info to user: " << instr << "\n";)
+				addRangeInfo(instr, apply_range);
+			});
 		}
 		
 	};

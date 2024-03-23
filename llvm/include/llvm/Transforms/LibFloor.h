@@ -91,6 +91,12 @@ FunctionPass *createSPIRFinalPass();
 
 //===----------------------------------------------------------------------===//
 //
+// SPIRFinalModule - Fixes LLVM IR to be SPIR-compliant at the module level.
+//
+ModulePass *createSPIRFinalModulePass();
+
+//===----------------------------------------------------------------------===//
+//
 // SPIRImage - This pass applies SPIR-specific floor image transformations.
 //
 FunctionPass *createSPIRImagePass(const uint32_t image_capabilities = 0,

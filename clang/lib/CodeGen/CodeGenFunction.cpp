@@ -705,6 +705,11 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
     CGM.getModule().getOrInsertNamedMetadata("floor.vulkan_descriptor_buffer");
   }
 
+  // signal that we're generating SPIR-V in the end
+  if (CGM.getCodeGenOpts().floor_generating_spirv > 0) {
+    CGM.getModule().getOrInsertNamedMetadata("floor.generating_spirv");
+  }
+
   // additional air info
   if (CGM.getLangOpts().Metal) {
 	  // only do this once

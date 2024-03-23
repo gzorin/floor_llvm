@@ -70,6 +70,7 @@
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/LibFloor/AddressSpaceFix.h"
 #include "llvm/Transforms/LibFloor/VulkanUtils.h"
+#include "llvm/Transforms/LibFloor/FloorUtils.h"
 #include <algorithm>
 #include <cstdarg>
 #include <memory>
@@ -920,12 +921,8 @@ namespace {
 								llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0),
 								llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0),
 							};
-							std::vector<User*> users;
-							for(auto* user : arg.users()) {
-								users.emplace_back(user);
-							}
-							for (auto& user : users) {
-								if (auto instr = dyn_cast<Instruction>(user)) {
+							libfloor_utils::for_all_users(arg, [&arg, &idx_list](User& user) {
+								if (auto instr = dyn_cast<Instruction>(&user)) {
 									if (isa<LoadInst>(instr)) {
 										auto elem_gep = llvm::GetElementPtrInst::CreateInBounds(arg.getType()->getScalarType()->getPointerElementType(),
 																								&arg, idx_list, "", instr);
@@ -957,7 +954,7 @@ namespace {
 									DBG(errs().flush();)
 									assert(false && "arg user is not an instruction");
 								}
-							}
+							});
 						} else if (is_ssbo_array) {
 							// perform SSBO array transforms
 							arg_type = handle_ssbo_array_transforms(F, arg);
@@ -966,16 +963,10 @@ namespace {
 							arg.mutateType(arg_type);
 							
 							// update users
-							std::vector<User*> users;
-							for (auto* user : arg.users()) {
-								users.emplace_back(user);
-							}
 							std::vector<ReturnInst*> returns; // returns to fix -> there shouldn't be any here
-							for (auto& user : users) {
-								if (auto instr = dyn_cast<Instruction>(user)) {
-									fix_instruction_users(*ctx, *instr, arg, storage_class, false, returns);
-								}
-							}
+							libfloor_utils::for_all_instruction_users(arg, [this, &arg, &storage_class, &returns](Instruction& instr) {
+								fix_instruction_users(*ctx, instr, arg, storage_class, false, returns);
+							});
 							assert(returns.empty() && "unexpected return type change");
 						}
 						DBG(errs() << " -> " << *arg_type;)
@@ -1026,12 +1017,8 @@ namespace {
 			arg.mutateType(new_arg_type);
 			
 			// update users
-			std::vector<User*> users;
-			for (auto* user : arg.users()) {
-				users.emplace_back(user);
-			}
-			for (auto& user : users) {
-				if (auto instr = dyn_cast<Instruction>(user)) {
+			libfloor_utils::for_all_users(arg, [&arg, &new_array_type](User& user) {
+				if (auto instr = dyn_cast<Instruction>(&user)) {
 					// we expect the top level users to all be GEPs
 					if (auto GEP = dyn_cast_or_null<GetElementPtrInst>(instr); GEP) {
 						// create new GEP with updated type
@@ -1058,18 +1045,14 @@ namespace {
 					DBG(errs().flush();)
 					assert(false && "arg user is not an instruction");
 				}
-			}
+			});
 			
 			return new_arg_type;
 		}
 		
 		void handle_ssbo_array_transform_fuse_gep_chains(Function& F, Argument& arg, llvm::Type* new_arg_type) {
-			std::vector<User*> users;
-			for (auto* user : arg.users()) {
-				users.emplace_back(user);
-			}
-			for (auto& user : users) {
-				if (auto instr = dyn_cast<Instruction>(user)) {
+			libfloor_utils::for_all_users(arg, [this, &arg, &new_arg_type](User& user) {
+				if (auto instr = dyn_cast<Instruction>(&user)) {
 					// all top level users should be GEPs
 					if (auto GEP = dyn_cast_or_null<GetElementPtrInst>(instr); GEP) {
 						handle_ssbo_array_transform_fuse_gep_chain_ld(arg, new_arg_type, GEP);
@@ -1085,7 +1068,7 @@ namespace {
 					DBG(errs().flush();)
 					assert(false && "arg user is not an instruction");
 				}
-			}
+			});
 		}
 		
 		void handle_ssbo_array_transform_fuse_gep_chain_ld(Argument& arg, llvm::Type* new_arg_type, GetElementPtrInst* top_gep) {
@@ -1329,15 +1312,14 @@ namespace {
 				}
 			}
 			for (auto& GV : M->globals()) {
-				if(!GV.getType()->isPointerTy()) continue;
-				for(const auto& user : GV.users()) {
-					if(Instruction* instr = dyn_cast_or_null<Instruction>(user)) {
-						if(instr->getParent()->getParent() == &F) {
-							input_ptrs.emplace(&GV);
-							break;
-						}
-					}
+				if (!GV.getType()->isPointerTy()) {
+					continue;
 				}
+				libfloor_utils::for_all_instruction_users(GV, [this, &GV, &F](Instruction& instr) {
+					if (instr.getParent()->getParent() == &F) {
+						input_ptrs.emplace(&GV);
+					}
+				});
 			}
 			
 			// gather all stuff
@@ -1677,28 +1659,26 @@ namespace {
 			}
 			
 			// find all consumers of our producers
-			for(const auto& instr_pset : ptr_set_map) {
+			for (const auto& instr_pset : ptr_set_map) {
 				const auto& instr = instr_pset.first;
 				auto& pset = instr_pset.second;
 				
-				for(const auto& user : instr->users()) {
-					// only need to consider direct users this time
-					if(Instruction* user_instr = dyn_cast_or_null<Instruction>(user)) {
-						if(isa<GetElementPtrInst>(user_instr) ||
-						   isa<SelectInst>(user_instr) ||
-						   isa<PHINode>(user_instr)) {
-							// not interested in these, should already be handled elsewhere
-							const auto pset_iter = ptr_set_map.find(user_instr);
-							assert(pset_iter != ptr_set_map.end() && "unknown producer");
-							assert(pset_iter->second->producers.count(user_instr) > 0 && "unhandled producer");
-							continue;
-						}
-						// NOTE: we don't care about what kind of instructions consumers are, because
-						// we can simply iterate over all operands of the instruction and replace the
-						// producer(s) accordingly
-						pset->consumers.emplace(user_instr);
+				// only need to consider direct users this time
+				libfloor_utils::for_all_instruction_users(*instr, [&ptr_set_map, &pset](Instruction& user_instr) {
+					if (isa<GetElementPtrInst>(user_instr) ||
+						isa<SelectInst>(user_instr) ||
+						isa<PHINode>(user_instr)) {
+						// not interested in these, should already be handled elsewhere
+						const auto pset_iter = ptr_set_map.find(&user_instr);
+						assert(pset_iter != ptr_set_map.end() && "unknown producer");
+						assert(pset_iter->second->producers.count(&user_instr) > 0 && "unhandled producer");
+						return;
 					}
-				}
+					// NOTE: we don't care about what kind of instructions consumers are, because
+					// we can simply iterate over all operands of the instruction and replace the
+					// producer(s) accordingly
+					pset->consumers.emplace(&user_instr);
+				});
 			}
 			
 			// debug output

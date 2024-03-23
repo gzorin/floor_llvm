@@ -423,6 +423,9 @@ public:
   /// If threshold option is not specified, it is disabled by default.
   Optional<uint64_t> DiagnosticsHotnessThreshold = 0;
 
+  /// Flag that signals that we're generating SPIR-V in the end.
+  bool floor_generating_spirv { false };
+
 public:
   // Define accessors/mutators for code generation options of enumeration type.
 #define CODEGENOPT(Name, Bits, Default)

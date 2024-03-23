@@ -43,6 +43,7 @@ void llvm::initializeLibFloor(PassRegistry &Registry) {
   initializeMetalFinalModuleCleanupPass(Registry);
   initializeMetalImagePass(Registry);
   initializeSPIRFinalPass(Registry);
+  initializeSPIRFinalModulePass(Registry);
   initializeSPIRImagePass(Registry);
   initializeCFGStructurizationPass(Registry);
   initializeVulkanImagePass(Registry);
@@ -84,6 +85,10 @@ void LLVMAddMetalImagePass(LLVMPassManagerRef PM) {
 
 void LLVMAddSPIRFinalPass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createSPIRFinalPass());
+}
+
+void LLVMAddSPIRFinalModulePass(LLVMPassManagerRef PM) {
+  unwrap(PM)->add(createSPIRFinalModulePass());
 }
 
 void LLVMAddSPIRImagePass(LLVMPassManagerRef PM) {

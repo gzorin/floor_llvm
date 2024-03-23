@@ -1084,7 +1084,12 @@ void PassManagerBuilder::populateModulePassManager(
 
   // run backend final passes at the very end, no IR should change after this point!
   if (EnableCUDAPasses) MPM.add(createCUDAFinalPass());
-  if (EnableSPIRPasses) MPM.add(createSPIRFinalPass());
+  if (EnableSPIRPasses) {
+    MPM.add(createSPIRFinalPass());
+    if (!EnableVulkanPasses) {
+      MPM.add(createSPIRFinalModulePass());
+    }
+  }
   if (EnableVulkanPasses) { // must run after spir!
     // initial cfg cleanup/simplification
     MPM.add(createAggressiveDCEPass(true /* allow CFG removal here */));
