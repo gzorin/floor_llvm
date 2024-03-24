@@ -68,8 +68,8 @@
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/LowerMemIntrinsics.h"
 #include "llvm/Transforms/LibFloor/AddressSpaceFix.h"
-#include "llvm/Transforms/LibFloor/VulkanUtils.h"
 #include "llvm/Transforms/LibFloor/FloorUtils.h"
 #include <algorithm>
 #include <cstdarg>
@@ -1268,6 +1268,9 @@ namespace {
 		std::vector<SelectInst*> select_ptrs;
 		std::vector<PHINode*> phi_ptrs;
 		
+		// gathered memory intrinsics
+		std::vector<MemIntrinsic*> mem_instrs;
+		
 		VulkanPreFinal() :
 		FunctionPass(ID) {
 			initializeVulkanPreFinalPass(*PassRegistry::getPassRegistry());
@@ -1280,6 +1283,7 @@ namespace {
 			AU.addRequired<TargetLibraryInfoWrapperPass>();
 			AU.addRequired<AssumptionCacheTracker>();
 			AU.addRequired<DominatorTreeWrapperPass>();
+			AU.addRequired<TargetTransformInfoWrapperPass>();
 		}
 		
 		bool runOnFunction(Function &F) override {
@@ -1304,6 +1308,7 @@ namespace {
 			gep_ptrs.clear();
 			select_ptrs.clear();
 			phi_ptrs.clear();
+			mem_instrs.clear();
 			
 			// store parameter pointers + globals used in this function
 			for(auto& arg : F.args()) {
@@ -1330,6 +1335,11 @@ namespace {
 			// handle everything
 			//handle_pointers();
 			
+			// we can't use mem* instructions that handle more than one value in Vulkan/SPIR-V
+			if (!mem_instrs.empty()) {
+				lower_mem_instructions();
+			}
+			
 			return was_modified;
 		}
 		
@@ -1337,6 +1347,10 @@ namespace {
 		using InstVisitor<VulkanPreFinal>::visit;
 		void visit(Instruction& I) {
 			InstVisitor<VulkanPreFinal>::visit(I);
+		}
+		
+		void visitMemIntrinsic(MemIntrinsic& I) {
+			mem_instrs.push_back(&I);
 		}
 		
 		void visitAllocaInst(AllocaInst& AI) {
@@ -1454,7 +1468,7 @@ namespace {
 		
 		void visitGetElementPtrInst(GetElementPtrInst &I) {
 			// prefer i32 indices where we can
-			vulkan_utils::simplify_gep_indices(*ctx, I);
+			libfloor_utils::simplify_gep_indices(*ctx, I);
 			
 			// GEP fusion: we can't have GEPs into GEPs, so fuse them
 			// NOTE: this has to be done recursively of course
@@ -2071,6 +2085,52 @@ namespace {
 			}
 			
 			// TODO: cleanup / DCE (will be done at the end anyways, but might be better to do here already)
+		}
+		
+		void lower_mem_instructions() {
+			for (auto& mem_instr : mem_instrs) {
+				if (auto memcpy_instr = dyn_cast_or_null<MemCpyInst>(mem_instr)) {
+					lower_memcpy(*memcpy_instr);
+				} else if (auto memmove_instr = dyn_cast_or_null<MemMoveInst>(mem_instr)) {
+					llvm::errs() << "can't lower memmove yet: " << *mem_instr << "\n";
+				} else if (auto memset_instr = dyn_cast_or_null<MemSetInst>(mem_instr)) {
+					llvm::errs() << "can't lower memset yet: " << *mem_instr << "\n";
+				} else {
+					llvm::errs() << "unknown/unhandled memory instruction: " << *mem_instr << "\n";
+				}
+			}
+		}
+		
+		void lower_memcpy(MemCpyInst& memcpy_instr) {
+			auto len_op = memcpy_instr.getOperand(2);
+			auto const_len_op = dyn_cast_or_null<ConstantInt>(len_op);
+			if (const_len_op && const_len_op->getZExtValue() <= 1 /* not sure if 0 is possible */) {
+				// -> only copying one value, can be handled by OpCopyMemory
+				return;
+			}
+			
+			const TargetTransformInfo& TTI = getAnalysis<TargetTransformInfoWrapperPass>().getTTI(*func);
+			
+			// -> length is either constant > 1 or a dynamic length
+			if (const_len_op) {
+				if (auto simplified_len = libfloor_utils::simplify_const_integer_to_32bit(*const_len_op); simplified_len) {
+					const_len_op = simplified_len;
+				}
+				createMemCpyLoopKnownSize(&memcpy_instr,
+										  memcpy_instr.getRawSource(), memcpy_instr.getRawDest(), const_len_op,
+										  memcpy_instr.getSourceAlign().valueOrOne(), memcpy_instr.getDestAlign().valueOrOne(),
+										  memcpy_instr.isVolatile(), memcpy_instr.isVolatile(), TTI);
+			} else {
+				auto len_op = memcpy_instr.getLength();
+				if (auto simplified_len = libfloor_utils::simplify_integer_to_32bit(*len_op); simplified_len) {
+					len_op = simplified_len;
+				}
+				createMemCpyLoopUnknownSize(&memcpy_instr,
+											memcpy_instr.getRawSource(), memcpy_instr.getRawDest(), len_op,
+											memcpy_instr.getSourceAlign().valueOrOne(), memcpy_instr.getDestAlign().valueOrOne(),
+											memcpy_instr.isVolatile(), memcpy_instr.isVolatile(), TTI);
+			}
+			memcpy_instr.eraseFromParent();
 		}
 	};
 	
