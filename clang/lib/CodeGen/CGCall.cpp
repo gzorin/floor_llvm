@@ -5506,7 +5506,13 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
           if(src_as > 0 && src_as != param_type->getPointerAddressSpace()) {
             param_type = llvm::PointerType::get(cast<llvm::PointerType>(param_type->getScalarType())->getElementType(), src_as);
           }
-          V = Builder.CreateBitCast(V, param_type);
+          if (src_as == 0 && param_type->getPointerAddressSpace() > 0) {
+            // it's not ideal to emit an address space cast at all,
+            // but we have no other option here if src AS is 0
+            V = Builder.CreateAddrSpaceCast(V, param_type);
+          } else {
+            V = Builder.CreateBitCast(V, param_type);
+          }
         }
 
         IRCallArgs[FirstIRArg] = V;
