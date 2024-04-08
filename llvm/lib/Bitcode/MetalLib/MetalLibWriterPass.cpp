@@ -737,6 +737,22 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
 
     mpm.run(*cloned_mod);
 
+    // * strip floor_* calling convention from all functions and their users (replace it with C CC)
+    for (auto func_iter = cloned_mod->begin(); func_iter != cloned_mod->end();) {
+      auto& func = *func_iter;
+
+      if (func.getCallingConv() != CallingConv::C) {
+        func.setCallingConv(CallingConv::C);
+        for (auto user : func.users()) {
+          if (auto CB = dyn_cast<CallBase>(user)) {
+            CB->setCallingConv(CallingConv::C);
+          }
+        }
+      }
+
+      ++func_iter;
+    }
+
     // clean up metadata
     // * metadata of all entry points that no longer exist
     static constexpr const std::array<const char *, 3> entry_point_md_names{{
