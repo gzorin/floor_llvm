@@ -89,7 +89,6 @@ CODEGENOPT(EmitGcovArcs      , 1, 0) ///< Emit coverage data files, aka. GCDA.
 CODEGENOPT(EmitGcovNotes     , 1, 0) ///< Emit coverage "notes" files, aka GCNO.
 CODEGENOPT(EmitOpenCLArgMetadata , 1, 0) ///< Emit OpenCL kernel arg metadata.
 CODEGENOPT(MetalIntelWorkarounds , 1, 0) ///< Enable Intel GPU specific fixes and workarounds.
-CODEGENOPT(MetalNvidiaWorkarounds , 1, 0) ///< Enable Nvidia GPU specific fixes and workarounds.
 CODEGENOPT(MetalSoftPrintf , 1, 0) ///< Enables support of software printf emulation.
 CODEGENOPT(SPIRIntelWorkarounds , 1, 0) ///< Enable Intel SPIR specific fixes and workarounds.
 VALUE_CODEGENOPT(VulkanIUBSize, 32, 256) ///< max supported size of Vulkan inline uniform blocks

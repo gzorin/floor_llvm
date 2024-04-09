@@ -1838,7 +1838,6 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
                                 Args.hasArg(OPT_emit_spirv) ||
                                 Args.hasArg(OPT_emit_spirv_container));
   Opts.MetalIntelWorkarounds = Args.hasArg(OPT_metal_intel_workarounds);
-  Opts.MetalNvidiaWorkarounds = Args.hasArg(OPT_metal_nvidia_workarounds);
   Opts.MetalSoftPrintf = Args.hasArg(OPT_metal_soft_printf);
   Opts.SPIRIntelWorkarounds = Args.hasArg(OPT_cl_spir_intel_workarounds);
   Opts.VulkanIUBSize = uint32_t(std::min(uint64_t(~0u),
@@ -3173,7 +3172,7 @@ void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
       LangStd = LangStandard::lang_openclcpp10;
       break;
     case Language::Metal:
-      LangStd = LangStandard::lang_metal20;
+      LangStd = LangStandard::lang_metal30;
       break;
     case Language::Vulkan:
       LangStd = LangStandard::lang_vulkan13;
@@ -3257,29 +3256,14 @@ void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
     Opts.OpenCLCPlusPlusVersion = 202100;
 
   // as Metal is largely compiled as OpenCL, also enable + init opencl
-  if (LangStd == LangStandard::lang_metal20 ||
-      LangStd == LangStandard::lang_metal21 ||
-      LangStd == LangStandard::lang_metal22 ||
-      LangStd == LangStandard::lang_metal23 ||
-      LangStd == LangStandard::lang_metal24 ||
-      LangStd == LangStandard::lang_metal30 ||
+  if (LangStd == LangStandard::lang_metal30 ||
       LangStd == LangStandard::lang_metal31 ||
       IK.getLanguage() == Language::Metal) {
     Opts.Metal = 1;
     Opts.OpenCL = 1;
     Opts.OpenCLVersion = 120;
 
-    if (LangStd == LangStandard::lang_metal20)
-      Opts.MetalVersion = 200;
-    else if (LangStd == LangStandard::lang_metal21)
-      Opts.MetalVersion = 210;
-    else if (LangStd == LangStandard::lang_metal22)
-      Opts.MetalVersion = 220;
-    else if (LangStd == LangStandard::lang_metal23)
-      Opts.MetalVersion = 230;
-    else if (LangStd == LangStandard::lang_metal24)
-      Opts.MetalVersion = 240;
-    else if (LangStd == LangStandard::lang_metal30)
+    if (LangStd == LangStandard::lang_metal30)
       Opts.MetalVersion = 300;
     else if (LangStd == LangStandard::lang_metal31)
       Opts.MetalVersion = 310;
@@ -4647,7 +4631,7 @@ bool CompilerInvocation::CreateFromArgsImpl(
   }
 
   if (LangOpts.Metal && Res.getCodeGenOpts().getDebugInfo() != codegenoptions::NoDebugInfo) {
-    // dwarf version must always be 4 for Metal 2.x
+    // dwarf version must always be 4 for Metal 3.x
     Res.getCodeGenOpts().DwarfVersion = 4;
   }
 

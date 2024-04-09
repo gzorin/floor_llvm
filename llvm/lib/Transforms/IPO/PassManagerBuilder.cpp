@@ -227,7 +227,6 @@ PassManagerBuilder::PassManagerBuilder() {
     EnableCUDAPasses = false;
     EnableMetalPasses = false;
     EnableMetalIntelWorkarounds = false;
-    EnableMetalNvidiaWorkarounds = false;
     EnableSPIRPasses = false;
     EnableSPIRIntelWorkarounds = false;
     EnableVerifySPIR = false;
@@ -732,7 +731,7 @@ void PassManagerBuilder::populateModulePassManager(
   // run "first" passes that should run before all else
   // if(EnableCUDAPasses) --none
   if(EnableMetalPasses) {
-    MPM.add(createMetalFirstPass(EnableMetalIntelWorkarounds, EnableMetalNvidiaWorkarounds));
+    MPM.add(createMetalFirstPass(EnableMetalIntelWorkarounds));
   }
   // if(EnableSPIRPasses) --none
 
@@ -1130,7 +1129,7 @@ void PassManagerBuilder::populateModulePassManager(
     MPM.add(createVulkanFinalModuleCleanupPass());
   }
   if (EnableMetalPasses) {
-    MPM.add(createMetalFinalPass(EnableMetalIntelWorkarounds, EnableMetalNvidiaWorkarounds));
+    MPM.add(createMetalFinalPass(EnableMetalIntelWorkarounds));
     MPM.add(createMetalFinalModuleCleanupPass());
   }
 

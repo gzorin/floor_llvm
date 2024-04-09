@@ -723,6 +723,7 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
 	  std::array<uint32_t, 3> metal_version;
 	  std::array<uint32_t, 3> metal_language_version;
 	  const auto full_version = CGM.getLangOpts().MetalVersion;
+	  assert(full_version >= 300);
 	  metal_language_version = {{ full_version / 100u, (full_version % 100u) / 10u, full_version % 10u }};
 	  if (full_version == 310) {
 		  // Metal 3.1 uses an "air.version" of 2.6.0
@@ -751,20 +752,10 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
 	  llvm::NamedMDNode *AIRCompOpts = CGM.getModule().getOrInsertNamedMetadata("air.compile_options");
 	  AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.denorms_disable")));
 	  AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.fast_math_enable")));
-	  if (CGM.getLangOpts().MetalVersion < 230) {
-	    AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.framebuffer_fetch_disable")));
-	    AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.native_double_disable")));
-	    if (CGM.getLangOpts().MetalVersion >= 220) {
-	      AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.native_long_long_enable")));
-	      AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.native_wide_vectors_disable")));
-	    }
-	  } else {
-	    AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.framebuffer_fetch_enable")));
-	  }
+	  AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.framebuffer_fetch_enable")));
 
 	  // emit debug info
-	  if (CGM.getLangOpts().MetalVersion >= 240 &&
-	      CGM.getCodeGenOpts().getDebugInfo() != codegenoptions::NoDebugInfo) {
+	  if (CGM.getCodeGenOpts().getDebugInfo() != codegenoptions::NoDebugInfo) {
 	    // emit "air.source_file_name"
 	    llvm::NamedMDNode *AIRSourceFile = CGM.getModule().getOrInsertNamedMetadata("air.source_file_name");
 	    SmallVector <llvm::Metadata*, 1> air_source_file;
@@ -789,25 +780,23 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
 	    }
 	  }
 	  
-	  // AIR limits (since Metal 2.3)
-	  if (CGM.getLangOpts().MetalVersion >= 230) {
-	    llvm::NamedMDNode *ModuleFlags = CGM.getModule().getOrInsertNamedMetadata("llvm.module.flags");
-	    static const std::vector<std::pair<std::string, int>> limits {
-	      { "air.max_device_buffers", 31 },
-	      { "air.max_constant_buffers", 31 },
-	      { "air.max_threadgroup_buffers", 31 },
-	      { "air.max_textures", 128 },
-	      { "air.max_read_write_textures", 8 },
-	      { "air.max_samplers", 16 },
-	    };
-	    for (const auto& limit : limits) {
-	      SmallVector <llvm::Metadata*, 3> air_limit;
-	      air_limit.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(7)));
-	      air_limit.push_back(llvm::MDString::get(Context, limit.first));
-	      air_limit.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(limit.second)));
-	      ModuleFlags->addOperand(llvm::MDNode::get(Context, air_limit));
-	    }
-      }
+	  // AIR limits
+	  llvm::NamedMDNode *ModuleFlags = CGM.getModule().getOrInsertNamedMetadata("llvm.module.flags");
+	  static const std::vector<std::pair<std::string, int>> limits {
+	    { "air.max_device_buffers", 31 },
+	    { "air.max_constant_buffers", 31 },
+	    { "air.max_threadgroup_buffers", 31 },
+	    { "air.max_textures", 128 },
+	    { "air.max_read_write_textures", 8 },
+	    { "air.max_samplers", 16 },
+	  };
+	  for (const auto& limit : limits) {
+	    SmallVector <llvm::Metadata*, 3> air_limit;
+	    air_limit.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(7)));
+	    air_limit.push_back(llvm::MDString::get(Context, limit.first));
+	    air_limit.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(limit.second)));
+	    ModuleFlags->addOperand(llvm::MDNode::get(Context, air_limit));
+	  }
   }
 
   // additional vulkan info

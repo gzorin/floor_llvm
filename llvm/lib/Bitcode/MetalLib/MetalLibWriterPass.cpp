@@ -322,11 +322,6 @@ static bool is_used_in_function(const Function *F, const GlobalVariable *GV) {
 static const unordered_map<uint32_t,
                            pair<array<uint32_t, 3>, array<uint32_t, 3>>>
     metal_versions{
-        {200, {{{2, 0, 0}}, {{2, 0, 0}}}},
-        {210, {{{2, 1, 0}}, {{2, 1, 0}}}},
-        {220, {{{2, 2, 0}}, {{2, 2, 0}}}},
-        {230, {{{2, 3, 0}}, {{2, 3, 0}}}},
-        {240, {{{2, 4, 0}}, {{2, 4, 0}}}},
         // Metal 3.0 uses AIR 2.5
         {250, {{{2, 5, 0}}, {{3, 0, 0}}}},
         // Metal 3.1 uses AIR 2.6
@@ -415,20 +410,10 @@ compress_source_archive(const void *archive_ptr, const uint32_t archive_size) {
 void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   // get metal version
   Triple TT(M.getTargetTriple());
-  uint32_t target_air_version = 200;
+  uint32_t target_air_version = 250;
   if (TT.isiOS()) {
     auto ios_version = TT.getiOSVersion();
-    if (ios_version.getMajor() <= 11) {
-      target_air_version = 200;
-    } else if (ios_version.getMajor() == 12) {
-      target_air_version = 210;
-    } else if (ios_version.getMajor() == 13) {
-      target_air_version = 220;
-    } else if (ios_version.getMajor() == 14) {
-      target_air_version = 230;
-    } else if (ios_version.getMajor() == 15) {
-      target_air_version = 240;
-    } else if (ios_version.getMajor() >= 16) {
+    if (ios_version.getMajor() >= 16) {
       target_air_version = 250;
     } else if (ios_version.getMajor() >= 17) {
       target_air_version = 260;
@@ -444,18 +429,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     auto osx_minor = osx_version.getMinor().hasValue()
                          ? osx_version.getMinor().getValue()
                          : 0;
-    if (osx_version.getMajor() == 10 && osx_minor <= 13) {
-      target_air_version = 200;
-    } else if (osx_version.getMajor() == 10 && osx_minor == 14) {
-      target_air_version = 210;
-    } else if (osx_version.getMajor() == 10 && osx_minor == 15) {
-      target_air_version = 220;
-    } else if ((osx_version.getMajor() == 11 && osx_minor >= 0) ||
-               (osx_version.getMajor() == 10 && osx_minor >= 16)) {
-      target_air_version = 230;
-    } else if (osx_version.getMajor() == 12) {
-      target_air_version = 240;
-    } else if (osx_version.getMajor() == 13) {
+    if (osx_version.getMajor() == 13) {
       target_air_version = 250;
     } else if (osx_version.getMajor() >= 14) {
       target_air_version = 260;
@@ -524,10 +498,8 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   const uint32_t src_file_name_length = src_file_name.length() + 1u /* \0 */;
 
   // if we're building with debug info, emit .metallib specific debug info
-  // NOTE: for compat, only do this for Metal 2.4+
   const bool emit_debug_info =
-      (M.debug_compile_units_begin() != M.debug_compile_units_end() &&
-       target_air_version >= 240);
+      (M.debug_compile_units_begin() != M.debug_compile_units_end());
 
   // handle source files / archive creation
   std::pair<std::unique_ptr<uint8_t[]>, uint32_t> source_archive_data{nullptr,
@@ -722,13 +694,11 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     cloned_mod->setSourceFileName(func->getName());
 
     // update data layout
-    if (target_air_version >= 230) {
-      cloned_mod->setDataLayout(
-          "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-"
-          "f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:"
-          "128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:"
-          "1024-n8:16:32");
-    }
+    cloned_mod->setDataLayout(
+        "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-"
+        "f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:"
+        "128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:"
+        "1024-n8:16:32");
 
     // remove all unused functions and global vars, since CloneModule only sets
     // unused vars to external linkage and unused funcs are declarations only
@@ -816,20 +786,16 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       }
     }
     // * set fake compiler ident
-    if (target_air_version >= 230) {
-      if (auto llvm_ident = cloned_mod->getNamedMetadata("llvm.ident")) {
-        if (MDNode *ident_op = llvm_ident->getOperand(0)) {
-          static const std::unordered_map<uint32_t, const char *>
-              ident_versions{
-                  {230, "Apple LLVM version 31001.143 (metalfe-31001.143)"},
-                  {240, "Apple metal version 31001.363 (metalfe-31001.363)"},
-                  {250, "Apple metal version 31001.638 (metalfe-31001.638.1)"},
-                  {260, "Apple metal version 32023.155 (metalfe-32023.155)"},
-              };
-          ident_op->replaceOperandWith(
-              0, llvm::MDString::get(cloned_mod->getContext(),
-                                     ident_versions.at(target_air_version)));
-        }
+    if (auto llvm_ident = cloned_mod->getNamedMetadata("llvm.ident")) {
+      if (MDNode *ident_op = llvm_ident->getOperand(0)) {
+        static const std::unordered_map<uint32_t, const char *>
+            ident_versions{
+                {250, "Apple metal version 31001.638 (metalfe-31001.638.1)"},
+                {260, "Apple metal version 32023.155 (metalfe-32023.155)"},
+            };
+        ident_op->replaceOperandWith(
+            0, llvm::MDString::get(cloned_mod->getContext(),
+                                   ident_versions.at(target_air_version)));
       }
     }
     // * kill other named metadata that is no longer needed
@@ -1073,27 +1039,27 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       .container_version_major = 1,
       .is_macos_target = TT.isMacOSX(),
       .container_version_minor = 2,
-      .container_version_bugfix = uint16_t(target_air_version < 250 ? 6u : 7u),
+      .container_version_bugfix = 7u,
       .file_type = 0,    // always "execute"
       .is_stub = false,  // never stub
       .is_64_bit = true, // always 64-bit
   };
   VersionTuple platform_version;
   if (TT.isMacOSX()) {
-    header.platform = 1u;
+    header.platform = uint32_t(metal::APPLE_PLATFORM::MACOS);
     TT.getMacOSXVersion(platform_version);
   } else if (TT.isiOS()) {
-    header.platform = 2u;
+    header.platform = uint32_t(metal::APPLE_PLATFORM::IOS);
     platform_version = TT.getiOSVersion();
   } else if (TT.isTvOS()) {
-    header.platform = 3u;
+    header.platform = uint32_t(metal::APPLE_PLATFORM::TVOS);
     platform_version = TT.getiOSVersion();
   } else if (TT.isWatchOS()) {
-    header.platform = 4u;
+    header.platform = uint32_t(metal::APPLE_PLATFORM::WATCHOS);
     platform_version = TT.getWatchOSVersion();
 #if 0 // some day
   } else if (TT.isXROS()) {
-    header.platform = 12u;
+    header.platform = uint32_t(metal::APPLE_PLATFORM::XROS);
     platform_version = TT.getXROSVersion();
 #endif
   } else {
@@ -1112,9 +1078,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
 
   // file length
   uint64_t ext_program_md_size = sizeof(TAG_TYPE) /* ENDT */;
-  if (target_air_version >= 240) {
-    ext_program_md_size += (4 + 2 + 16) /* UUID */;
-  }
+  ext_program_md_size += (4 + 2 + 16) /* UUID */;
   if (emit_debug_info) {
     ext_program_md_size += (4 + 2 + 16) /* HSRD */;
   }
@@ -1174,27 +1138,25 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       OS.write((const char *)&src_archives_length, sizeof(uint64_t));
     }
 
-    // write UUID for Metal 2.4+
-    if (target_air_version >= 240) {
-      // NOTE: Apple doesn't actually care about UUID variants and versions,
-      // so just fill this with random, but still signal variant 1 + version 4
-      random_device rd{};
-      mt19937 gen{rd()};
-      uniform_int_distribution<uint8_t> dist(0u, 0xFFu);
-      raw_ostream::uuid_t program_uuid;
-      for (auto &ch : program_uuid) {
-        ch = dist(gen);
-      }
-      program_uuid[6] = (4u /* version */ << 4u) | (program_uuid[6] & 0x0Fu);
-      program_uuid[8] = (0b10 /* variant */ << 6u) | (program_uuid[8] & 0x3Fu);
-
-      // write
-      const auto UUID_tag = TAG_TYPE::UUID;
-      OS.write((const char *)&UUID_tag, sizeof(TAG_TYPE));
-      OS.write(0x10);
-      OS.write(0x0);
-      OS.write((const char *)&program_uuid, sizeof(program_uuid));
+    // write UUID
+    // NOTE: Apple doesn't actually care about UUID variants and versions,
+    // so just fill this with random, but still signal variant 1 + version 4
+    random_device rd{};
+    mt19937 gen{rd()};
+    uniform_int_distribution<uint8_t> dist(0u, 0xFFu);
+    raw_ostream::uuid_t program_uuid;
+    for (auto &ch : program_uuid) {
+      ch = dist(gen);
     }
+    program_uuid[6] = (4u /* version */ << 4u) | (program_uuid[6] & 0x0Fu);
+    program_uuid[8] = (0b10 /* variant */ << 6u) | (program_uuid[8] & 0x3Fu);
+
+    // write
+    const auto UUID_tag = TAG_TYPE::UUID;
+    OS.write((const char *)&UUID_tag, sizeof(TAG_TYPE));
+    OS.write(0x10);
+    OS.write(0x0);
+    OS.write((const char *)&program_uuid, sizeof(program_uuid));
 
     // write ENDT
     // NOTE: this is not included by the "programs_length"

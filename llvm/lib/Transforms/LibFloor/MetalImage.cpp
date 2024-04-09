@@ -112,9 +112,9 @@ namespace {
 					return "texture_cube";
 				case COMPUTE_IMAGE_TYPE::IMAGE_CUBE_ARRAY:
 					return "texture_cube_array";
-				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_MSAA_ARRAY: // since Metal 2.1
+				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_MSAA_ARRAY:
 					return "depth2d_ms_array";
-				case COMPUTE_IMAGE_TYPE::IMAGE_2D_MSAA_ARRAY: // since Metal 2.1
+				case COMPUTE_IMAGE_TYPE::IMAGE_2D_MSAA_ARRAY:
 					return "texture2d_ms_array";
 				default:
 					return nullptr;
@@ -382,11 +382,9 @@ namespace {
 					}
 				}
 				
-				if (is_metal_2_3) {
-					// Metal 2.3+ has an additional (unknown) i32 0 argument
-					func_arg_types.push_back(llvm::Type::getInt32Ty(*ctx));
-					func_args.push_back(builder->getInt32(0));
-				}
+				// additional (unknown) i32 0 argument
+				func_arg_types.push_back(llvm::Type::getInt32Ty(*ctx));
+				func_args.push_back(builder->getInt32(0));
 			}
 			else {
 				// -> sample
@@ -398,11 +396,9 @@ namespace {
 					func_arg_types.push_back(dpdy_arg->getType());
 					func_args.push_back(dpdy_arg);
 					
-					if (is_metal_2_4) {
-						// Metal 2.4 has an additional "min LOD clamp" f32 argument -> set to 0.0 for now
-						func_arg_types.push_back(llvm::Type::getFloatTy(*ctx));
-						func_args.push_back(ConstantFP::get(llvm::Type::getFloatTy(*ctx), 0.0f));
-					}
+					// additional "min LOD clamp" f32 argument -> set to 0.0 for now
+					func_arg_types.push_back(llvm::Type::getFloatTy(*ctx));
+					func_args.push_back(ConstantFP::get(llvm::Type::getFloatTy(*ctx), 0.0f));
 				}
 				
 				// -> offset
@@ -415,7 +411,7 @@ namespace {
 				}
 				
 				// -> lod / bias
-				if(!is_gradient) {
+				if (!is_gradient) {
 					// lod or bias?
 					func_arg_types.push_back(llvm::Type::getInt1Ty(*ctx));
 					func_args.push_back(builder->getInt1(is_lod_or_bias));
@@ -431,27 +427,20 @@ namespace {
 						func_arg_types.push_back(lod_or_bias_arg->getType());
 						func_args.push_back(lod_or_bias_arg);
 					}
+					
+					// additional (unknown) f32 0.0 argument
+					func_arg_types.push_back(llvm::Type::getFloatTy(*ctx));
+					func_args.push_back(ConstantFP::get(llvm::Type::getFloatTy(*ctx), 0.0f));
 				}
 				
-				if (is_metal_2_3) {
-					// Metal 2.3 has an additional (unknown) f32 0.0 argument
-					// NOTE: do not emit this for Metal 2.4+ when a gradient is used
-					if (!is_metal_2_4 || (is_metal_2_4 && !is_gradient)) {
-						func_arg_types.push_back(llvm::Type::getFloatTy(*ctx));
-						func_args.push_back(ConstantFP::get(llvm::Type::getFloatTy(*ctx), 0.0f));
-					}
-				}
-				
-				// Metal 2.0+ has an additional (unknown) i32 0 argument
+				// an additional (unknown) i32 0 argument
 				func_arg_types.push_back(llvm::Type::getInt32Ty(*ctx));
 				func_args.push_back(builder->getInt32(0));
 			}
 			
-			// Metal 2.3+: return type is now always { <sample/read-type>, i8 }
-			if (is_metal_2_3) {
-				ret_type = llvm::StructType::get(*ctx, { ret_type, llvm::Type::getInt8Ty(*ctx) }, false /* !packed */);
-				assert(((llvm::StructType*)ret_type)->isLiteral() && "must be literal");
-			}
+			// return type is now always { <sample/read-type>, i8 }
+			ret_type = llvm::StructType::get(*ctx, { ret_type, llvm::Type::getInt8Ty(*ctx) }, false /* !packed */);
+			assert(((llvm::StructType*)ret_type)->isLiteral() && "must be literal");
 			
 			// -> build read func name
 			std::string read_func_name = "air.";
@@ -487,10 +476,8 @@ namespace {
 			
 			// if this is a depth read/sample, the return type is a float -> create a float4
 			llvm::Value* read_call_result = read_call;
-			if (is_metal_2_3) {
-				// we always ignore the i8 return value -> extract are wanted result
-				read_call_result = builder->CreateExtractValue(read_call_result, { 0 });
-			}
+			// we always ignore the i8 return value -> extract are wanted result
+			read_call_result = builder->CreateExtractValue(read_call_result, { 0 });
 			if(is_depth) {
 				auto undef_vec = UndefValue::get(llvm::FixedVectorType::get(llvm::Type::getFloatTy(*ctx), 4));
 				read_call_result = builder->CreateInsertElement(undef_vec, read_call_result, builder->getInt32(0));
@@ -633,11 +620,9 @@ namespace {
 				func_args.push_back(lod_arg);
 			}
 			
-			if (is_metal_2_3) {
-				// Metal 2.3+ has an additional rounding mode argument (always set to 0 for now, or 2 if depth)
-				func_arg_types.push_back(llvm::Type::getInt32Ty(*ctx));
-				func_args.push_back(builder->getInt32(!is_depth ? 0 : 2));
-			}
+			// additional rounding mode argument (always set to 0 for now, or 2 if depth)
+			func_arg_types.push_back(llvm::Type::getInt32Ty(*ctx));
+			func_args.push_back(builder->getInt32(!is_depth ? 0 : 2));
 			
 			// -> build write func name
 			const std::string write_func_name = "air.write_" + geom + '.' + dtype;

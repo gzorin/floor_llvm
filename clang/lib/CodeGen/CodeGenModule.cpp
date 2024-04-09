@@ -3333,13 +3333,11 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				arg_info.push_back(llvm::MDString::get(VMContext, "air.read_write"));
 			}
 			
-			// Metal 3.0+: address space
-			if (getLangOpts().MetalVersion >= 300) {
-				arg_info.push_back(llvm::MDString::get(VMContext, "air.address_space"));
-				arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(llvm_type->getPointerAddressSpace())));
-			}
+			// #6/#7: address space
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.address_space"));
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(llvm_type->getPointerAddressSpace())));
 			
-			// #6/#7: struct info
+			// #8/#9: struct info
 			if (const auto pointee_rdecl = clang_pointee_type->getAsCXXRecordDecl()) {
 				uint32_t arg_idx_child = 0, buffer_or_tex_idx_child = 0; // for indirect/arg buffers
 				auto struct_type_info = add_struct_type_info(*pointee_rdecl, decl, is_indirect, indirect_buffer, indirect_struct_type_info,
@@ -3350,21 +3348,21 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				}
 			}
 			
-			// #8/#9: type size
+			// #10/#11: type size
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_size"));
 			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(getDataLayout().getTypeStoreSize(llvm_pointee_type))));
-			// #10/#11: type alignment
+			// #12/#13: type alignment
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_align_size"));
 			// max out at 16, anything higher is unreasonable
 			// TODO: make sure this is POT
 			const auto align_size = std::min(getDataLayout().getTypeAllocSize(llvm_pointee_type).getFixedValue(), uint64_t(16));
 			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(align_size)));
 			//getPrimitiveSizeInBits
-			// #12/#13: type name
+			// #14/#15: type name
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
 			// NOTE: air wants the pointed-to/pointee type here
 			arg_info.push_back(llvm::MDString::get(VMContext, make_type_name(clang_pointee_type)));
-			// #14/#15: arg name
+			// #16/#17: arg name
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
 			arg_info.push_back(llvm::MDString::get(VMContext, decl.getName()));
 			return arg_info;
@@ -3584,11 +3582,9 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(1)));
 		// #5: access
 		arg_info.push_back(llvm::MDString::get(VMContext, "air.read_write"));
-		// Metal 3.0+: address space
-		if (getLangOpts().MetalVersion >= 300) {
-			arg_info.push_back(llvm::MDString::get(VMContext, "air.address_space"));
-			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(1)));
-		}
+		// #6/#7: address space
+		arg_info.push_back(llvm::MDString::get(VMContext, "air.address_space"));
+		arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(1)));
 		// #8/#9: type size
 		arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_size"));
 		arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(4)));
@@ -3610,7 +3606,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 	// https://developer.apple.com/metal/limits/
 	const bool is_osx = (getModule().getTargetTriple().find("macosx") != std::string::npos);
 	const uint32_t buf_limit = 31;
-	const uint32_t tex_limit = (is_osx || getLangOpts().MetalVersion >= 300 ? 128 : 31);
+	const uint32_t tex_limit = 128;
 	if (buffer_idx > buf_limit) {
 		Error(FD->getSourceRange().getBegin(),
 			  StringRef("can't use more than " + std::to_string(buf_limit) + " buffers per function"));
@@ -3647,13 +3643,10 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		add_id_arg("__metal__group_id__", "air.threadgroup_position_in_grid", "uint3");
 		add_id_arg("__metal__group_size__", "air.threadgroups_per_grid", "uint3");
 		
-		if (getTriple().getOS() == llvm::Triple::OSType::MacOSX ||
-			getLangOpts().MetalVersion >= 300) {
-			add_id_arg("__metal__sub_group_id__", "air.simdgroup_index_in_threadgroup", "uint");
-			add_id_arg("__metal__sub_group_local_id__", "air.thread_index_in_simdgroup", "uint");
-			add_id_arg("__metal__sub_group_size__", "air.threads_per_simdgroup", "uint");
-			add_id_arg("__metal__num_sub_groups__", "air.simdgroups_per_threadgroup", "uint");
-		}
+		add_id_arg("__metal__sub_group_id__", "air.simdgroup_index_in_threadgroup", "uint");
+		add_id_arg("__metal__sub_group_local_id__", "air.thread_index_in_simdgroup", "uint");
+		add_id_arg("__metal__sub_group_size__", "air.threads_per_simdgroup", "uint");
+		add_id_arg("__metal__num_sub_groups__", "air.simdgroups_per_threadgroup", "uint");
 	} else if (is_vertex || is_tess_eval) {
 		if (is_vertex) {
 			SmallVector<llvm::Metadata*, 6> arg_info;
@@ -3916,22 +3909,20 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		kernelMDArgs.push_back(llvm::MDNode::get(VMContext, patch_infos));
 	}
 	
-	// Metal 2.1+ supports defining a max work-group size via max_total_threads_per_threadgroup/air.max_work_group_size
+	// Metal supports defining a max work-group size via max_total_threads_per_threadgroup/air.max_work_group_size
 	if (const ReqdWorkGroupSizeAttr *reg_local_size = FD->getAttr<ReqdWorkGroupSizeAttr>()) {
-		if (getLangOpts().MetalVersion >= 210) {
-			// NOTE: this is a 1D extent, not a 3D size
-			const uint32_t max_work_group_size {
-				std::max(1u, reg_local_size->getXDim()) *
-				std::max(1u, reg_local_size->getYDim()) *
-				std::max(1u, reg_local_size->getZDim())
-			};
-			
-			SmallVector<llvm::Metadata*, 7> max_work_group_size_info;
-			max_work_group_size_info.push_back(llvm::MDString::get(VMContext, "air.max_work_group_size"));
-			max_work_group_size_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(max_work_group_size)));
-			
-			kernelMDArgs.push_back(llvm::MDNode::get(VMContext, max_work_group_size_info));
-		}
+		// NOTE: this is a 1D extent, not a 3D size
+		const uint32_t max_work_group_size {
+			std::max(1u, reg_local_size->getXDim()) *
+			std::max(1u, reg_local_size->getYDim()) *
+			std::max(1u, reg_local_size->getZDim())
+		};
+		
+		SmallVector<llvm::Metadata*, 7> max_work_group_size_info;
+		max_work_group_size_info.push_back(llvm::MDString::get(VMContext, "air.max_work_group_size"));
+		max_work_group_size_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(max_work_group_size)));
+		
+		kernelMDArgs.push_back(llvm::MDNode::get(VMContext, max_work_group_size_info));
 	}
 }
 
@@ -4411,7 +4402,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 									}
 									assert(agg_img_ret->arg_index_bias == 0); // this is the case when only have read-only or write-only
 									this_arg_buf_info << agg_img_ret->arg_info << ",";
-								} else if (CGM.getLangOpts().Vulkan && field_type->isArrayBufferType()) {
+								} else if ((CGM.getLangOpts().Vulkan || CGM.getLangOpts().Metal) && field_type->isArrayBufferType()) {
 									const auto array_buffer_info = get_array_buffer_info(field_type, field_type->getAsCXXRecordDecl(), getContext());
 									if (array_buffer_info) {
 										uint64_t field_arg_info = (uint64_t)FLOOR_ARG_INFO::BUFFER_ARRAY;

@@ -74,6 +74,23 @@ enum TAG_TYPE : uint32_t {
 };
 #undef make_tag_type
 
+//! Apple platform targets
+//! in recent LLVM versions, this is defined here: https://github.com/llvm/llvm-project/blob/main/llvm/include/llvm/BinaryFormat/MachO.def#L123
+enum class APPLE_PLATFORM : uint32_t {
+	MACOS = 1,
+	IOS = 2,
+	TVOS = 3,
+	WATCHOS = 4,
+	BRIDGEOS = 5,
+	MAC_CATALYST = 6,
+	IOS_SIMULATOR = 7,
+	TVOS_SIMULATOR = 8,
+	WATCHOS_SIMULATOR = 9,
+	DRIVERKIT = 10,
+	XROS = 11,
+	XROS_SIMULATOR = 12,
+};
+
 enum class DATA_TYPE : uint8_t {
 	INVALID = 0,
 	

@@ -788,7 +788,6 @@ void EmitAssemblyHelper::CreatePasses(legacy::PassManager &MPM,
   // only enable this for Metal/AIR
   PMBuilder.EnableMetalPasses = LangOpts.Metal;
   PMBuilder.EnableMetalIntelWorkarounds = CodeGenOpts.MetalIntelWorkarounds;
-  PMBuilder.EnableMetalNvidiaWorkarounds = CodeGenOpts.MetalNvidiaWorkarounds;
   
   // only enable this for OpenCL/SPIR and Vulkan/SPIR-V (don't want this for Metal)
   PMBuilder.EnableSPIRPasses = (LangOpts.OpenCL &&

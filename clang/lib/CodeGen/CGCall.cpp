@@ -467,12 +467,7 @@ uint32_t CodeGenTypes::getMetalVulkanImplicitArgCount(const FunctionDecl* FD) co
   if (LangOpts.Metal) {
     const uint32_t printf_arg = (CodeGenOpts.MetalSoftPrintf > 0 ? 1 : 0);
     if (FD->hasAttr<ComputeKernelAttr>() || FD->hasAttr<GraphicsTessellationControlShaderAttr>()) {
-      if (CGM.getTriple().getOS() == llvm::Triple::OSType::MacOSX ||
-          LangOpts.MetalVersion >= 300) {
-        return 10 + printf_arg;
-      } else {
-        return 6 + printf_arg;
-      }
+      return 10 + printf_arg;
     } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
       return 2 + printf_arg;
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
@@ -565,14 +560,11 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       add_arg(int3_type, "__metal__local_size__");
       add_arg(int3_type, "__metal__group_id__");
       add_arg(int3_type, "__metal__group_size__");
-      if (CGM.getTriple().getOS() == llvm::Triple::OSType::MacOSX ||
-          LangOpts.MetalVersion >= 300) {
-        // SIMD-group / sub-group ids
-        add_arg(Ctx.IntTy, "__metal__sub_group_id__");
-        add_arg(Ctx.IntTy, "__metal__sub_group_local_id__");
-        add_arg(Ctx.IntTy, "__metal__sub_group_size__");
-        add_arg(Ctx.IntTy, "__metal__num_sub_groups__");
-      }
+      // SIMD-group / sub-group ids
+      add_arg(Ctx.IntTy, "__metal__sub_group_id__");
+      add_arg(Ctx.IntTy, "__metal__sub_group_local_id__");
+      add_arg(Ctx.IntTy, "__metal__sub_group_size__");
+      add_arg(Ctx.IntTy, "__metal__num_sub_groups__");
     } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
       // only vertex id and instance id for now:
       add_arg(Ctx.IntTy, "__metal__vertex_id__");

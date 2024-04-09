@@ -189,7 +189,6 @@ public:
   bool EnableCUDAPasses;
   bool EnableMetalPasses;
   bool EnableMetalIntelWorkarounds;
-  bool EnableMetalNvidiaWorkarounds;
   bool EnableSPIRPasses;
   bool EnableSPIRIntelWorkarounds;
   bool EnableVerifySPIR;

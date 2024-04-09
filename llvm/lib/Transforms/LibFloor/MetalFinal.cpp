@@ -232,7 +232,7 @@ namespace {
 		friend class InstVisitor<MetalFirst>;
 		
 		static char ID; // Pass identification, replacement for typeid
-		const bool enable_intel_workarounds, enable_nvidia_workarounds;
+		const bool enable_intel_workarounds;
 		
 		Module* M { nullptr };
 		LLVMContext* ctx { nullptr };
@@ -244,11 +244,9 @@ namespace {
 		bool is_tess_control_func { false };
 		bool is_tess_eval_func { false };
 		
-		MetalFirst(const bool enable_intel_workarounds_ = false,
-				   const bool enable_nvidia_workarounds_ = false) :
+		MetalFirst(const bool enable_intel_workarounds_ = false) :
 		FunctionPass(ID),
-		enable_intel_workarounds(enable_intel_workarounds_),
-		enable_nvidia_workarounds(enable_nvidia_workarounds_) {
+		enable_intel_workarounds(enable_intel_workarounds_) {
 			initializeMetalFirstPass(*PassRegistry::getPassRegistry());
 		}
 		
@@ -285,7 +283,7 @@ namespace {
 		friend class InstVisitor<MetalFinal>;
 		
 		static char ID; // Pass identification, replacement for typeid
-		const bool enable_intel_workarounds, enable_nvidia_workarounds;
+		const bool enable_intel_workarounds;
 		
 		std::shared_ptr<llvm::IRBuilder<>> builder;
 		
@@ -332,11 +330,9 @@ namespace {
 			Argument* soft_printf { nullptr };
 		} state;
 		
-		MetalFinal(const bool enable_intel_workarounds_ = false,
-				   const bool enable_nvidia_workarounds_ = false) :
+		MetalFinal(const bool enable_intel_workarounds_ = false) :
 		FunctionPass(ID),
-		enable_intel_workarounds(enable_intel_workarounds_),
-		enable_nvidia_workarounds(enable_nvidia_workarounds_) {
+		enable_intel_workarounds(enable_intel_workarounds_) {
 			initializeMetalFinalPass(*PassRegistry::getPassRegistry());
 		}
 		
@@ -427,8 +423,7 @@ namespace {
 		}
 		
 		enum METAL_KERNEL_ARG_REV_IDX : int32_t {
-			METAL_KERNEL_ARG_COUNT = 6,
-			METAL_KERNEL_SUB_GROUPS_ARG_COUNT = 10,
+			METAL_KERNEL_ARG_COUNT = 10,
 		};
 		
 		enum METAL_VERTEX_ARG_REV_IDX : int32_t {
@@ -476,19 +471,6 @@ namespace {
 				return &*arg_iter;
 			};
 			
-			// check for sub-group support
-			const auto triple = llvm::Triple(M->getTargetTriple());
-			bool has_sub_group_support = false;
-			if (triple.getArch() == Triple::ArchType::air64) {
-				if (triple.getOS() == Triple::OSType::MacOSX) {
-					has_sub_group_support = true;
-				} else if (triple.getOS() == Triple::OSType::IOS &&
-						   triple.getiOSVersion().getMajor() >= 16) {
-					// supported since Metal 3.0+ (requiring an Apple6+ GPU)
-					has_sub_group_support = true;
-				}
-			}
-			
 			// check for optional features: soft-printf, primitive id, barycentric coord
 			bool has_soft_printf = false, has_primitive_id = false, has_barycentric_coord = false;
 			if (auto soft_printf_meta = M->getNamedMetadata("floor.soft_printf")) {
@@ -513,14 +495,12 @@ namespace {
 					assert((is_kernel_func && state.kernel_dim >= 1 && state.kernel_dim <= 3) ||
 						   (is_tess_control_func && state.kernel_dim == 1));
 				}
-				if (F.arg_size() >= (has_sub_group_support ? METAL_KERNEL_SUB_GROUPS_ARG_COUNT : METAL_KERNEL_ARG_COUNT) + (has_soft_printf ? 1 : 0)) {
+				if (F.arg_size() >= METAL_KERNEL_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
 					int32_t rev_idx = -1;
-					if (has_sub_group_support) {
-						state.num_sub_groups = get_arg_by_idx(rev_idx--);
-						state.sub_group_size = get_arg_by_idx(rev_idx--);
-						state.sub_group_local_id = get_arg_by_idx(rev_idx--);
-						state.sub_group_id = get_arg_by_idx(rev_idx--);
-					}
+					state.num_sub_groups = get_arg_by_idx(rev_idx--);
+					state.sub_group_size = get_arg_by_idx(rev_idx--);
+					state.sub_group_local_id = get_arg_by_idx(rev_idx--);
+					state.sub_group_id = get_arg_by_idx(rev_idx--);
 					state.group_size = get_arg_by_idx(rev_idx--);
 					state.group_id = get_arg_by_idx(rev_idx--);
 					state.local_size = get_arg_by_idx(rev_idx--);
@@ -1452,17 +1432,15 @@ namespace {
 }
 
 char MetalFirst::ID = 0;
-FunctionPass *llvm::createMetalFirstPass(const bool enable_intel_workarounds,
-										 const bool enable_nvidia_workarounds) {
-	return new MetalFirst(enable_intel_workarounds, enable_nvidia_workarounds);
+FunctionPass *llvm::createMetalFirstPass(const bool enable_intel_workarounds) {
+	return new MetalFirst(enable_intel_workarounds);
 }
 INITIALIZE_PASS_BEGIN(MetalFirst, "MetalFirst", "MetalFirst Pass", false, false)
 INITIALIZE_PASS_END(MetalFirst, "MetalFirst", "MetalFirst Pass", false, false)
 
 char MetalFinal::ID = 0;
-FunctionPass *llvm::createMetalFinalPass(const bool enable_intel_workarounds,
-										 const bool enable_nvidia_workarounds) {
-	return new MetalFinal(enable_intel_workarounds, enable_nvidia_workarounds);
+FunctionPass *llvm::createMetalFinalPass(const bool enable_intel_workarounds) {
+	return new MetalFinal(enable_intel_workarounds);
 }
 INITIALIZE_PASS_BEGIN(MetalFinal, "MetalFinal", "MetalFinal Pass", false, false)
 INITIALIZE_PASS_END(MetalFinal, "MetalFinal", "MetalFinal Pass", false, false)

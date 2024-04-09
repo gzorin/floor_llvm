@@ -256,8 +256,8 @@ namespace {
       (void) llvm::createAddressSpaceFixPass();
       (void) llvm::createCUDAImagePass(0);
       (void) llvm::createCUDAFinalPass();
-      (void) llvm::createMetalFirstPass(false, false);
-      (void) llvm::createMetalFinalPass(false, false);
+      (void) llvm::createMetalFirstPass(false);
+      (void) llvm::createMetalFinalPass(false);
       (void) llvm::createMetalFinalModuleCleanupPass();
       (void) llvm::createMetalImagePass(0);
       (void) llvm::createSPIRFinalPass();

@@ -82,7 +82,7 @@ static cl::opt<bool> PreserveAssemblyUseListOrder(
       [bugfix version: uint16_t]
  [flags]
       [flags #1: 1:7 bit-field (uint8_t), MSB: stub flag, rest: file type (0 is metallib executable)s]
-      [flags #2: 1:7 bit-field (uint8_t), MSB: 64-bit flag, rest: platform (macOS: 1, iOS: 2, tvOS: 3, watchOS: 4]
+      [flags #2: 1:7 bit-field (uint8_t), MSB: 64-bit flag, rest: APPLE_PLATFORM (macOS: 1, iOS: 2, tvOS: 3, watchOS: 4, ...)]
  [platform version: 16:8:8 bit-field (32-bit) = major.minor.update]
  
  header:
@@ -409,21 +409,41 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	os << '\n';
 	os << "platform: ";
 	switch (header.version.platform) {
-		case 1:
+		case uint32_t(metal::APPLE_PLATFORM::MACOS):
 			os << "macOS";
 			break;
-		case 2:
+		case uint32_t(metal::APPLE_PLATFORM::IOS):
 			os << "iOS";
 			break;
-		case 3:
+		case uint32_t(metal::APPLE_PLATFORM::TVOS):
 			os << "tvOS";
 			break;
-		case 4:
+		case uint32_t(metal::APPLE_PLATFORM::WATCHOS):
 			os << "watchOS";
 			break;
-		case 11:
-		case 12:
+		case uint32_t(metal::APPLE_PLATFORM::BRIDGEOS):
+			os << "bridgeOS";
+			break;
+		case uint32_t(metal::APPLE_PLATFORM::MAC_CATALYST):
+			os << "Mac Catalyst";
+			break;
+		case uint32_t(metal::APPLE_PLATFORM::IOS_SIMULATOR):
+			os << "iOS (Simulator)";
+			break;
+		case uint32_t(metal::APPLE_PLATFORM::TVOS_SIMULATOR):
+			os << "tvOS (Simulator)";
+			break;
+		case uint32_t(metal::APPLE_PLATFORM::WATCHOS_SIMULATOR):
+			os << "watchOS (Simulator)";
+			break;
+		case uint32_t(metal::APPLE_PLATFORM::DRIVERKIT):
+			os << "DriverKit";
+			break;
+		case uint32_t(metal::APPLE_PLATFORM::XROS):
 			os << "visionOS";
+			break;
+		case uint32_t(metal::APPLE_PLATFORM::XROS_SIMULATOR):
+			os << "visionOS (Simulator)";
 			break;
 		default:
 			os << "unknown (" << (uint32_t)header.version.platform << ")";

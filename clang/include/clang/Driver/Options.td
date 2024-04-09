@@ -5980,8 +5980,6 @@ def fno_cuda_host_device_constexpr : Flag<["-"], "fno-cuda-host-device-constexpr
 
 def metal_intel_workarounds : Flag<["-"], "metal-intel-workarounds">,
   HelpText<"Enable Intel GPU specific fixes and workarounds">;
-def metal_nvidia_workarounds : Flag<["-"], "metal-nvidia-workarounds">,
-  HelpText<"Enable Nvidia GPU specific fixes and workarounds">;
 def metal_soft_printf : Flag<["-"], "metal-soft-printf">,
   HelpText<"Enables support of software printf emulation">;
 

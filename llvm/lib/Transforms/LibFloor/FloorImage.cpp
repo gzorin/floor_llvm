@@ -86,25 +86,6 @@ bool FloorImageBasePass::runOnFunction(Function &F) {
 	const auto triple = llvm::Triple(M->getTargetTriple());
 	if (triple.getArch() == Triple::ArchType::air64) {
 		is_metal = true;
-		if (triple.getOS() == Triple::OSType::IOS) {
-			auto version = triple.getiOSVersion();
-			if (version.getMajor() >= 14) {
-				is_metal_2_3 = true;
-			}
-			if (version.getMajor() >= 15) {
-				is_metal_2_4 = true;
-			}
-		} else if (triple.getOS() == Triple::OSType::MacOSX) {
-			VersionTuple version {};
-			if (triple.getMacOSXVersion(version)) {
-				if (version.getMajor() >= 11) {
-					is_metal_2_3 = true;
-				}
-				if (version.getMajor() >= 12) {
-					is_metal_2_4 = true;
-				}
-			}
-		}
 	}
 	
 	{

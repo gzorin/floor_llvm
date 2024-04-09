@@ -214,21 +214,6 @@ LANGSTANDARD_ALIAS_DEPR(openclcpp10, "CLC++1.0")
 LANGSTANDARD_ALIAS_DEPR(openclcpp2021, "CLC++2021")
 
 // Metal
-LANGSTANDARD(metal20, "metal2.0", Metal, "Metal 2.0",
-             LineComment | CPlusPlus | CPlusPlus11 | CPlusPlus14 | CPlusPlus17 |
-             CPlusPlus20 | CPlusPlus2b | Digraphs | HexFloat | GNUMode | OpenCL)
-LANGSTANDARD(metal21, "metal2.1", Metal, "Metal 2.1",
-             LineComment | CPlusPlus | CPlusPlus11 | CPlusPlus14 | CPlusPlus17 |
-             CPlusPlus20 | CPlusPlus2b | Digraphs | HexFloat | GNUMode | OpenCL)
-LANGSTANDARD(metal22, "metal2.2", Metal, "Metal 2.2",
-             LineComment | CPlusPlus | CPlusPlus11 | CPlusPlus14 | CPlusPlus17 |
-             CPlusPlus20 | CPlusPlus2b | Digraphs | HexFloat | GNUMode | OpenCL)
-LANGSTANDARD(metal23, "metal2.3", Metal, "Metal 2.3",
-             LineComment | CPlusPlus | CPlusPlus11 | CPlusPlus14 | CPlusPlus17 |
-             CPlusPlus20 | CPlusPlus2b | Digraphs | HexFloat | GNUMode | OpenCL)
-LANGSTANDARD(metal24, "metal2.4", Metal, "Metal 2.4",
-             LineComment | CPlusPlus | CPlusPlus11 | CPlusPlus14 | CPlusPlus17 |
-             CPlusPlus20 | CPlusPlus2b | Digraphs | HexFloat | GNUMode | OpenCL)
 LANGSTANDARD(metal30, "metal3.0", Metal, "Metal 3.0",
              LineComment | CPlusPlus | CPlusPlus11 | CPlusPlus14 | CPlusPlus17 |
              CPlusPlus20 | CPlusPlus2b | Digraphs | HexFloat | GNUMode | OpenCL)
