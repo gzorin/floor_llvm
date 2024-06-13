@@ -53,6 +53,7 @@ enum TAG_TYPE : uint32_t {
 	HSRD        = make_tag_type('H', 'S', 'R', 'D'),
 	UUID        = make_tag_type('U', 'U', 'I', 'D'),
 	RLST		= make_tag_type('R', 'L', 'S', 'T'),
+	HDYN        = make_tag_type('H', 'D', 'Y', 'N'),
 	// used in extended metadata section
 	CNST        = make_tag_type('C', 'N', 'S', 'T'),
 	VATT        = make_tag_type('V', 'A', 'T', 'T'),

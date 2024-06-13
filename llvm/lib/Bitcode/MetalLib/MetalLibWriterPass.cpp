@@ -326,6 +326,8 @@ static const unordered_map<uint32_t,
         {250, {{{2, 5, 0}}, {{3, 0, 0}}}},
         // Metal 3.1 uses AIR 2.6
         {260, {{{2, 6, 0}}, {{3, 1, 0}}}},
+        // Metal 3.2 uses AIR 2.7
+        {270, {{{2, 7, 0}}, {{3, 2, 0}}}},
     };
 
 static std::string make_abs_file_name(const std::string &file_name_in) {
@@ -413,10 +415,12 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   uint32_t target_air_version = 250;
   if (TT.isiOS()) {
     auto ios_version = TT.getiOSVersion();
-    if (ios_version.getMajor() >= 16) {
+    if (ios_version.getMajor() == 16) {
       target_air_version = 250;
-    } else if (ios_version.getMajor() >= 17) {
+    } else if (ios_version.getMajor() == 17) {
       target_air_version = 260;
+    } else if (ios_version.getMajor() >= 18) {
+      target_air_version = 270;
     }
 
     auto ios_minor = ios_version.getMinor().hasValue()
@@ -431,8 +435,10 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
                          : 0;
     if (osx_version.getMajor() == 13) {
       target_air_version = 250;
-    } else if (osx_version.getMajor() >= 14) {
+    } else if (osx_version.getMajor() == 14) {
       target_air_version = 260;
+    } else if (osx_version.getMajor() >= 15) {
+      target_air_version = 270;
     }
 
     M.setSDKVersion(VersionTuple{osx_version.getMajor(), osx_minor});
@@ -792,6 +798,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
             ident_versions{
                 {250, "Apple metal version 31001.638 (metalfe-31001.638.1)"},
                 {260, "Apple metal version 32023.155 (metalfe-32023.155)"},
+                {270, "Apple metal version 32023.329 (metalfe-32023.329.2)"},
             };
         ident_op->replaceOperandWith(
             0, llvm::MDString::get(cloned_mod->getContext(),
@@ -1039,7 +1046,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       .container_version_major = 1,
       .is_macos_target = TT.isMacOSX(),
       .container_version_minor = 2,
-      .container_version_bugfix = 7u,
+      .container_version_bugfix = uint16_t(target_air_version < 270 ? 7u : 8u),
       .file_type = 0,    // always "execute"
       .is_stub = false,  // never stub
       .is_64_bit = true, // always 64-bit

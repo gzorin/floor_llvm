@@ -370,19 +370,22 @@ processSTIPredicate(STIPredicateFunction &Fn,
                const std::pair<APInt, APInt> &LhsMasks = OpcodeMasks[LhsIdx];
                const std::pair<APInt, APInt> &RhsMasks = OpcodeMasks[RhsIdx];
 
-               auto LessThan = [](const APInt &Lhs, const APInt &Rhs) {
-                 unsigned LhsCountPopulation = Lhs.countPopulation();
-                 unsigned RhsCountPopulation = Rhs.countPopulation();
-                 return ((LhsCountPopulation < RhsCountPopulation) ||
-                         ((LhsCountPopulation == RhsCountPopulation) &&
-                          (Lhs.countLeadingZeros() > Rhs.countLeadingZeros())));
+               // via https://github.com/llvm/llvm-project/commit/bf2f9d2b64b82d4deeb96b2ad44e53e84a4536ea
+               auto PopulationCountAndLeftBit =
+                   [](const APInt &Other) -> std::pair<int, int> {
+                 return std::pair<int, int>(Other.countPopulation(),
+                                            -Other.countLeadingZeros());
                };
 
-               if (LhsMasks.first != RhsMasks.first)
-                 return LessThan(LhsMasks.first, RhsMasks.first);
+               auto lhsmask_first = PopulationCountAndLeftBit(LhsMasks.first);
+               auto rhsmask_first = PopulationCountAndLeftBit(RhsMasks.first);
+               if (lhsmask_first != rhsmask_first)
+                 return lhsmask_first < rhsmask_first;
 
-               if (LhsMasks.second != RhsMasks.second)
-                 return LessThan(LhsMasks.second, RhsMasks.second);
+               auto lhsmask_second = PopulationCountAndLeftBit(LhsMasks.second);
+               auto rhsmask_second = PopulationCountAndLeftBit(RhsMasks.second);
+               if (lhsmask_second != rhsmask_second)
+                 return lhsmask_second < rhsmask_second;
 
                return LhsIdx < RhsIdx;
              });

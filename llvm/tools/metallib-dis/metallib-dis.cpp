@@ -588,6 +588,8 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	// parse additional metadata
 	std::optional<uint64_t> refl_list_offset;
 	std::optional<uint64_t> refl_list_length;
+	std::optional<uint64_t> dyn_header_list_offset;
+	std::optional<uint64_t> dyn_header_list_length;
 	{
 		bool found_end_tag = false;
 		while (!found_end_tag) {
@@ -622,6 +624,11 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 					refl_list_offset = *(const uint64_t*)add_program_md_ptr;
 					refl_list_length = *(const uint64_t*)(add_program_md_ptr + 8u);
 					os << "\nreflection list:\n\toffset: " << *refl_list_offset << "\n\tlength: " << *refl_list_length << '\n';
+					break;
+				}
+				case TAG_TYPE::HDYN: {
+					dyn_header_list_offset = *(const uint64_t*)add_program_md_ptr;
+					dyn_header_list_length = *(const uint64_t*)(add_program_md_ptr + 8u);
 					break;
 				}
 				case TAG_TYPE::END: {
@@ -872,6 +879,61 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 			if (refl_entry._not_implemented_yet) {
 				entry.reflection = std::move(refl_entry);
 			}
+		}
+	}
+	
+	// parse hdyn / dynamic header
+	if (dyn_header_list_offset && dyn_header_list_length) {
+		if (*dyn_header_list_offset + *dyn_header_list_length > buffer.size()) {
+			return make_error<StringError>("hdyn data goes out-of-bounds: " +
+										   to_string(*dyn_header_list_offset + *dyn_header_list_length) + " > " + to_string(buffer.size()),
+										   inconvertibleErrorCode());
+		}
+		
+		auto hdyn_ptr = &data[*dyn_header_list_offset];
+		const auto hdyn_end_ptr = hdyn_ptr + *dyn_header_list_length;
+		
+		bool found_end_tag = false;
+		std::optional<std::string> hdyn_name;
+		while (!found_end_tag && hdyn_ptr < hdyn_end_ptr) {
+			const auto tag = *(const TAG_TYPE*)hdyn_ptr; hdyn_ptr += 4;
+			uint32_t tag_length = 0;
+			if (tag != TAG_TYPE::END) {
+				tag_length = *(const uint16_t*)hdyn_ptr;
+				hdyn_ptr += 2;
+				
+				if (tag_length == 0) {
+					return make_error<StringError>("tag " + to_string(uint32_t(tag)) + " should not be empty",
+												   inconvertibleErrorCode());
+				}
+			}
+			
+			switch (tag) {
+				case TAG_TYPE::NAME: {
+					if (tag_length >= 1u) {
+						hdyn_name = string((const char*)hdyn_ptr, tag_length - 1u);
+					}
+					break;
+				}
+				case TAG_TYPE::END: {
+					found_end_tag = true;
+					break;
+				}
+				default:
+					return make_error<StringError>("invalid hdyn list tag: " + to_string((uint32_t)tag),
+												   inconvertibleErrorCode());
+			}
+			hdyn_ptr += tag_length;
+		}
+		
+		os << "\ndynamic header:\n\toffset: " << *dyn_header_list_offset << "\n\tlength: " << *dyn_header_list_length << '\n';
+		if (hdyn_name) {
+			os << "\tname: " << *hdyn_name << '\n';
+		}
+		
+		if (!found_end_tag) {
+			return make_error<StringError>("reached the end of the hdyn data, but no end tag was found",
+										   inconvertibleErrorCode());
 		}
 	}
 	
