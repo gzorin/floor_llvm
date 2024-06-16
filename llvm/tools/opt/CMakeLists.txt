@@ -9,6 +9,7 @@ set(LLVM_LINK_COMPONENTS
   BitWriter
   CFGuard
   BitWriter50
+  BitWriter140
   CodeGen
   Core
   Coroutines

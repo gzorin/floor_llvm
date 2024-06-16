@@ -194,6 +194,7 @@ void tools::gcc::Compiler::RenderExtraToolArgs(const JobAction &JA,
   case types::TY_LTO_BC:
   case types::TY_LLVM_BC_32:
   case types::TY_LLVM_BC_50:
+  case types::TY_LLVM_BC_140:
   case types::TY_METALLIB:
     CmdArgs.push_back("-c");
     break;

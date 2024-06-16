@@ -47,10 +47,16 @@ ModulePass *createBitcode50WriterPass(raw_ostream &Str,
                                       bool EmitSummaryIndex = false,
                                       bool EmitModuleHash = false);
 
+ModulePass *createBitcodeWriterPass140(raw_ostream &Str,
+                                       bool ShouldPreserveUseListOrder = false,
+                                       bool EmitSummaryIndex = false,
+                                       bool EmitModuleHash = false);
+
 ModulePass *createMetalLibWriterPass(raw_ostream &Str);
 
 /// Check whether a pass is a BitcodeWriterPass.
 bool isBitcodeWriterPass(Pass *P);
+bool isBitcodeWriterPass140(Pass *P);
 
 /// Pass for writing a module of IR out to a bitcode file.
 ///
@@ -122,6 +128,34 @@ public:
   /// Run the bitcode writer pass, and output the module to the selected
   /// output stream.
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &);
+};
+
+class BitcodeWriterPass140 : public PassInfoMixin<BitcodeWriterPass140> {
+  raw_ostream &OS;
+  bool ShouldPreserveUseListOrder;
+  bool EmitSummaryIndex;
+  bool EmitModuleHash;
+
+public:
+  /// Construct a bitcode writer pass around a particular output stream.
+  ///
+  /// If \c ShouldPreserveUseListOrder, encode use-list order so it can be
+  /// reproduced when deserialized.
+  ///
+  /// If \c EmitSummaryIndex, emit the summary index (currently
+  /// for use in ThinLTO optimization).
+  explicit BitcodeWriterPass140(raw_ostream &OS,
+                                bool ShouldPreserveUseListOrder = false,
+                                bool EmitSummaryIndex = false,
+                                bool EmitModuleHash = false)
+      : OS(OS), ShouldPreserveUseListOrder(ShouldPreserveUseListOrder),
+  EmitSummaryIndex(EmitSummaryIndex), EmitModuleHash(EmitModuleHash) {}
+
+  /// Run the bitcode writer pass, and output the module to the selected
+  /// output stream.
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &);
+
+  static bool isRequired() { return true; }
 };
 
 class MetalLibWriterPass : public PassInfoMixin<MetalLibWriterPass> {

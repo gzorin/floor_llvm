@@ -32,6 +32,7 @@ namespace clang {
     Backend_EmitBC,        ///< Emit LLVM bitcode files
     Backend_EmitBC32,      ///< Emit LLVM 3.2 bitcode files
     Backend_EmitBC50,      ///< Emit LLVM 5.0 bitcode files
+    Backend_EmitBC140,     ///< Emit LLVM 14.0 bitcode files
     Backend_EmitSPIRV,     ///< Emit SPIR-V bitcode files
     Backend_EmitSPIRVContainer,    ///< Emit container with SPIR-V bitcode files
     Backend_EmitMetalLib,          ///< Emit Metal Library

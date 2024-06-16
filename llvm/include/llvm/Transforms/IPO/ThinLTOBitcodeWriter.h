@@ -35,6 +35,20 @@ public:
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
 };
 
+class ThinLTOBitcodeWriterPass140
+    : public PassInfoMixin<ThinLTOBitcodeWriterPass140> {
+  raw_ostream &OS;
+  raw_ostream *ThinLinkOS;
+
+public:
+  // Writes bitcode to OS. Also write thin link file to ThinLinkOS, if
+  // it's not nullptr.
+  ThinLTOBitcodeWriterPass140(raw_ostream &OS, raw_ostream *ThinLinkOS)
+      : OS(OS), ThinLinkOS(ThinLinkOS) {}
+
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
+};
+
 } // namespace llvm
 
 #endif

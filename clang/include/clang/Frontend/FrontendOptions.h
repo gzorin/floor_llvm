@@ -66,6 +66,9 @@ enum ActionKind {
   /// Emit a LLVM 5.0 .bc file.
   EmitBC50,
 
+  /// Emit a LLVM 14.0 .bc file.
+  EmitBC140,
+
   /// Emit a .spv file.
   EmitSPIRV,
 

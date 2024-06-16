@@ -19,8 +19,8 @@
 
 #include "llvm/Bitstream/BitCodes.h"
 
-// error when using > 3.2, > 3.5 or > 5.0 enums with 3.2, 3.5 or 5.0 resp.
-#if defined(__clang__) && (defined(LLVM_BITCODE_32) || defined(LLVM_BITCODE_35) || defined(LLVM_BITCODE_50))
+// error when using > 3.2, > 3.5, > 5.0 or > 14.0 enums with 3.2, 3.5, 5.0 or 14.0 resp.
+#if defined(__clang__) && (defined(LLVM_BITCODE_32) || defined(LLVM_BITCODE_35) || defined(LLVM_BITCODE_50) || defined(LLVM_BITCODE_140))
 #if defined(LLVM_BITCODE_32)
 #define BC35 __attribute__((unavailable))
 #else
@@ -37,9 +37,15 @@
 #define BC50
 #endif
 
+#if !defined(LLVM_BITCODE_140)
 #define BC80 __attribute__((unavailable))
 #define BC130 __attribute__((unavailable))
 #define BC140 __attribute__((unavailable))
+#else
+#define BC80
+#define BC130
+#define BC140
+#endif
 #define DONT_USE __attribute__((unavailable))
 
 #else

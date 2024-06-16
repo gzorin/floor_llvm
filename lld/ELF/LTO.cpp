@@ -292,6 +292,7 @@ static void thinLTOCreateEmptyIndexFiles() {
 
     ModuleSummaryIndex m(/*HaveGVs*/ false);
     m.setSkipModuleByDistributedBackend();
+    // TODO: writeIndexToFile140 selection?
     writeIndexToFile(m, *os);
     if (config->thinLTOEmitImportsFiles)
       openFile(path + ".imports");

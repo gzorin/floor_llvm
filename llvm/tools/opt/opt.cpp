@@ -113,6 +113,10 @@ static cl::opt<bool>
                     cl::desc("Write output as ThinLTO-ready bitcode"));
 
 static cl::opt<bool>
+    OutputThinLTOBC140("thinlto-bc140",
+                       cl::desc("Write output as ThinLTO-ready 14.0 bitcode"));
+
+static cl::opt<bool>
     SplitLTOUnit("thinlto-split-lto-unit",
                  cl::desc("Enable splitting of a ThinLTO LTOUnit"));
 
@@ -571,6 +575,7 @@ int main(int argc, char **argv) {
   initializeWasmEHPreparePass(Registry);
   initializeWriteBitcodePassPass(Registry);
   initializeWriteBitcodePass50Pass(Registry);
+  initializeWriteBitcodePass140Pass(Registry);
   initializeHardwareLoopsPass(Registry);
   initializeTypePromotionPass(Registry);
   initializeReplaceWithVeclibLegacyPass(Registry);
@@ -728,7 +733,7 @@ int main(int argc, char **argv) {
     if (CheckBitcodeOutputToConsole(Out->os()))
       NoOutput = true;
 
-  if (OutputThinLTOBC)
+  if (OutputThinLTOBC || OutputThinLTOBC140)
     M->addModuleFlag(Module::Error, "EnableSplitLTOUnit", SplitLTOUnit);
 
   // Add an appropriate TargetLibraryInfo pass for the module's triple.
@@ -806,7 +811,7 @@ int main(int argc, char **argv) {
     if (!NoOutput)
       OK = OutputAssembly
                ? OK_OutputAssembly
-               : (OutputThinLTOBC ? OK_OutputThinLTOBitcode : OK_OutputBitcode);
+               : (OutputThinLTOBC || OutputThinLTOBC140 ? OK_OutputThinLTOBitcode : OK_OutputBitcode);
 
     VerifierKind VK = VK_VerifyInAndOut;
     if (NoVerify)
@@ -1028,10 +1033,13 @@ int main(int argc, char **argv) {
       if (EmitModuleHash)
         report_fatal_error("Text output is incompatible with -module-hash");
       Passes.add(createPrintModulePass(*OS, "", PreserveAssemblyUseListOrder));
-    } else if (OutputThinLTOBC)
+    } else if (OutputThinLTOBC) {
       Passes.add(createWriteThinLTOBitcodePass(
           *OS, ThinLinkOut ? &ThinLinkOut->os() : nullptr));
-    else
+    } else if (OutputThinLTOBC140) {
+      Passes.add(createWriteThinLTOBitcodePass140(
+          *OS, ThinLinkOut ? &ThinLinkOut->os() : nullptr));
+    } else
       Passes.add(createBitcodeWriterPass(*OS, PreserveBitcodeUseListOrder,
                                          EmitSummaryIndex, EmitModuleHash));
   }

@@ -970,6 +970,7 @@ bool DevirtModule::runForTesting(
     if (StringRef(ClWriteSummary).endswith(".bc")) {
       raw_fd_ostream OS(ClWriteSummary, EC, sys::fs::OF_None);
       ExitOnErr(errorCodeToError(EC));
+      // TODO: writeIndexToFile140 selection?
       writeIndexToFile(*Summary, OS);
     } else {
       raw_fd_ostream OS(ClWriteSummary, EC, sys::fs::OF_TextWithCRLF);

@@ -1052,6 +1052,7 @@ void ThinLTOCodeGenerator::run() {
     if (EC)
       report_fatal_error(Twine("Failed to open ") + SaveTempPath +
                          " to save optimized bitcode\n");
+    // TODO: writeIndexToFile140 selection?
     writeIndexToFile(*Index, OS);
   }
 

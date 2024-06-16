@@ -43,6 +43,7 @@ add_llvm_component_library(LLVMipo
   StripSymbols.cpp
   SyntheticCountsPropagation.cpp
   ThinLTOBitcodeWriter.cpp
+  ThinLTOBitcodeWriter140.cpp
   WholeProgramDevirt.cpp
 
   ADDITIONAL_HEADER_DIRS
@@ -61,6 +62,7 @@ add_llvm_component_library(LLVMipo
   Analysis
   BitReader
   BitWriter
+  BitWriter140
   Core
   FrontendOpenMP
   InstCombine

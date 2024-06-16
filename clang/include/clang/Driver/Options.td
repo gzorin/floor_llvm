@@ -5562,6 +5562,8 @@ def emit_llvm_bc_32 : Flag<["-"], "llvm-bc-32">,
   HelpText<"Output LLVM 3.2 compatible bitcode">;
 def emit_llvm_bc_50 : Flag<["-"], "llvm-bc-50">,
   HelpText<"Output LLVM 5.0 compatible bitcode">;
+def emit_llvm_bc_140 : Flag<["-"], "llvm-bc-140">,
+  HelpText<"Output LLVM 14.0 compatible bitcode">;
 def emit_spirv : Flag<["-"], "emit-spirv">,
   HelpText<"Build ASTs then convert to LLVM, then convert to SPIR-V, emit .spv file">;
 def emit_spirv_container : Flag<["-"], "emit-spirv-container">,

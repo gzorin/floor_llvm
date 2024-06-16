@@ -2426,6 +2426,7 @@ static const auto &getFrontendActionTable() {
       {frontend::EmitBC, OPT_emit_llvm_bc},
       {frontend::EmitBC32, OPT_emit_llvm_bc_32},
       {frontend::EmitBC50, OPT_emit_llvm_bc_50},
+      {frontend::EmitBC140, OPT_emit_llvm_bc_140},
       {frontend::EmitSPIRV, OPT_emit_spirv},
       {frontend::EmitSPIRVContainer, OPT_emit_spirv_container},
       {frontend::EmitMetalLib, OPT_emit_metallib},
@@ -4288,6 +4289,7 @@ static bool isStrictlyPreprocessorAction(frontend::ActionKind Action) {
   case frontend::EmitBC:
   case frontend::EmitBC32:
   case frontend::EmitBC50:
+  case frontend::EmitBC140:
   case frontend::EmitSPIRV:
   case frontend::EmitSPIRVContainer:
   case frontend::EmitMetalLib:

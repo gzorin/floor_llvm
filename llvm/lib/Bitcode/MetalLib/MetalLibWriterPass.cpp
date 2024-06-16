@@ -16,6 +16,7 @@
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "../Writer50/ValueEnumerator50.h"
+#include "../Writer140/ValueEnumerator140.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -46,6 +47,9 @@ using namespace metal;
 #if defined(uuid_t)
 #undef uuid_t
 #endif
+
+// set this to 1 to emit LLVM 5.0 bitcode regardless of target version
+#define FORCE_EMIT_BC50 0
 
 PreservedAnalyses MetalLibWriterPass::run(Module &M, ModuleAnalysisManager &) {
   WriteMetalLibToFile(M, OS);
@@ -444,6 +448,11 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     M.setSDKVersion(VersionTuple{osx_version.getMajor(), osx_minor});
   }
   const auto &metal_version = *metal_versions.find(target_air_version);
+#if FORCE_EMIT_BC50
+  const bool emit_bc50 = true;
+#else
+  const auto emit_bc50 = (target_air_version == 250);
+#endif
 
   // gather entry point functions that we want to clone/emit
   unordered_map<string, metallib_program_info::PROGRAM_TYPE> function_set;
@@ -537,8 +546,8 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     //   directory is the working directory
     auto &Context = M.getContext();
     // somewhat overkill, but I don't know of a better way
-    ValueEnumerator50 VE(M, false);
-    for (const auto &md : VE.getMetadataMap()) {
+    const auto md_difile_exec = [&source_files, &Context,
+                                 &working_dir](const auto &md) {
       if (const DIFile *difile_node = dyn_cast_or_null<DIFile>(md.first);
           difile_node) {
         const auto orig_file_name = difile_node->getFilename().str();
@@ -553,6 +562,17 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
         }
         mod_difile_node->replaceOperandWith(
             1, llvm::MDString::get(Context, working_dir));
+      }
+    };
+    if (emit_bc50) {
+      ValueEnumerator50 VE50(M, false);
+      for (const auto &md : VE50.getMetadataMap()) {
+        md_difile_exec(md);
+      }
+    } else {
+      ValueEnumerator140 VE140(M, false);
+      for (const auto &md : VE140.getMetadataMap()) {
+        md_difile_exec(md);
       }
     }
 
@@ -642,7 +662,11 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
         dependent_bc_file_name, ec,
         sys::fs::CreationDisposition::CD_CreateAlways);
     if (!ec) {
-      WriteBitcode50ToFile(&M, dependent_bc_file);
+      if (emit_bc50) {
+        WriteBitcode50ToFile(&M, dependent_bc_file);
+      } else {
+        WriteBitcodeToFile140(M, dependent_bc_file);
+      }
       dependent_bc_file.flush();
     } else {
       errs() << "failed to write dependent debug file "
@@ -794,12 +818,11 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     // * set fake compiler ident
     if (auto llvm_ident = cloned_mod->getNamedMetadata("llvm.ident")) {
       if (MDNode *ident_op = llvm_ident->getOperand(0)) {
-        static const std::unordered_map<uint32_t, const char *>
-            ident_versions{
-                {250, "Apple metal version 31001.638 (metalfe-31001.638.1)"},
-                {260, "Apple metal version 32023.155 (metalfe-32023.155)"},
-                {270, "Apple metal version 32023.329 (metalfe-32023.329.2)"},
-            };
+        static const std::unordered_map<uint32_t, const char *> ident_versions{
+            {250, "Apple metal version 31001.638 (metalfe-31001.638.1)"},
+            {260, "Apple metal version 32023.155 (metalfe-32023.155)"},
+            {270, "Apple metal version 32023.329 (metalfe-32023.329.2)"},
+        };
         ident_op->replaceOperandWith(
             0, llvm::MDString::get(cloned_mod->getContext(),
                                    ident_versions.at(target_air_version)));
@@ -927,7 +950,11 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
 
     // write module / bitcode
     raw_string_ostream bitcode_stream{entry.bitcode_data};
-    WriteBitcode50ToFile(cloned_mod.get(), bitcode_stream);
+    if (emit_bc50) {
+      WriteBitcode50ToFile(cloned_mod.get(), bitcode_stream);
+    } else {
+      WriteBitcodeToFile140(*cloned_mod, bitcode_stream);
+    }
     bitcode_stream.flush();
 
     // hash module

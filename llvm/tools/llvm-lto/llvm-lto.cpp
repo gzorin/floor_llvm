@@ -497,6 +497,7 @@ static void createCombinedModuleSummaryIndex() {
   raw_fd_ostream OS(OutputFilename + ".thinlto.bc", EC,
                     sys::fs::OpenFlags::OF_None);
   error(EC, "error opening the file '" + OutputFilename + ".thinlto.bc'");
+  // TODO: writeIndexToFile140 selection?
   writeIndexToFile(CombinedIndex, OS);
   OS.close();
 }
@@ -660,6 +661,7 @@ private:
     std::error_code EC;
     raw_fd_ostream OS(OutputFilename, EC, sys::fs::OpenFlags::OF_None);
     error(EC, "error opening the file '" + OutputFilename + "'");
+    // TODO: writeIndexToFile140 selection?
     writeIndexToFile(*CombinedIndex, OS);
   }
 
@@ -698,6 +700,7 @@ private:
       std::error_code EC;
       raw_fd_ostream OS(OutputName, EC, sys::fs::OpenFlags::OF_None);
       error(EC, "error opening the file '" + OutputName + "'");
+      // TODO: writeIndexToFile140 selection?
       writeIndexToFile(*Index, OS, &ModuleToSummariesForIndex);
     }
   }

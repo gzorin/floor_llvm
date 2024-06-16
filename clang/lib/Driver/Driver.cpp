@@ -4203,6 +4203,8 @@ Action *Driver::ConstructPhaseAction(
       return C.MakeAction<CompileJobAction>(Input, types::TY_LLVM_BC_32);
     if (Args.hasArg(options::OPT_emit_llvm_bc_50))
       return C.MakeAction<CompileJobAction>(Input, types::TY_LLVM_BC_50);
+    if (Args.hasArg(options::OPT_emit_llvm_bc_140))
+      return C.MakeAction<CompileJobAction>(Input, types::TY_LLVM_BC_140);
     if (Args.hasArg(options::OPT_emit_spirv))
       return C.MakeAction<CompileJobAction>(Input, types::TY_SPIRV);
     if (Args.hasArg(options::OPT_emit_spirv_container))
@@ -4233,6 +4235,7 @@ Action *Driver::ConstructPhaseAction(
       } else {
         if (Args.hasArg(options::OPT_emit_llvm_bc_32)) Output = types::TY_LLVM_BC_32;
         if (Args.hasArg(options::OPT_emit_llvm_bc_50)) Output = types::TY_LLVM_BC_50;
+        if (Args.hasArg(options::OPT_emit_llvm_bc_140)) Output = types::TY_LLVM_BC_140;
         if (Args.hasArg(options::OPT_emit_spirv)) Output = types::TY_SPIRV;
         if (Args.hasArg(options::OPT_emit_spirv_container)) Output = types::TY_SPIRVC;
         if (Args.hasArg(options::OPT_emit_metallib)) Output = types::TY_METALLIB;
@@ -5325,6 +5328,7 @@ const char *Driver::GetNamedOutputPath(Compilation &C, const JobAction &JA,
         (JA.getType() == types::TY_LLVM_BC ||
          JA.getType() == types::TY_LLVM_BC_32 ||
          JA.getType() == types::TY_LLVM_BC_50 ||
+         JA.getType() == types::TY_LLVM_BC_140 ||
          JA.getType() == types::TY_SPIRV ||
          JA.getType() == types::TY_SPIRVC ||
          JA.getType() == types::TY_METALLIB) &&

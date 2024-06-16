@@ -107,6 +107,12 @@ public:
   EmitBC50Action(llvm::LLVMContext *_VMContext = nullptr);
 };
 
+class EmitBC140Action : public CodeGenAction {
+  virtual void anchor();
+public:
+  EmitBC140Action(llvm::LLVMContext *_VMContext = nullptr);
+};
+
 class EmitSPIRVAction : public CodeGenAction {
   virtual void anchor();
 public:

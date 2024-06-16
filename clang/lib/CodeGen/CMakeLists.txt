@@ -4,6 +4,7 @@ set(LLVM_LINK_COMPONENTS
   BitWriter
   BitWriter32
   BitWriter50
+  BitWriter140
   MetalLib
   Core
   Coroutines

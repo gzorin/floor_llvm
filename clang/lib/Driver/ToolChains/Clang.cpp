@@ -4591,6 +4591,9 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     } else if (JA.getType() == types::TY_LLVM_BC_50) {
       CmdArgs.push_back("-emit-llvm-bc"); // order matters
       CmdArgs.push_back("-llvm-bc-50");
+    } else if (JA.getType() == types::TY_LLVM_BC_140) {
+      CmdArgs.push_back("-emit-llvm-bc"); // order matters
+      CmdArgs.push_back("-llvm-bc-140");
     } else if (JA.getType() == types::TY_SPIRV) {
       CmdArgs.push_back("-emit-spirv");
     } else if (JA.getType() == types::TY_SPIRVC) {

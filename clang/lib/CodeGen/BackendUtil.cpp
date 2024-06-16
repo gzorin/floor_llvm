@@ -514,6 +514,7 @@ static bool actionRequiresCodeGen(BackendAction Action) {
           Action != Backend_EmitLL &&
           Action != Backend_EmitBC32 &&
           Action != Backend_EmitBC50 &&
+          Action != Backend_EmitBC140 &&
           Action != Backend_EmitSPIRV &&
           Action != Backend_EmitSPIRVContainer &&
           Action != Backend_EmitMetalLib &&
@@ -1148,6 +1149,39 @@ void EmitAssemblyHelper::EmitAssemblyWithLegacyPassManager(
     PerModulePasses.add(createBitcode50WriterPass(*OS));
     break;
 
+  case Backend_EmitBC140:
+    if (CodeGenOpts.PrepareForThinLTO && !CodeGenOpts.DisableLLVMPasses) {
+      if (!CodeGenOpts.ThinLinkBitcodeFile.empty()) {
+        ThinLinkOS = openOutputFile(CodeGenOpts.ThinLinkBitcodeFile);
+        if (!ThinLinkOS)
+          return;
+      }
+      if (!TheModule->getModuleFlag("EnableSplitLTOUnit"))
+        TheModule->addModuleFlag(Module::Error, "EnableSplitLTOUnit",
+                                 CodeGenOpts.EnableSplitLTOUnit);
+      PerModulePasses.add(createWriteThinLTOBitcodePass140(
+          *OS, ThinLinkOS ? &ThinLinkOS->os() : nullptr));
+    } else {
+      // Emit a module summary by default for Regular LTO except for ld64
+      // targets
+      bool EmitLTOSummary =
+          (CodeGenOpts.PrepareForLTO &&
+           !CodeGenOpts.DisableLLVMPasses &&
+           llvm::Triple(TheModule->getTargetTriple()).getVendor() !=
+               llvm::Triple::Apple);
+      if (EmitLTOSummary) {
+        if (!TheModule->getModuleFlag("ThinLTO"))
+          TheModule->addModuleFlag(Module::Error, "ThinLTO", uint32_t(0));
+        if (!TheModule->getModuleFlag("EnableSplitLTOUnit"))
+          TheModule->addModuleFlag(Module::Error, "EnableSplitLTOUnit",
+                                   uint32_t(1));
+      }
+
+      PerModulePasses.add(createBitcodeWriterPass140(
+          *OS, CodeGenOpts.EmitLLVMUseLists, EmitLTOSummary));
+    }
+    break;
+
   case Backend_EmitSPIRV:
     PerModulePasses.add(createSPIRVWriterPass(*OS));
     break;
@@ -1592,6 +1626,37 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
     break;
   }
 
+  case Backend_EmitBC140:
+    if (CodeGenOpts.PrepareForThinLTO && !CodeGenOpts.DisableLLVMPasses) {
+      if (!CodeGenOpts.ThinLinkBitcodeFile.empty()) {
+        ThinLinkOS = openOutputFile(CodeGenOpts.ThinLinkBitcodeFile);
+        if (!ThinLinkOS)
+          return;
+      }
+      if (!TheModule->getModuleFlag("EnableSplitLTOUnit"))
+        TheModule->addModuleFlag(Module::Error, "EnableSplitLTOUnit",
+                                 CodeGenOpts.EnableSplitLTOUnit);
+      MPM.addPass(ThinLTOBitcodeWriterPass140(*OS, ThinLinkOS ? &ThinLinkOS->os()
+                                                           : nullptr));
+    } else {
+      // Emit a module summary by default for Regular LTO except for ld64
+      // targets
+      bool EmitLTOSummary =
+          (CodeGenOpts.PrepareForLTO && !CodeGenOpts.DisableLLVMPasses &&
+           llvm::Triple(TheModule->getTargetTriple()).getVendor() !=
+               llvm::Triple::Apple);
+      if (EmitLTOSummary) {
+        if (!TheModule->getModuleFlag("ThinLTO"))
+          TheModule->addModuleFlag(Module::Error, "ThinLTO", uint32_t(0));
+        if (!TheModule->getModuleFlag("EnableSplitLTOUnit"))
+          TheModule->addModuleFlag(Module::Error, "EnableSplitLTOUnit",
+                                   uint32_t(1));
+      }
+      MPM.addPass(
+          BitcodeWriterPass140(*OS, CodeGenOpts.EmitLLVMUseLists, EmitLTOSummary));
+    }
+    break;
+
   case Backend_EmitSPIRV:
     MPM.addPass(SPIRVWriterPass(*OS));
     break;
@@ -1866,6 +1931,7 @@ void clang::EmbedBitcode(llvm::Module *M, const CodeGenOptions &CGOpts,
                          llvm::MemoryBufferRef Buf) {
   if (CGOpts.getEmbedBitcode() == CodeGenOptions::Embed_Off)
     return;
+  // TODO: embedBitcodeInModule140 selection?
   llvm::embedBitcodeInModule(
       *M, Buf, CGOpts.getEmbedBitcode() != CodeGenOptions::Embed_Marker,
       CGOpts.getEmbedBitcode() != CodeGenOptions::Embed_Bitcode,

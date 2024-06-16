@@ -145,6 +145,7 @@ Error Config::addSaveTemps(std::string OutputFileName,
         // directly and exit.
         if (EC)
           reportOpenError(Path, EC.message());
+        // TODO: writeIndexToFile140 selection?
         writeIndexToFile(Index, OS);
 
         Path = OutputFileName + "index.dot";
@@ -360,6 +361,7 @@ bool lto::opt(const Config &Conf, TargetMachine *TM, unsigned Task, Module &Mod,
       LLVM_DEBUG(
           dbgs() << "Post-(Thin)LTO merge bitcode embedding was requested, but "
                     "command line arguments are not available");
+    // TODO: embedBitcodeInModule140 selection?
     llvm::embedBitcodeInModule(Mod, llvm::MemoryBufferRef(),
                                /*EmbedBitcode*/ true, /*EmbedCmdline*/ true,
                                /*Cmdline*/ CmdArgs);
@@ -380,6 +382,7 @@ static void codegen(const Config &Conf, TargetMachine *TM,
   if (Conf.PreCodeGenModuleHook && !Conf.PreCodeGenModuleHook(Task, Mod))
     return;
 
+  // TODO: embedBitcodeInModule140 selection?
   if (EmbedBitcode == LTOBitcodeEmbedding::EmbedOptimized)
     llvm::embedBitcodeInModule(Mod, llvm::MemoryBufferRef(),
                                /*EmbedBitcode*/ true,

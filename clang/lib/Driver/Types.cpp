@@ -146,7 +146,7 @@ bool types::isAcceptedByClang(ID Id) {
   case TY_AST: case TY_ModuleFile: case TY_PCH:
   case TY_LLVM_IR: case TY_LLVM_BC:
   case TY_API_INFO:
-  case TY_LLVM_BC_32: case TY_LLVM_BC_50:
+  case TY_LLVM_BC_32: case TY_LLVM_BC_50: case TY_LLVM_BC_140:
   case TY_SPIRV: case TY_SPIRVC:
   case TY_METALLIB:
     return true;
@@ -235,6 +235,7 @@ bool types::isLLVMIR(ID Id) {
   case TY_LLVM_BC:
   case TY_LLVM_BC_32:
   case TY_LLVM_BC_50:
+  case TY_LLVM_BC_140:
   case TY_LTO_IR:
   case TY_LTO_BC:
     return true;
@@ -298,6 +299,7 @@ types::ID types::lookupTypeForExtension(llvm::StringRef Ext) {
            .Case("bc", TY_LLVM_BC)
            .Case("bc32", TY_LLVM_BC_32) // not ideal
            .Case("bc50", TY_LLVM_BC_50) // not ideal
+           .Case("bc140", TY_LLVM_BC_140) // not ideal
            .Case("spv", TY_SPIRV)
            .Case("spvc", TY_SPIRVC)
            .Case("metallib", TY_METALLIB)

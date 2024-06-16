@@ -182,7 +182,8 @@ public:
     // exceptions for passes which shouldn't see -debugify instrumentation.
     bool WrapWithDebugify = Mode != DebugifyMode::NoDebugify &&
                             !P->getAsImmutablePass() && !isIRPrintingPass(P) &&
-                            !isBitcodeWriterPass(P);
+                            !isBitcodeWriterPass(P) &&
+                            !isBitcodeWriterPass140(P);
     if (!WrapWithDebugify) {
       super::add(P);
       return;

@@ -106,6 +106,7 @@ static void WriteOutputFile(const Module *M, const ModuleSummaryIndex *Index) {
     else
       // Otherwise, with an empty Module but non-empty Index, we write a
       // combined index.
+      // TODO: writeIndexToFile140 selection?
       writeIndexToFile(*IndexToWrite, Out->os());
   }
 
