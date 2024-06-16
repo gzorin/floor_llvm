@@ -84,148 +84,6 @@ using namespace llvm;
 #define DBG(x) x
 #endif
 
-//////////////////////////////////////////
-// blatantly copied/transplanted from SROA
-namespace {
-/// \brief A custom IRBuilder inserter which prefixes all names, but only in
-/// Assert builds.
-class IRBuilderPrefixedInserter : public IRBuilderDefaultInserter {
-  std::string Prefix;
-  const Twine getNameWithPrefix(const Twine &Name) const {
-    return Name.isTriviallyEmpty() ? Name : Prefix + Name;
-  }
-
-public:
-  void SetNamePrefix(const Twine &P) { Prefix = P.str(); }
-
-protected:
-  void InsertHelper(Instruction *I, const Twine &Name, BasicBlock *BB,
-                    BasicBlock::iterator InsertPt) const override {
-    IRBuilderDefaultInserter::InsertHelper(I, getNameWithPrefix(Name), BB,
-                                           InsertPt);
-  }
-};
-
-/// \brief Provide a typedef for IRBuilder that drops names in release builds.
-using IRBuilderTy = llvm::IRBuilder<ConstantFolder, IRBuilderPrefixedInserter>;
-}
-
-namespace {
-  /// \brief Generic recursive split emission class.
-  template <typename Derived>
-  class OpSplitter {
-  protected:
-    /// The builder used to form new instructions.
-    IRBuilderTy IRB;
-    /// The indices which to be used with insert- or extractvalue to select the
-    /// appropriate value within the aggregate.
-    SmallVector<unsigned, 4> Indices;
-    /// The indices to a GEP instruction which will move Ptr to the correct slot
-    /// within the aggregate.
-    SmallVector<Value *, 4> GEPIndices;
-    /// The base pointer of the original op, used as a base for GEPing the
-    /// split operations.
-    Value *Ptr;
-
-    /// Initialize the splitter with an insertion point, Ptr and start with a
-    /// single zero GEP index.
-    OpSplitter(Instruction *InsertionPoint, Value *Ptr)
-      : IRB(InsertionPoint), GEPIndices(1, IRB.getInt32(0)), Ptr(Ptr) {}
-
-  public:
-    /// \brief Generic recursive split emission routine.
-    ///
-    /// This method recursively splits an aggregate op (load or store) into
-    /// scalar or vector ops. It splits recursively until it hits a single value
-    /// and emits that single value operation via the template argument.
-    ///
-    /// The logic of this routine relies on GEPs and insertvalue and
-    /// extractvalue all operating with the same fundamental index list, merely
-    /// formatted differently (GEPs need actual values).
-    ///
-    /// \param Ty  The type being split recursively into smaller ops.
-    /// \param Agg The aggregate value being built up or stored, depending on
-    /// whether this is splitting a load or a store respectively.
-    void emitSplitOps(Type *Ty, Value *&Agg, const Twine &Name) {
-      if (Ty->isSingleValueType())
-        return static_cast<Derived *>(this)->emitFunc(Ty, Agg, Name);
-
-      if (ArrayType *ATy = dyn_cast<ArrayType>(Ty)) {
-        unsigned OldSize = Indices.size();
-        (void)OldSize;
-        for (unsigned Idx = 0, Size = ATy->getNumElements(); Idx != Size;
-             ++Idx) {
-          assert(Indices.size() == OldSize && "Did not return to the old size");
-          Indices.push_back(Idx);
-          GEPIndices.push_back(IRB.getInt32(Idx));
-          emitSplitOps(ATy->getElementType(), Agg, Name + "." + Twine(Idx));
-          GEPIndices.pop_back();
-          Indices.pop_back();
-        }
-        return;
-      }
-
-      if (StructType *STy = dyn_cast<StructType>(Ty)) {
-        unsigned OldSize = Indices.size();
-        (void)OldSize;
-        for (unsigned Idx = 0, Size = STy->getNumElements(); Idx != Size;
-             ++Idx) {
-          assert(Indices.size() == OldSize && "Did not return to the old size");
-          Indices.push_back(Idx);
-          GEPIndices.push_back(IRB.getInt32(Idx));
-          emitSplitOps(STy->getElementType(Idx), Agg, Name + "." + Twine(Idx));
-          GEPIndices.pop_back();
-          Indices.pop_back();
-        }
-        return;
-      }
-
-      llvm_unreachable("Only arrays and structs are aggregate loadable types");
-    }
-  };
-
-  struct LoadOpSplitter : public OpSplitter<LoadOpSplitter> {
-    LoadOpSplitter(Instruction *InsertionPoint, Value *Ptr)
-      : OpSplitter<LoadOpSplitter>(InsertionPoint, Ptr) {}
-
-    /// Emit a leaf load of a single value. This is called at the leaves of the
-    /// recursive emission to actually load values.
-    void emitFunc(Type *Ty, Value *&Agg, const Twine &Name) {
-      assert(Ty->isSingleValueType());
-      // Load the single value and insert it using the indices.
-      auto elem_type = Ptr->getType()->getScalarType()->getPointerElementType();
-      Value *GEP = IRB.CreateInBoundsGEP(elem_type, Ptr, GEPIndices, Name + ".gep");
-      Value *Load = IRB.CreateLoad(elem_type, GEP, Name + ".load");
-      Agg = IRB.CreateInsertValue(Agg, Load, Indices, Name + ".insert");
-      DBG(dbgs() << "          to: " << *Load << "\n");
-    }
-  };
-
-  struct StoreOpSplitter : public OpSplitter<StoreOpSplitter> {
-    StoreOpSplitter(Instruction *InsertionPoint, Value *Ptr)
-      : OpSplitter<StoreOpSplitter>(InsertionPoint, Ptr) {}
-
-    /// Emit a leaf store of a single value. This is called at the leaves of the
-    /// recursive emission to actually produce stores.
-    void emitFunc(Type *Ty, Value *&Agg, const Twine &Name) {
-      assert(Ty->isSingleValueType());
-      // Extract the single value and store it using the indices.
-      //
-      // The gep and extractvalue values are factored out of the CreateStore
-      // call to make the output independent of the argument evaluation order.
-      Value *ExtractValue =
-          IRB.CreateExtractValue(Agg, Indices, Name + ".extract");
-      Value *InBoundsGEP =
-          IRB.CreateInBoundsGEP(nullptr, Ptr, GEPIndices, Name + ".gep");
-      Value *Store = IRB.CreateStore(ExtractValue, InBoundsGEP);
-      (void)Store;
-      DBG(dbgs() << "          to: " << *Store << "\n");
-    }
-  };
-
-}
-//////////////////////////////////////////
-
 namespace {
 	// MetalFirst
 	struct MetalFirst : public FunctionPass, InstVisitor<MetalFirst> {
@@ -341,85 +199,6 @@ namespace {
 			AU.addRequired<GlobalsAAWrapperPass>();
 			AU.addRequired<AssumptionCacheTracker>();
 			AU.addRequired<TargetLibraryInfoWrapperPass>();
-		}
-		
-		template <Instruction::CastOps cast_op, typename std::enable_if<(cast_op == llvm::Instruction::FPToSI ||
-																		 cast_op == llvm::Instruction::FPToUI ||
-																		 cast_op == llvm::Instruction::SIToFP ||
-																		 cast_op == llvm::Instruction::UIToFP), int>::type = 0>
-		llvm::Value* call_conversion_func(llvm::Value* from, llvm::Type* to_type) {
-			// metal only supports conversion of a specific set of integer and float types
-			// -> find and check them
-			const auto from_type = from->getType();
-			static const std::unordered_map<llvm::Type*, const char*> type_map {
-				{ llvm::Type::getInt1Ty(*ctx), ".i1" }, // not sure about signed/unsigned conversion here
-				{ llvm::Type::getInt8Ty(*ctx), ".i8" },
-				{ llvm::Type::getInt16Ty(*ctx), ".i16" },
-				{ llvm::Type::getInt32Ty(*ctx), ".i32" },
-				{ llvm::Type::getInt64Ty(*ctx), ".i64" },
-				{ llvm::Type::getHalfTy(*ctx), "f.f16" },
-				{ llvm::Type::getFloatTy(*ctx), "f.f32" },
-				{ llvm::Type::getDoubleTy(*ctx), "f.f64" },
-			};
-			const auto from_iter = type_map.find(from_type);
-			if(from_iter == end(type_map)) {
-				DBG(errs() << "failed to find conversion function for: " << *from_type << " -> " << *to_type << "\n";)
-				return from;
-			}
-			const auto to_iter = type_map.find(to_type);
-			if(to_iter == end(type_map)) {
-				DBG(errs() << "failed to find conversion function for: " << *from_type << " -> " << *to_type << "\n";)
-				return from;
-			}
-			
-			// figure out if from/to type is signed/unsigned
-			bool from_signed = false, to_signed = false;
-			switch(cast_op) {
-				case llvm::Instruction::FPToSI: from_signed = true; to_signed = true; break;
-				case llvm::Instruction::FPToUI: from_signed = true; to_signed = false; break;
-				case llvm::Instruction::SIToFP: from_signed = true; to_signed = true; break;
-				case llvm::Instruction::UIToFP: from_signed = false; to_signed = true; break;
-				default: __builtin_unreachable();
-			}
-			
-			DBG(errs() << "converting: " << *from_type << " (" << (from_signed ? "signed" : "unsigned") << ") -> " << *to_type << "(" << (to_signed ? "signed" : "unsigned") << ")\n";)
-			
-			// for intel gpus any conversion from/to float from/to i8 or i16 needs to go through a i32 first
-			if(enable_intel_workarounds && from_iter->second[0] == 'f') {
-				if(to_iter->first == llvm::Type::getInt8Ty(*ctx) ||
-				   to_iter->first == llvm::Type::getInt16Ty(*ctx)) {
-					// convert to i32 first, then trunc from i32 to i8/i16
-					const auto to_i32_cast = call_conversion_func<cast_op>(from, llvm::Type::getInt32Ty(*ctx));
-					return builder->CreateTrunc(to_i32_cast, to_iter->first);
-				}
-			}
-			
-			// air.convert.<to_type>.<from_type>
-			std::string func_name = "air.convert.";
-			
-			if(to_iter->second[0] == '.') {
-				func_name += (to_signed ? 's' : 'u');
-			}
-			func_name += to_iter->second;
-			
-			func_name += '.';
-			if(from_iter->second[0] == '.') {
-				func_name += (from_signed ? 's' : 'u');
-			}
-			func_name += from_iter->second;
-			
-			SmallVector<llvm::Type*, 1> params(1, from_type);
-			const auto func_type = llvm::FunctionType::get(to_type, params, false);
-			return builder->CreateCall(M->getOrInsertFunction(func_name, func_type), from);
-		}
-		
-		// dummy
-		template <Instruction::CastOps cast_op, typename std::enable_if<!(cast_op == llvm::Instruction::FPToSI ||
-																		  cast_op == llvm::Instruction::FPToUI ||
-																		  cast_op == llvm::Instruction::SIToFP ||
-																		  cast_op == llvm::Instruction::UIToFP), int>::type = 0>
-		llvm::Value* call_conversion_func(llvm::Value* from, llvm::Type*) {
-			return from;
 		}
 		
 		enum METAL_KERNEL_ARG_REV_IDX : int32_t {
@@ -1032,102 +811,130 @@ namespace {
 			}
 		}
 		
-		// like SPIR, Metal only supports scalar conversion ops ->
-		// * scalarize source vector
-		// * call conversion op for each scalar
-		// * reassemble a vector from the converted scalars
-		// * replace all uses of the original vector
 		template <Instruction::CastOps cast_op>
-		__attribute__((always_inline))
-		bool vec_to_scalar_ops(CastInst& I) {
-			if(!I.getType()->isVectorTy()) return false;
-			
-			// start insertion before instruction
-			builder->SetInsertPoint(&I);
-			
-			// setup
-			auto src_vec = I.getOperand(0);
-			const auto src_vec_type = dyn_cast<FixedVectorType>(src_vec->getType());
-			if (!src_vec_type) {
-				return false;
-			}
-			const auto dim = src_vec_type->getNumElements();
-			
-			const auto si_type = I.getDestTy();
-			const auto dst_scalar_type = si_type->getScalarType();
-			llvm::Value* dst_vec = UndefValue::get(si_type);
-			
-			// iterate over all vector components, emit a scalar instruction and insert into a new vector
-			for(uint32_t i = 0; i < dim; ++i) {
-				auto scalar = builder->CreateExtractElement(src_vec, builder->getInt32(i));
-				llvm::Value* cast;
-				switch(cast_op) {
-					case llvm::Instruction::FPToSI:
-					case llvm::Instruction::FPToUI:
-					case llvm::Instruction::SIToFP:
-					case llvm::Instruction::UIToFP:
-						cast = call_conversion_func<cast_op>(scalar, dst_scalar_type);
-						break;
-					default:
-						cast = builder->CreateCast(cast_op, scalar, dst_scalar_type);
-						break;
+		requires (cast_op == llvm::Instruction::FPToSI ||
+				  cast_op == llvm::Instruction::FPToUI ||
+				  cast_op == llvm::Instruction::SIToFP ||
+				  cast_op == llvm::Instruction::UIToFP)
+		llvm::Instruction* call_conversion_func(llvm::Value* from, llvm::Type* to_type) {
+			// metal only supports conversion of a specific set of integer and float types
+			// -> find and check them
+			auto from_elem_type = from->getType();
+			// if this is a vector type, extract the element type
+			const auto from_vec_type = dyn_cast_or_null<FixedVectorType>(from_elem_type);
+			std::string vec_type_name;
+			if (from_vec_type) {
+				if (from_vec_type->getNumElements() < 1 || from_vec_type->getNumElements() > 4) {
+					DBG(errs() << "unsupported vector element count for conversion: " << *from_type << " -> " << *to_type << "\n";)
+					return nullptr;
 				}
-				dst_vec = builder->CreateInsertElement(dst_vec, cast, builder->getInt32(i));
+				from_elem_type = from_vec_type->getElementType();
+				vec_type_name = "v" + std::to_string(from_vec_type->getNumElements());
 			}
 			
-			// finally, replace all uses with the new vector and remove the old vec instruction
-			I.replaceAllUsesWith(dst_vec);
-			I.eraseFromParent();
-			was_modified = true;
-			return true;
+			static const std::unordered_map<llvm::Type*, const char*> type_map {
+				{ llvm::Type::getInt1Ty(*ctx), "i1" }, // not sure about signed/unsigned conversion here
+				{ llvm::Type::getInt8Ty(*ctx), "i8" },
+				{ llvm::Type::getInt16Ty(*ctx), "i16" },
+				{ llvm::Type::getInt32Ty(*ctx), "i32" },
+				{ llvm::Type::getInt64Ty(*ctx), "i64" },
+				{ llvm::Type::getHalfTy(*ctx), "f16" },
+				{ llvm::Type::getFloatTy(*ctx), "f32" },
+				{ llvm::Type::getDoubleTy(*ctx), "f64" },
+			};
+			const auto from_iter = type_map.find(from_elem_type);
+			if (from_iter == end(type_map)) {
+				DBG(errs() << "failed to find conversion function for: " << *from_type << " -> " << *to_type << "\n";)
+				return nullptr;
+			}
+			
+			auto to_elem_type = to_type;
+			if (const auto to_vec_type = dyn_cast_or_null<FixedVectorType>(to_elem_type); to_vec_type) {
+				if (to_vec_type->getNumElements() != from_vec_type->getNumElements()) {
+					DBG(errs() << "unsupported vector element count for conversion: " << *from_type << " -> " << *to_type << "\n";)
+					return nullptr;
+				}
+				to_elem_type = to_vec_type->getElementType();
+			}
+			const auto to_iter = type_map.find(to_elem_type);
+			if (to_iter == end(type_map)) {
+				DBG(errs() << "failed to find conversion function for: " << *from_type << " -> " << *to_type << "\n";)
+				return nullptr;
+			}
+			
+			// figure out if from/to type is signed/unsigned
+			bool from_signed = false, from_fp = false, to_signed = false, to_fp = false;
+			switch (cast_op) {
+				case llvm::Instruction::FPToSI: from_signed = true; from_fp = true; to_signed = true; break;
+				case llvm::Instruction::FPToUI: from_signed = true; from_fp = true; to_signed = false; break;
+				case llvm::Instruction::SIToFP: from_signed = true; to_signed = true; to_fp = true; break;
+				case llvm::Instruction::UIToFP: from_signed = false; to_signed = true; to_fp = true; break;
+				default: __builtin_unreachable();
+			}
+			
+			DBG(errs() << "converting: " << *from_type << " (" << (from_signed ? "signed" : "unsigned") << ") -> " << *to_type << "(" << (to_signed ? "signed" : "unsigned") << ")\n";)
+			
+			// air.convert.<to_type>.<from_type>
+			std::string func_name = "air.convert.";
+			
+			if (to_fp) {
+				func_name += 'f';
+			} else if (to_signed) {
+				func_name += 's';
+			} else {
+				func_name += 'u';
+			}
+			func_name += '.';
+			func_name += vec_type_name;
+			func_name += to_iter->second;
+			
+			func_name += '.';
+			
+			if (from_fp) {
+				func_name += 'f';
+			} else if (from_signed) {
+				func_name += 's';
+			} else {
+				func_name += 'u';
+			}
+			func_name += '.';
+			func_name += vec_type_name;
+			func_name += from_iter->second;
+			
+			SmallVector<llvm::Type*, 1> params(1, from->getType());
+			const auto func_type = llvm::FunctionType::get(to_type, params, false);
+			return builder->CreateCall(M->getOrInsertFunction(func_name, func_type), from);
 		}
 		
 		// si/ui/fp -> si/ui/fp conversions require a call to an intrinsic air function (air.convert.*)
 		template <Instruction::CastOps cast_op>
 		__attribute__((always_inline))
-		void scalar_conversion(CastInst& I) {
+		void scalar_or_vector_conversion(CastInst& I) {
 			builder->SetInsertPoint(&I);
 			
 			// replace original conversion
-			I.replaceAllUsesWith(call_conversion_func<cast_op>(I.getOperand(0), I.getDestTy()));
+			auto conv_instr = call_conversion_func<cast_op>(I.getOperand(0), I.getDestTy());
+			if (!conv_instr) {
+				// something failed, don't continue replacing the instruction
+				return;
+			}
+			conv_instr->setDebugLoc(I.getDebugLoc());
+			I.replaceAllUsesWith(conv_instr);
 			I.eraseFromParent();
 			was_modified = true;
 		}
 		
-		void visitTruncInst(TruncInst &I) {
-			vec_to_scalar_ops<Instruction::Trunc>(I);
-		}
-		void visitZExtInst(ZExtInst &I) {
-			vec_to_scalar_ops<Instruction::ZExt>(I);
-		}
-		void visitSExtInst(SExtInst &I) {
-			vec_to_scalar_ops<Instruction::SExt>(I);
-		}
-		void visitFPTruncInst(FPTruncInst &I) {
-			vec_to_scalar_ops<Instruction::FPTrunc>(I);
-		}
-		void visitFPExtInst(FPExtInst &I) {
-			vec_to_scalar_ops<Instruction::FPExt>(I);
-		}
 		void visitFPToUIInst(FPToUIInst &I) {
-			if(!vec_to_scalar_ops<Instruction::FPToUI>(I)) {
-				scalar_conversion<Instruction::FPToUI>(I);
-			}
+			scalar_or_vector_conversion<Instruction::FPToUI>(I);
 		}
 		void visitFPToSIInst(FPToSIInst &I) {
-			if(!vec_to_scalar_ops<Instruction::FPToSI>(I)) {
-				scalar_conversion<Instruction::FPToSI>(I);
-			}
+			scalar_or_vector_conversion<Instruction::FPToSI>(I);
 		}
 		void visitUIToFPInst(UIToFPInst &I) {
-			if(!vec_to_scalar_ops<Instruction::UIToFP>(I)) {
-				scalar_conversion<Instruction::UIToFP>(I);
-			}
+			scalar_or_vector_conversion<Instruction::UIToFP>(I);
 		}
 		void visitSIToFPInst(SIToFPInst &I) {
-			if(!vec_to_scalar_ops<Instruction::SIToFP>(I)) {
-				scalar_conversion<Instruction::SIToFP>(I);
-			}
+			scalar_or_vector_conversion<Instruction::SIToFP>(I);
 		}
 		
 		// metal can only handle i32 indices
