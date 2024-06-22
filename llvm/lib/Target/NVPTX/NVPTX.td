@@ -136,6 +136,8 @@ def PTX83 : SubtargetFeature<"ptx83", "PTXVersion", "83",
                              "Use PTX version 8.3">;
 def PTX84 : SubtargetFeature<"ptx84", "PTXVersion", "84",
                              "Use PTX version 8.4">;
+def PTX85 : SubtargetFeature<"ptx85", "PTXVersion", "85",
+                             "Use PTX version 8.5">;
 
 //===----------------------------------------------------------------------===//
 // NVPTX supported processors.
