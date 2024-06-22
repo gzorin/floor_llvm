@@ -86,7 +86,7 @@ CudaVersion getCudaVersion(uint32_t raw_version) {
   return CudaVersion::NEW;
 }
 
-CudaVersion parseCudaHFile(llvm::StringRef Input) {
+[[maybe_unused]] CudaVersion parseCudaHFile(llvm::StringRef Input) {
   // Helper lambda which skips the words if the line starts with them or returns
   // None otherwise.
   auto StartsWithWords =
@@ -133,6 +133,7 @@ CudaInstallationDetector::CudaInstallationDetector(
     const Driver &D, const llvm::Triple &HostTriple,
     const llvm::opt::ArgList &Args)
     : D(D) {
+#if 0 // we never want to use the CUDA host installation
   struct Candidate {
     std::string Path;
     bool StrictChecking;
@@ -295,6 +296,7 @@ CudaInstallationDetector::CudaInstallationDetector(
     IsValid = true;
     break;
   }
+#endif
 }
 
 void CudaInstallationDetector::AddCudaIncludeArgs(
