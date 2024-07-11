@@ -430,6 +430,10 @@ public:
     case PLATFORM_WATCHOSSIMULATOR:
       c->cmd = LC_VERSION_MIN_WATCHOS;
       break;
+    case PLATFORM_XROS:
+    case PLATFORM_XROSSIMULATOR:
+      c->cmd = LC_VERSION_MIN_XROS;
+      break;
     default:
       llvm_unreachable("invalid platform");
       break;
@@ -716,7 +720,9 @@ static bool useLCBuildVersion(const PlatformInfo &platformInfo) {
       {PLATFORM_TVOS, VersionTuple(12, 0)},
       {PLATFORM_TVOSSIMULATOR, VersionTuple(13, 0)},
       {PLATFORM_WATCHOS, VersionTuple(5, 0)},
-      {PLATFORM_WATCHOSSIMULATOR, VersionTuple(6, 0)}};
+      {PLATFORM_WATCHOSSIMULATOR, VersionTuple(6, 0)},
+      {PLATFORM_XROS, VersionTuple(2, 0)},
+      {PLATFORM_XROSSIMULATOR, VersionTuple(2, 0)}};
   auto it = llvm::find_if(minVersion, [&](const auto &p) {
     return p.first == platformInfo.target.Platform;
   });

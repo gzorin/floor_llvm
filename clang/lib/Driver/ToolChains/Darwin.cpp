@@ -874,7 +874,7 @@ ToolChain::CXXStdlibType Darwin::GetDefaultCXXStdlibType() const {
   // Default to use libc++ on OS X 10.9+ and iOS 7+.
   if ((isTargetMacOSBased() && !isMacosxVersionLT(10, 9)) ||
       (isTargetIOSBased() && !isIPhoneOSVersionLT(7, 0)) ||
-      isTargetWatchOSBased())
+      isTargetWatchOSBased() || isTargetXROSBased())
     return ToolChain::CST_Libcxx;
 
   return ToolChain::CST_Libstdcxx;
@@ -886,6 +886,8 @@ ObjCRuntime Darwin::getDefaultObjCRuntime(bool isNonFragile) const {
     return ObjCRuntime(ObjCRuntime::FragileMacOSX, TargetVersion);
   if (isTargetWatchOSBased())
     return ObjCRuntime(ObjCRuntime::WatchOS, TargetVersion);
+  if (isTargetXROSBased())
+    return ObjCRuntime(ObjCRuntime::XROS, TargetVersion);
   if (isTargetIOSBased())
     return ObjCRuntime(ObjCRuntime::iOS, TargetVersion);
   if (isNonFragile)
@@ -897,7 +899,7 @@ ObjCRuntime Darwin::getDefaultObjCRuntime(bool isNonFragile) const {
 bool Darwin::hasBlocksRuntime() const {
   if (getTriple().getArch() == llvm::Triple::ArchType::air64)
     return false;
-  if (isTargetWatchOSBased())
+  if (isTargetWatchOSBased() || isTargetXROSBased())
     return true;
   else if (isTargetIOSBased())
     return !isIPhoneOSVersionLT(3, 2);
@@ -1003,6 +1005,8 @@ std::string Darwin::ComputeEffectiveClangTriple(const ArgList &Args,
     Str += "watchos";
   else if (isTargetTvOSBased())
     Str += "tvos";
+  else if (isTargetXROSBased())
+    Str += "xros";
   else if (isTargetIOSBased() || isTargetMacCatalyst())
     Str += "ios";
   else
@@ -1125,6 +1129,8 @@ void DarwinClang::AddLinkARCArgs(const ArgList &Args,
     P += "watchsimulator";
   else if (isTargetWatchOS())
     P += "watchos";
+  else if (isTargetXROS())
+    P += "xros";
   else if (isTargetTvOSSimulator())
     P += "appletvsimulator";
   else if (isTargetTvOS())
@@ -1210,6 +1216,8 @@ StringRef Darwin::getPlatformFamily() const {
       return "AppleTV";
     case DarwinPlatformKind::WatchOS:
       return "Watch";
+    case DarwinPlatformKind::XROS:
+      return "XROS";
   }
   llvm_unreachable("Unsupported platform");
 }
@@ -1241,6 +1249,9 @@ StringRef Darwin::getOSLibraryNameSuffix(bool IgnoreSim) const {
   case DarwinPlatformKind::WatchOS:
     return TargetEnvironment == NativeEnvironment || IgnoreSim ? "watchos"
                                                                : "watchossim";
+  case DarwinPlatformKind::XROS:
+    return TargetEnvironment == NativeEnvironment || IgnoreSim ? "xros"
+                                                               : "xrossim";
   }
   llvm_unreachable("Unsupported platform");
 }
@@ -1511,6 +1522,9 @@ struct DarwinPlatform {
     case DarwinPlatformKind::WatchOS:
       Opt = options::OPT_mwatchos_version_min_EQ;
       break;
+    case DarwinPlatformKind::XROS:
+      Opt = options::OPT_mxros_version_min_EQ;
+      break;
     }
     Argument = Args.MakeJoinedArg(nullptr, Opts.getOption(Opt), OSVersion);
     Args.append(Argument);
@@ -1638,6 +1652,8 @@ private:
       return DarwinPlatformKind::TvOS;
     case llvm::Triple::WatchOS:
       return DarwinPlatformKind::WatchOS;
+    case llvm::Triple::XROS:
+      return DarwinPlatformKind::XROS;
     default:
       llvm_unreachable("Unable to infer Darwin variant");
     }
@@ -1667,6 +1683,9 @@ getDeploymentTargetFromOSVersionArg(DerivedArgList &Args,
   Arg *WatchOSVersion =
       Args.getLastArg(options::OPT_mwatchos_version_min_EQ,
                       options::OPT_mwatchos_simulator_version_min_EQ);
+  Arg *XROSVersion =
+      Args.getLastArg(options::OPT_mxros_version_min_EQ,
+                      options::OPT_mxros_simulator_version_min_EQ);
   if (OSXVersion) {
     if (iOSVersion || TvOSVersion || WatchOSVersion) {
       TheDriver.Diag(diag::err_drv_argument_not_allowed_with)
@@ -1690,8 +1709,11 @@ getDeploymentTargetFromOSVersionArg(DerivedArgList &Args,
           << WatchOSVersion->getAsString(Args);
     }
     return DarwinPlatform::createOSVersionArg(Darwin::TvOS, TvOSVersion);
-  } else if (WatchOSVersion)
+  } else if (WatchOSVersion) {
     return DarwinPlatform::createOSVersionArg(Darwin::WatchOS, WatchOSVersion);
+  } else if (XROSVersion) {
+    return DarwinPlatform::createOSVersionArg(Darwin::XROS, XROSVersion);
+  }
   return None;
 }
 
@@ -1706,6 +1728,7 @@ getDeploymentTargetFromEnvironmentVariables(const Driver &TheDriver,
       "IPHONEOS_DEPLOYMENT_TARGET",
       "TVOS_DEPLOYMENT_TARGET",
       "WATCHOS_DEPLOYMENT_TARGET",
+      "XROS_DEPLOYMENT_TARGET",
   };
   static_assert(llvm::array_lengthof(EnvVars) == Darwin::LastDarwinPlatform + 1,
                 "Missing platform");
@@ -1717,7 +1740,7 @@ getDeploymentTargetFromEnvironmentVariables(const Driver &TheDriver,
   // Allow conflicts among OSX and iOS for historical reasons, but choose the
   // default platform.
   if (!Targets[Darwin::MacOS].empty() &&
-      (!Targets[Darwin::IPhoneOS].empty() ||
+      (!Targets[Darwin::IPhoneOS].empty() || !Targets[Darwin::XROS].empty() ||
        !Targets[Darwin::WatchOS].empty() || !Targets[Darwin::TvOS].empty())) {
     if (Triple.getArch() == llvm::Triple::arm ||
         Triple.getArch() == llvm::Triple::aarch64 ||
@@ -1725,7 +1748,7 @@ getDeploymentTargetFromEnvironmentVariables(const Driver &TheDriver,
       Targets[Darwin::MacOS] = "";
     else
       Targets[Darwin::IPhoneOS] = Targets[Darwin::WatchOS] =
-          Targets[Darwin::TvOS] = "";
+          Targets[Darwin::TvOS] = Targets[Darwin::XROS] = "";
   } else {
     // Don't allow conflicts in any other platform.
     unsigned FirstTarget = llvm::array_lengthof(Targets);
@@ -1800,6 +1823,10 @@ inferDeploymentTargetFromSDK(DerivedArgList &Args,
       return DarwinPlatform::createFromSDK(
           Darwin::WatchOS, Version,
           /*IsSimulator=*/SDK.startswith("WatchSimulator"));
+    else if (SDK.startswith("XROS") || SDK.startswith("XROSSimulator"))
+      return DarwinPlatform::createFromSDK(
+          Darwin::XROS, Version,
+          /*IsSimulator=*/SDK.startswith("XROSSimulator"));
     else if (SDK.startswith("AppleTVOS") || SDK.startswith("AppleTVSimulator"))
       return DarwinPlatform::createFromSDK(
           Darwin::TvOS, Version,
@@ -1839,6 +1866,9 @@ std::string getOSVersion(llvm::Triple::OSType OS, const llvm::Triple &Triple,
     break;
   case llvm::Triple::WatchOS:
     OsVersion = Triple.getWatchOSVersion();
+    break;
+  case llvm::Triple::XROS:
+    OsVersion = Triple.getXROSVersion();
     break;
   default:
     llvm_unreachable("Unexpected OS type");
@@ -1911,6 +1941,7 @@ getDeploymentTargetFromMTargetOSArg(DerivedArgList &Args,
   case llvm::Triple::IOS:
   case llvm::Triple::TvOS:
   case llvm::Triple::WatchOS:
+  case llvm::Triple::XROS:
     break;
   default:
     TheDriver.Diag(diag::err_drv_invalid_os_in_arg)
@@ -2111,6 +2142,12 @@ void Darwin::AddDeploymentTarget(DerivedArgList &Args) const {
       getDriver().Diag(diag::err_drv_invalid_version_number)
           << OSTarget->getAsString(Args, Opts);
   } else if (Platform == WatchOS) {
+    if (!Driver::GetReleaseVersion(OSTarget->getOSVersion(), Major, Minor,
+                                   Micro, HadExtra) ||
+        HadExtra || Major >= 10 || Minor >= 100 || Micro >= 100)
+      getDriver().Diag(diag::err_drv_invalid_version_number)
+          << OSTarget->getAsString(Args, Opts);
+  } else if (Platform == XROS) {
     if (!Driver::GetReleaseVersion(OSTarget->getOSVersion(), Major, Minor,
                                    Micro, HadExtra) ||
         HadExtra || Major >= 10 || Minor >= 100 || Micro >= 100)
@@ -2635,6 +2672,9 @@ bool Darwin::isAlignedAllocationUnavailable() const {
   case WatchOS: // Earlier than 4.0.
     OS = llvm::Triple::WatchOS;
     break;
+  case XROS:
+    OS = llvm::Triple::XROS;
+    break;
   }
 
   return TargetVersion < alignedAllocMinVersion(OS);
@@ -2816,6 +2856,10 @@ void Darwin::addMinVersionArgs(const ArgList &Args,
     CmdArgs.push_back("-tvos_version_min");
   else if (isTargetTvOSSimulator())
     CmdArgs.push_back("-tvos_simulator_version_min");
+  else if (isTargetXROS())
+    CmdArgs.push_back("-xros_version_min");
+  else if (isTargetXROSSimulator())
+    CmdArgs.push_back("-xros_simulator_version_min");
   else if (isTargetIOSSimulator())
     CmdArgs.push_back("-ios_simulator_version_min");
   else if (isTargetIOSBased())
@@ -2846,6 +2890,8 @@ static const char *getPlatformName(Darwin::DarwinPlatformKind Platform,
     return "tvos";
   case Darwin::WatchOS:
     return "watchos";
+  case Darwin::XROS:
+    return "xros";
   }
   llvm_unreachable("invalid platform");
 }

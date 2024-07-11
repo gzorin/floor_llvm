@@ -901,6 +901,7 @@ CXXABI *ASTContext::createCXXABI(const TargetInfo &T) {
   case TargetCXXABI::GenericARM: // Same as Itanium at this level
   case TargetCXXABI::iOS:
   case TargetCXXABI::WatchOS:
+  case TargetCXXABI::XROS:
   case TargetCXXABI::GenericAArch64:
   case TargetCXXABI::GenericMIPS:
   case TargetCXXABI::GenericItanium:
@@ -11697,6 +11698,7 @@ MangleContext *ASTContext::createMangleContext(const TargetInfo *T) {
   case TargetCXXABI::iOS:
   case TargetCXXABI::WebAssembly:
   case TargetCXXABI::WatchOS:
+  case TargetCXXABI::XROS:
   case TargetCXXABI::XL:
     return ItaniumMangleContext::create(*this, getDiagnostics());
   case TargetCXXABI::Microsoft:
@@ -11718,6 +11720,7 @@ MangleContext *ASTContext::createDeviceMangleContext(const TargetInfo &T) {
   case TargetCXXABI::iOS:
   case TargetCXXABI::WebAssembly:
   case TargetCXXABI::WatchOS:
+  case TargetCXXABI::XROS:
   case TargetCXXABI::XL:
     return ItaniumMangleContext::create(
         *this, getDiagnostics(),

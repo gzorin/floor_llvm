@@ -71,6 +71,13 @@ public:
                        llvm::Triple::TvOS, llvm::Triple::UnknownEnvironment);
     }
 
+    /// Returns the os-environment mapping pair that's used to represent the
+    /// iOS -> XROS version mapping.
+    static inline constexpr OSEnvPair iOStoXROSPair() {
+      return OSEnvPair(llvm::Triple::IOS, llvm::Triple::UnknownEnvironment,
+                       llvm::Triple::XROS, llvm::Triple::UnknownEnvironment);
+    }
+
   private:
     StorageType Value;
 

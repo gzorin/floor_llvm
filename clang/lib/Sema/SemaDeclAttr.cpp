@@ -2732,6 +2732,48 @@ static void handleAvailabilityAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
       if (NewAttr)
         D->addAttr(NewAttr);
     }
+  } else if (S.Context.getTargetInfo().getTriple().isXROS()) {
+    // Transcribe "ios" to "xros" (and add a new attribute) if the versioning
+    // matches before the start of the XROS platform.
+    IdentifierInfo *NewII = nullptr;
+    if (II->getName() == "ios")
+      NewII = &S.Context.Idents.get("xros");
+    else if (II->getName() == "ios_app_extension")
+      NewII = &S.Context.Idents.get("xros_app_extension");
+
+    if (NewII) {
+      const auto *SDKInfo = S.getDarwinSDKInfoForAvailabilityChecking();
+      const auto *IOSToXROSMapping =
+          SDKInfo ? SDKInfo->getVersionMapping(
+                        DarwinSDKInfo::OSEnvPair::iOStoXROSPair())
+                  : nullptr;
+
+      auto AdjustXROSVersion =
+          [IOSToXROSMapping](VersionTuple Version) -> VersionTuple {
+        if (Version.empty())
+          return Version;
+
+        if (IOSToXROSMapping) {
+          if (auto MappedVersion =
+                  IOSToXROSMapping->map(Version, VersionTuple(0, 0), None)) {
+            return MappedVersion.getValue();
+          }
+        }
+        return Version;
+      };
+
+      auto NewIntroduced = AdjustXROSVersion(Introduced.Version);
+      auto NewDeprecated = AdjustXROSVersion(Deprecated.Version);
+      auto NewObsoleted = AdjustXROSVersion(Obsoleted.Version);
+
+      AvailabilityAttr *NewAttr = S.mergeAvailabilityAttr(
+          ND, AL, NewII, true /*Implicit*/, NewIntroduced, NewDeprecated,
+          NewObsoleted, IsUnavailable, Str, IsStrict, Replacement,
+          Sema::AMK_None,
+          PriorityModifier + Sema::AP_InferredFromOtherPlatform);
+      if (NewAttr)
+        D->addAttr(NewAttr);
+    }
   } else if (S.Context.getTargetInfo().getTriple().getOS() ==
                  llvm::Triple::IOS &&
              S.Context.getTargetInfo().getTriple().isMacCatalystEnvironment()) {

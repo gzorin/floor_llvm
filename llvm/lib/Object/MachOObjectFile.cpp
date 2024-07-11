@@ -1452,6 +1452,10 @@ MachOObjectFile::MachOObjectFile(MemoryBufferRef Object, bool IsLittleEndian,
       if ((Err = checkVersCommand(*this, Load, I, &VersLoadCmd,
                                   "LC_VERSION_MIN_WATCHOS")))
         return;
+    } else if (Load.C.cmd == MachO::LC_VERSION_MIN_XROS) {
+      if ((Err = checkVersCommand(*this, Load, I, &VersLoadCmd,
+                                  "LC_VERSION_MIN_XROS")))
+        return;
     } else if (Load.C.cmd == MachO::LC_NOTE) {
       if ((Err = checkNoteCommand(*this, Load, I, Elements)))
         return;

@@ -199,6 +199,7 @@ public:
     ELFIAMCU,
     TvOS,       // Apple tvOS
     WatchOS,    // Apple watchOS
+    XROS,       // Apple visionOS
     Mesa3D,
     Contiki,
     AMDPAL,     // AMD PAL Runtime
@@ -364,6 +365,10 @@ public:
   /// with WatchOS or generic triples.
   VersionTuple getWatchOSVersion() const;
 
+  /// Parse the version number as with getOSVersion.  This should only be called
+  /// with XROS or generic triples.
+  VersionTuple getXROSVersion() const;
+
   /// @}
   /// @name Direct Component Access
   /// @{
@@ -462,15 +467,20 @@ public:
     return getOS() == Triple::WatchOS;
   }
 
+  /// Is this an Apple XROS triple.
+  bool isXROS() const {
+    return getOS() == Triple::XROS;
+  }
+
   bool isWatchABI() const {
     return getSubArch() == Triple::ARMSubArch_v7k;
   }
 
   bool isOSzOS() const { return getOS() == Triple::ZOS; }
 
-  /// Is this a "Darwin" OS (macOS, iOS, tvOS or watchOS).
+  /// Is this a "Darwin" OS (macOS, iOS, tvOS, watchOS or XROS).
   bool isOSDarwin() const {
-    return isMacOSX() || isiOS() || isWatchOS();
+    return isMacOSX() || isiOS() || isWatchOS() || isXROS();
   }
 
   bool isSimulatorEnvironment() const {

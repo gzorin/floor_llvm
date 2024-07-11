@@ -613,6 +613,8 @@ static PlatformType parsePlatformVersion(const ArgList &args) {
           .Cases("tvos-simulator", "8", PLATFORM_TVOSSIMULATOR)
           .Cases("watchos-simulator", "9", PLATFORM_WATCHOSSIMULATOR)
           .Cases("driverkit", "10", PLATFORM_DRIVERKIT)
+          .Cases("xros", "11", PLATFORM_XROS)
+          .Cases("xros-simulator", "12", PLATFORM_XROSSIMULATOR)
           .Default(PLATFORM_UNKNOWN);
   if (platform == PLATFORM_UNKNOWN)
     error(Twine("malformed platform: ") + platformStr);
@@ -829,6 +831,8 @@ PlatformType macho::removeSimulator(PlatformType platform) {
     return PLATFORM_TVOS;
   case PLATFORM_WATCHOSSIMULATOR:
     return PLATFORM_WATCHOS;
+  case PLATFORM_XROSSIMULATOR:
+    return PLATFORM_XROS;
   default:
     return platform;
   }
@@ -840,6 +844,7 @@ static bool dataConstDefault(const InputArgList &args) {
       {PLATFORM_IOS, VersionTuple(13, 0)},
       {PLATFORM_TVOS, VersionTuple(13, 0)},
       {PLATFORM_WATCHOS, VersionTuple(6, 0)},
+      {PLATFORM_XROS, VersionTuple(2, 0)},
       {PLATFORM_BRIDGEOS, VersionTuple(4, 0)}};
   PlatformType platform = removeSimulator(config->platformInfo.target.Platform);
   auto it = llvm::find_if(minVersion,
@@ -1244,8 +1249,8 @@ bool macho::link(ArrayRef<const char *> argsArr, llvm::raw_ostream &stdoutOS,
   // FIXME: Add a commandline flag for this too.
   config->zeroModTime = getenv("ZERO_AR_DATE");
 
-  std::array<PlatformType, 3> encryptablePlatforms{
-      PLATFORM_IOS, PLATFORM_WATCHOS, PLATFORM_TVOS};
+  std::array<PlatformType, 4> encryptablePlatforms{
+      PLATFORM_IOS, PLATFORM_WATCHOS, PLATFORM_TVOS, PLATFORM_XROS};
   config->emitEncryptionInfo =
       args.hasFlag(OPT_encryptable, OPT_no_encryption,
                    is_contained(encryptablePlatforms, config->platform()));

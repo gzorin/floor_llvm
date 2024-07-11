@@ -108,6 +108,8 @@ public:
         this->TLSSupported = !Triple.isOSVersionLT(2);
       else
         this->TLSSupported = !Triple.isOSVersionLT(3);
+    } else if (Triple.isXROS()) {
+        this->TLSSupported = true;
     }
 
     this->MCountName = "\01mcount";
@@ -142,6 +144,9 @@ public:
       break;
     case llvm::Triple::WatchOS: // Earliest supporting version is 5.0.0.
       MinVersion = llvm::VersionTuple(5U);
+      break;
+    case llvm::Triple::XROS: // Earliest supporting version is 2.0.0.
+      MinVersion = llvm::VersionTuple(2U);
       break;
     default:
       // Conservatively return 8 bytes if OS is unknown.

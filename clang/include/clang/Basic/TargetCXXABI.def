@@ -74,6 +74,9 @@ ITANIUM_CXXABI(AppleARM64, "applearm64")
 /// that RTTI objects must still be unique at the moment.
 ITANIUM_CXXABI(WatchOS, "watchos")
 
+/// TODO: visionOS/XROS ABI? probably same as AppleARM64?
+ITANIUM_CXXABI(XROS, "xros")
+
 /// The generic AArch64 ABI is also a modified version of the Itanium ABI,
 /// but it has fewer divergences than the 32-bit ARM ABI.
 ///

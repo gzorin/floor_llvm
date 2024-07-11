@@ -382,6 +382,11 @@ def watchos_version_min : Separate<["-"], "watchos_version_min">,
     HelpText<"Oldest watchOS version for which linked output is usable">,
     Flags<[HelpHidden]>,
     Group<grp_version>;
+def xros_version_min : Separate<["-"], "xros_version_min">,
+    MetaVarName<"<version>">,
+    HelpText<"Oldest XROS version for which linked output is usable">,
+    Flags<[HelpHidden]>,
+    Group<grp_version>;
 def bridgeos_version_min : Separate<["-"], "bridgeos_version_min">,
     MetaVarName<"<version>">,
     HelpText<"Oldest bridgeOS version for which linked output is usable">,

@@ -327,6 +327,7 @@ arm::FloatABI arm::getDefaultFloatABI(const llvm::Triple &Triple) {
       return (SubArch == 6 || SubArch == 7) ? FloatABI::SoftFP : FloatABI::Soft;
 
   case llvm::Triple::WatchOS:
+  case llvm::Triple::XROS:
     return FloatABI::Hard;
 
   // FIXME: this is invalid for WindowsCE

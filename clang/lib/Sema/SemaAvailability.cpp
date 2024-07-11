@@ -188,6 +188,9 @@ shouldDiagnoseAvailabilityByDefault(const ASTContext &Context,
   case llvm::Triple::WatchOS:
     ForceAvailabilityFromVersion = VersionTuple(/*Major=*/4);
     break;
+  case llvm::Triple::XROS:
+    ForceAvailabilityFromVersion = VersionTuple(/*Major=*/2);
+    break;
   case llvm::Triple::Darwin:
   case llvm::Triple::MacOSX:
     ForceAvailabilityFromVersion = VersionTuple(/*Major=*/10, /*Minor=*/13);

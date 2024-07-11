@@ -291,7 +291,8 @@ public:
     IPhoneOS,
     TvOS,
     WatchOS,
-    LastDarwinPlatform = WatchOS
+    XROS,
+    LastDarwinPlatform = XROS
   };
   enum DarwinEnvironmentKind {
     NativeEnvironment,
@@ -424,6 +425,21 @@ public:
     return TargetPlatform == WatchOS;
   }
 
+  bool isTargetXROS() const {
+    assert(TargetInitialized && "Target not initialized!");
+    return TargetPlatform == XROS && TargetEnvironment == NativeEnvironment;
+  }
+
+  bool isTargetXROSBased() const {
+    assert(TargetInitialized && "Target not initialized!");
+    return TargetPlatform == XROS;
+  }
+
+  bool isTargetXROSSimulator() const {
+    assert(TargetInitialized && "Target not initialized!");
+    return TargetPlatform == XROS && TargetEnvironment == Simulator;
+  }
+
   bool isTargetMacCatalyst() const {
     return TargetPlatform == IPhoneOS && TargetEnvironment == MacCatalyst;
   }
@@ -531,7 +547,7 @@ public:
 
     // Stack protectors default to on for user code on 10.5,
     // and for everything in 10.6 and beyond
-    if (isTargetIOSBased() || isTargetWatchOSBased())
+    if (isTargetIOSBased() || isTargetWatchOSBased() || isTargetXROSBased())
       return LangOptions::SSPOn;
     else if (isTargetMacOSBased() && !isMacosxVersionLT(10, 6))
       return LangOptions::SSPOn;

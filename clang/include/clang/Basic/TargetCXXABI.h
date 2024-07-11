@@ -94,6 +94,7 @@ public:
     case iOS:
     case WatchOS:
     case AppleARM64:
+    case XROS:
       return T.isOSDarwin();
 
     case Fuchsia:
@@ -173,6 +174,7 @@ public:
     case GenericItanium:
     case iOS:
     case WatchOS:
+    case XROS:
     case Microsoft:
     case XL:
       return true;
@@ -252,6 +254,7 @@ public:
     case Microsoft:
     case GenericMIPS:
     case XL:
+    case XROS:
       return true;
     }
     llvm_unreachable("bad ABI kind");
@@ -290,6 +293,7 @@ public:
     case iOS:
     case GenericMIPS:
     case XL:
+    case XROS:
       return UseTailPaddingUnlessPOD03;
 
     // AppleARM64 and WebAssembly use the C++11 POD rules.  They do not honor

@@ -188,6 +188,8 @@ public:
     addDirectiveHandler<&DarwinAsmParser::parseSectionDirectiveIdent>(".ident");
     addDirectiveHandler<&DarwinAsmParser::parseWatchOSVersionMin>(
       ".watchos_version_min");
+    addDirectiveHandler<&DarwinAsmParser::parseXROSVersionMin>(
+      ".xros_version_min");
     addDirectiveHandler<&DarwinAsmParser::parseTvOSVersionMin>(
       ".tvos_version_min");
     addDirectiveHandler<&DarwinAsmParser::parseIOSVersionMin>(
@@ -448,6 +450,9 @@ public:
 
   bool parseWatchOSVersionMin(StringRef Directive, SMLoc Loc) {
     return parseVersionMin(Directive, Loc, MCVM_WatchOSVersionMin);
+  }
+  bool parseXROSVersionMin(StringRef Directive, SMLoc Loc) {
+    return parseVersionMin(Directive, Loc, MCVM_XROSVersionMin);
   }
   bool parseTvOSVersionMin(StringRef Directive, SMLoc Loc) {
     return parseVersionMin(Directive, Loc, MCVM_TvOSVersionMin);
@@ -1111,6 +1116,7 @@ static Triple::OSType getOSTypeFromMCVM(MCVersionMinType Type) {
   switch (Type) {
   case MCVM_WatchOSVersionMin: return Triple::WatchOS;
   case MCVM_TvOSVersionMin:    return Triple::TvOS;
+  case MCVM_XROSVersionMin:    return Triple::XROS;
   case MCVM_IOSVersionMin:     return Triple::IOS;
   case MCVM_OSXVersionMin:     return Triple::MacOSX;
   }
@@ -1157,6 +1163,8 @@ static Triple::OSType getOSTypeFromPlatform(MachO::PlatformType Type) {
   case MachO::PLATFORM_TVOSSIMULATOR:    /* silence warning */ break;
   case MachO::PLATFORM_WATCHOSSIMULATOR: /* silence warning */ break;
   case MachO::PLATFORM_DRIVERKIT:        /* silence warning */ break;
+  case MachO::PLATFORM_XROS:    return Triple::XROS;
+  case MachO::PLATFORM_XROSSIMULATOR:    /* silence warning */ break;
   }
   llvm_unreachable("Invalid mach-o platform type");
 }

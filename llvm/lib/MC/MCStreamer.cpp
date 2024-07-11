@@ -1260,6 +1260,8 @@ getMachoVersionMinLoadCommandType(const Triple &Target) {
     return MCVM_TvOSVersionMin;
   case Triple::WatchOS:
     return MCVM_WatchOSVersionMin;
+  case Triple::XROS:
+    return MCVM_XROSVersionMin;
   default:
     break;
   }

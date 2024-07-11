@@ -104,6 +104,16 @@ void getDarwinDefines(MacroBuilder &Builder, const LangOptions &Opts,
     Str[4] = '0' + (OsVersion.getSubminor().getValueOr(0) % 10);
     Str[5] = '\0';
     Builder.defineMacro("__ENVIRONMENT_WATCH_OS_VERSION_MIN_REQUIRED__", Str);
+  } else if (Triple.isXROS()) {
+    assert(OsVersion < VersionTuple(10) && "Invalid version!");
+    char Str[6];
+    Str[0] = '0' + OsVersion.getMajor();
+    Str[1] = '0' + (OsVersion.getMinor().getValueOr(0) / 10);
+    Str[2] = '0' + (OsVersion.getMinor().getValueOr(0) % 10);
+    Str[3] = '0' + (OsVersion.getSubminor().getValueOr(0) / 10);
+    Str[4] = '0' + (OsVersion.getSubminor().getValueOr(0) % 10);
+    Str[5] = '\0';
+    Builder.defineMacro("__ENVIRONMENT_VISION_OS_VERSION_MIN_REQUIRED__", Str);
   } else if (Triple.isMacOSX()) {
     // Note that the Driver allows versions which aren't representable in the
     // define (because we only get a single digit for the minor and micro

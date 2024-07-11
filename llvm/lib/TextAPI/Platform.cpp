@@ -84,6 +84,10 @@ StringRef getPlatformName(PlatformType Platform) {
     return "watchOS Simulator";
   case PLATFORM_DRIVERKIT:
     return "DriverKit";
+  case PLATFORM_XROS:
+    return "XROS";
+  case PLATFORM_XROSSIMULATOR:
+    return "XROS Simulator";
   }
   llvm_unreachable("Unknown llvm::MachO::PlatformType enum");
 }
@@ -128,6 +132,10 @@ std::string getOSAndEnvironmentName(PlatformType Platform,
     return "watchos" + Version + "-simulator";
   case PLATFORM_DRIVERKIT:
     return "driverkit" + Version;
+  case PLATFORM_XROS:
+    return "xros" + Version;
+  case PLATFORM_XROSSIMULATOR:
+    return "xros" + Version + "-simulator";
   }
   llvm_unreachable("Unknown llvm::MachO::PlatformType enum");
 }

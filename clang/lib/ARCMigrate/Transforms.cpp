@@ -46,7 +46,8 @@ bool trans::canApplyWeak(ASTContext &Ctx, QualType type,
 
   // iOS is always safe to use 'weak'.
   if (Ctx.getTargetInfo().getTriple().isiOS() ||
-      Ctx.getTargetInfo().getTriple().isWatchOS())
+      Ctx.getTargetInfo().getTriple().isWatchOS() ||
+      Ctx.getTargetInfo().getTriple().isXROS())
     AllowOnUnknownClass = true;
 
   while (const PointerType *ptr = T->getAs<PointerType>())

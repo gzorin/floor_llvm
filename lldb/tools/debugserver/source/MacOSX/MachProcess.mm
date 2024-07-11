@@ -682,6 +682,9 @@ MachProcess::GetDeploymentInfo(const struct load_command &lc,
   case LC_VERSION_MIN_WATCHOS:
     handle_version_min(PLATFORM_WATCHOS);
     break;
+  case LC_VERSION_MIN_XROS:
+    handle_version_min(PLATFORM_XROS);
+    break;
 #if defined(LC_BUILD_VERSION)
   case LC_BUILD_VERSION: {
     struct build_version_command build_vers;

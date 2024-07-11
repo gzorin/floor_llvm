@@ -7901,6 +7901,7 @@ CodeGen::CreateMacObjCRuntime(CodeGen::CodeGenModule &CGM) {
   case ObjCRuntime::MacOSX:
   case ObjCRuntime::iOS:
   case ObjCRuntime::WatchOS:
+  case ObjCRuntime::XROS:
     return new CGObjCNonFragileABIMac(CGM);
 
   case ObjCRuntime::GNUstep:

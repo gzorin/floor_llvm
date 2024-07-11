@@ -48,6 +48,9 @@ public:
     /// is a release version of watchOS.
     WatchOS,
 
+    /// TODO: same as iOS/WatchOS?
+    XROS,
+
     /// 'gcc' is the Objective-C runtime shipped with GCC, implementing a
     /// fragile Objective-C ABI
     GCC,
@@ -87,6 +90,7 @@ public:
     case GNUstep: return true;
     case ObjFW: return true;
     case iOS: return true;
+    case XROS: return true;
     case WatchOS: return true;
     }
     llvm_unreachable("bad kind");
@@ -122,6 +126,7 @@ public:
     case MacOSX:
     case iOS:
     case WatchOS:
+    case XROS:
       return false;
     case GCC:
     case GNUstep:
@@ -147,6 +152,7 @@ public:
     case MacOSX: return true;
     case iOS: return true;
     case WatchOS: return true;
+    case XROS: return true;
     case GCC: return false;
     case GNUstep: return true;
     case ObjFW: return true;
@@ -165,6 +171,7 @@ public:
     case MacOSX: return getVersion() >= VersionTuple(10, 7);
     case iOS: return getVersion() >= VersionTuple(5);
     case WatchOS: return true;
+    case XROS: return true;
 
     case GCC: return false;
     case GNUstep: return getVersion() >= VersionTuple(1, 6);
@@ -199,6 +206,8 @@ public:
     case iOS:
       return getVersion() >= VersionTuple(8);
     case WatchOS:
+      return true;
+    case XROS:
       return true;
     case GCC:
       return false;
@@ -235,6 +244,8 @@ public:
     case iOS:
       return getVersion() >= VersionTuple(8);
     case WatchOS:
+      return true;
+    case XROS:
       return true;
 
     case GCC:
@@ -301,6 +312,7 @@ public:
     case MacOSX: return getVersion() >= VersionTuple(10, 11);
     case iOS: return getVersion() >= VersionTuple(9);
     case WatchOS: return true;
+    case XROS: return true;
 
     // This is really a lie, because some implementations and versions
     // of the runtime do not support ARC.  Probably -fgnu-runtime
@@ -329,6 +341,7 @@ public:
     case MacOSX:
     case iOS:
     case WatchOS:
+    case XROS:
     case GNUstep:
     case ObjFW:
       return false;
@@ -351,6 +364,7 @@ public:
     case MacOSX: return getVersion() >= VersionTuple(10, 8);
     case iOS: return getVersion() >= VersionTuple(5);
     case WatchOS: return true;
+    case XROS: return true;
     case GCC: return false;
     case GNUstep: return false;
     case ObjFW: return false;
@@ -364,6 +378,7 @@ public:
     case MacOSX: return true;
     case iOS: return true;
     case WatchOS: return true;
+    case XROS: return true;
     case FragileMacOSX: return false;
     case GCC: return true;
     case GNUstep: return true;
@@ -378,6 +393,7 @@ public:
     case MacOSX: return true;
     case iOS: return true;
     case WatchOS: return true;
+    case XROS: return true;
     case FragileMacOSX: return false;
     case GCC: return true;
     case GNUstep: return true;
@@ -392,6 +408,7 @@ public:
     case MacOSX:
     case iOS:
     case WatchOS:
+    case XROS:
       return true;
     case GNUstep:
       return getVersion() >= VersionTuple(1, 7);
@@ -409,6 +426,8 @@ public:
       return getVersion() >= VersionTuple(9);
     case WatchOS:
       return getVersion() >= VersionTuple(2);
+    case XROS:
+      return true;
     case GNUstep:
       return false;
     default:
@@ -427,6 +446,8 @@ public:
       return getVersion() >= VersionTuple(9);
     case WatchOS:
       return getVersion() >= VersionTuple(2);
+    case XROS:
+      return true;
     }
   }
 
@@ -442,6 +463,7 @@ public:
     case MacOSX:
     case iOS:
     case WatchOS:
+    case XROS:
       return true;
     }
     llvm_unreachable("bad kind");
@@ -454,6 +476,7 @@ public:
     case MacOSX: return true;
     case iOS: return true;
     case WatchOS: return true;
+    case XROS: return true;
     case GCC: return false;
     case GNUstep: return false;
     case ObjFW: return false;

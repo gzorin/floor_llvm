@@ -35,6 +35,7 @@ raw_ostream &clang::operator<<(raw_ostream &out, const ObjCRuntime &value) {
   case ObjCRuntime::FragileMacOSX: out << "macosx-fragile"; break;
   case ObjCRuntime::iOS: out << "ios"; break;
   case ObjCRuntime::WatchOS: out << "watchos"; break;
+  case ObjCRuntime::XROS: out << "xros"; break;
   case ObjCRuntime::GNUstep: out << "gnustep"; break;
   case ObjCRuntime::GCC: out << "gcc"; break;
   case ObjCRuntime::ObjFW: out << "objfw"; break;
@@ -69,6 +70,8 @@ bool ObjCRuntime::tryParse(StringRef input) {
     kind = ObjCRuntime::iOS;
   } else if (runtimeName == "watchos") {
     kind = ObjCRuntime::WatchOS;
+  } else if (runtimeName == "xros") {
+    kind = ObjCRuntime::XROS;
   } else if (runtimeName == "gnustep") {
     // If no version is specified then default to the most recent one that we
     // know about.

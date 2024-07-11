@@ -230,6 +230,7 @@ StringRef Triple::getOSTypeName(OSType Kind) {
   case TvOS: return "tvos";
   case WASI: return "wasi";
   case WatchOS: return "watchos";
+  case XROS: return "xros";
   case Win32: return "windows";
   case ZOS: return "zos";
   }
@@ -548,6 +549,7 @@ static Triple::OSType parseOS(StringRef OSName) {
     .StartsWith("elfiamcu", Triple::ELFIAMCU)
     .StartsWith("tvos", Triple::TvOS)
     .StartsWith("watchos", Triple::WatchOS)
+    .StartsWith("xros", Triple::XROS)
     .StartsWith("mesa3d", Triple::Mesa3D)
     .StartsWith("contiki", Triple::Contiki)
     .StartsWith("amdpal", Triple::AMDPAL)
@@ -1206,6 +1208,27 @@ VersionTuple Triple::getWatchOSVersion() const {
     // OS X.
     return VersionTuple(2);
   case WatchOS: {
+    VersionTuple Version = getOSVersion();
+    if (Version.getMajor() == 0)
+      return VersionTuple(2);
+    return Version;
+  }
+  case IOS:
+    llvm_unreachable("conflicting triple info");
+  }
+}
+
+VersionTuple Triple::getXROSVersion() const {
+  switch (getOS()) {
+  default: llvm_unreachable("unexpected OS for Darwin triple");
+  case Darwin:
+  case MacOSX:
+    // Ignore the version from the triple.  This is only handled because the
+    // the clang driver combines OS X and IOS support into a common Darwin
+    // toolchain that wants to know the iOS version number even when targeting
+    // OS X.
+    return VersionTuple(2);
+  case XROS: {
     VersionTuple Version = getOSVersion();
     if (Version.getMajor() == 0)
       return VersionTuple(2);

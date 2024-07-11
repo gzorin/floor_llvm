@@ -518,6 +518,7 @@ CodeGen::CGCXXABI *CodeGen::CreateItaniumCXXABI(CodeGenModule &CGM) {
   case TargetCXXABI::GenericARM:
   case TargetCXXABI::iOS:
   case TargetCXXABI::WatchOS:
+  case TargetCXXABI::XROS:
     return new ARMCXXABI(CGM);
 
   case TargetCXXABI::AppleARM64:

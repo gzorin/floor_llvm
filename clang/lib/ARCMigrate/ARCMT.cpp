@@ -155,7 +155,7 @@ static bool HasARCRuntime(CompilerInvocation &origCI) {
   if (triple.isiOS())
     return triple.getOSMajorVersion() >= 5;
 
-  if (triple.isWatchOS())
+  if (triple.isWatchOS() || triple.isXROS())
     return true;
 
   if (triple.getOS() == llvm::Triple::Darwin)

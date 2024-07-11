@@ -589,6 +589,7 @@ static const char *getVersionMinDirective(MCVersionMinType Type) {
   switch (Type) {
   case MCVM_WatchOSVersionMin: return ".watchos_version_min";
   case MCVM_TvOSVersionMin:    return ".tvos_version_min";
+  case MCVM_XROSVersionMin:    return ".xros_version_min";
   case MCVM_IOSVersionMin:     return ".ios_version_min";
   case MCVM_OSXVersionMin:     return ".macosx_version_min";
   }
@@ -632,6 +633,8 @@ static const char *getPlatformName(MachO::PlatformType Type) {
   case MachO::PLATFORM_TVOSSIMULATOR:    return "tvossimulator";
   case MachO::PLATFORM_WATCHOSSIMULATOR: return "watchossimulator";
   case MachO::PLATFORM_DRIVERKIT:        return "driverkit";
+  case MachO::PLATFORM_XROS:             return "tvos";
+  case MachO::PLATFORM_XROSSIMULATOR:    return "tvossimulator";
   }
   llvm_unreachable("Invalid Mach-O platform type");
 }
