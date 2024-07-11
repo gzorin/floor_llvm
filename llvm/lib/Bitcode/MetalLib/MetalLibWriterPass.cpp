@@ -431,6 +431,16 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
                          ? ios_version.getMinor().getValue()
                          : 0;
     M.setSDKVersion(VersionTuple{ios_version.getMajor(), ios_minor});
+  } else if (TT.isXROS()) {
+    auto xros_version = TT.getXROSVersion();
+    if (xros_version.getMajor() >= 2) {
+      target_air_version = 270;
+    }
+
+    auto xros_minor = xros_version.getMinor().hasValue()
+                         ? xros_version.getMinor().getValue()
+                         : 0;
+    M.setSDKVersion(VersionTuple{xros_version.getMajor(), xros_minor});
   } else {
     VersionTuple osx_version{};
     TT.getMacOSXVersion(osx_version);
@@ -821,7 +831,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
         static const std::unordered_map<uint32_t, const char *> ident_versions{
             {250, "Apple metal version 31001.638 (metalfe-31001.638.1)"},
             {260, "Apple metal version 32023.155 (metalfe-32023.155)"},
-            {270, "Apple metal version 32023.329 (metalfe-32023.329.2)"},
+            {270, "Apple metal version 32023.331 (metalfe-32023.331)"},
         };
         ident_op->replaceOperandWith(
             0, llvm::MDString::get(cloned_mod->getContext(),
@@ -1091,11 +1101,9 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   } else if (TT.isWatchOS()) {
     header.platform = uint32_t(metal::APPLE_PLATFORM::WATCHOS);
     platform_version = TT.getWatchOSVersion();
-#if 0 // some day
   } else if (TT.isXROS()) {
     header.platform = uint32_t(metal::APPLE_PLATFORM::XROS);
     platform_version = TT.getXROSVersion();
-#endif
   } else {
     header.platform = 0u;
   }

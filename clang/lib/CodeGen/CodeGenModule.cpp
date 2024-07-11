@@ -3606,7 +3606,6 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 	
 	// limits check
 	// https://developer.apple.com/metal/limits/
-	const bool is_osx = (getModule().getTargetTriple().find("macosx") != std::string::npos);
 	const uint32_t buf_limit = 31;
 	const uint32_t tex_limit = 128;
 	if (buffer_idx > buf_limit) {
