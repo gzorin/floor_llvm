@@ -438,8 +438,8 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     }
 
     auto xros_minor = xros_version.getMinor().hasValue()
-                         ? xros_version.getMinor().getValue()
-                         : 0;
+                          ? xros_version.getMinor().getValue()
+                          : 0;
     M.setSDKVersion(VersionTuple{xros_version.getMajor(), xros_minor});
   } else {
     VersionTuple osx_version{};
@@ -1093,16 +1093,24 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     header.platform = uint32_t(metal::APPLE_PLATFORM::MACOS);
     TT.getMacOSXVersion(platform_version);
   } else if (TT.isiOS()) {
-    header.platform = uint32_t(metal::APPLE_PLATFORM::IOS);
+    header.platform = uint32_t(TT.isSimulatorEnvironment()
+                                   ? metal::APPLE_PLATFORM::IOS_SIMULATOR
+                                   : metal::APPLE_PLATFORM::IOS);
     platform_version = TT.getiOSVersion();
   } else if (TT.isTvOS()) {
-    header.platform = uint32_t(metal::APPLE_PLATFORM::TVOS);
+    header.platform = uint32_t(TT.isSimulatorEnvironment()
+                                   ? metal::APPLE_PLATFORM::TVOS_SIMULATOR
+                                   : metal::APPLE_PLATFORM::TVOS);
     platform_version = TT.getiOSVersion();
   } else if (TT.isWatchOS()) {
-    header.platform = uint32_t(metal::APPLE_PLATFORM::WATCHOS);
+    header.platform = uint32_t(TT.isSimulatorEnvironment()
+                                   ? metal::APPLE_PLATFORM::WATCHOS_SIMULATOR
+                                   : metal::APPLE_PLATFORM::WATCHOS);
     platform_version = TT.getWatchOSVersion();
   } else if (TT.isXROS()) {
-    header.platform = uint32_t(metal::APPLE_PLATFORM::XROS);
+    header.platform = uint32_t(TT.isSimulatorEnvironment()
+                                   ? metal::APPLE_PLATFORM::XROS_SIMULATOR
+                                   : metal::APPLE_PLATFORM::XROS);
     platform_version = TT.getXROSVersion();
   } else {
     header.platform = 0u;
