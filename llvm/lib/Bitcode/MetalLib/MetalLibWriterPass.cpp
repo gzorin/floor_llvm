@@ -190,6 +190,7 @@ struct metallib_program_info {
     } tess;
 
     std::vector<vertex_attribute> vertex_attributes;
+    std::vector<function_constant> function_constants;
 
     // output in same order as Apple:
     //  * NAME
@@ -933,6 +934,55 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       }
     }
 
+    // function constants
+    if (auto fc_md = cloned_mod->getNamedMetadata("air.function_constants");
+        fc_md && fc_md->getNumOperands() > 0) {
+      vector<MDNode *> kept_fcs;
+
+      for (auto op_iter = fc_md->op_begin();
+           op_iter != fc_md->op_end(); ++op_iter) {
+        auto node = dyn_cast_or_null<MDNode>(*op_iter);
+        if (!node ||
+            node->getOperand(0).get() == nullptr) {
+          continue;
+        }
+
+        kept_fcs.push_back(node);
+
+        auto cnst_idx =
+            dyn_cast_or_null<ConstantAsMetadata>(node->getOperand(3));
+        auto cnst_type =
+            dyn_cast_or_null<MDString>(node->getOperand(1));
+        auto cnst_name =
+            dyn_cast_or_null<MDString>(node->getOperand(2));
+        if (!cnst_idx || !cnst_type || !cnst_name) {
+          continue;
+        }
+        auto cnst_idx_int =
+            dyn_cast_or_null<ConstantInt>(cnst_idx->getValue());
+        if (!cnst_idx_int) {
+          continue;
+        }
+        function_constant cnst{
+            .name = cnst_name->getString().str(),
+            .index = (uint32_t)cnst_idx_int->getZExtValue(),
+            .type = data_type_from_string(cnst_type->getString().str()),
+            .active = true
+        };
+        entry.function_constants.emplace_back(std::move(cnst));
+      }
+
+      fc_md->dropAllReferences();
+      if (kept_fcs.empty()) {
+        fc_md->eraseFromParent();
+      }
+      else {
+        for (auto node : kept_fcs) {
+          fc_md->addOperand(node);
+        }
+      }
+    }
+
     // write module / bitcode
     raw_string_ostream bitcode_stream{entry.bitcode_data};
     if (emit_bc50) {
@@ -954,19 +1004,43 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
 
     raw_string_ostream ext_md_stream{entry.extended_md_data};
     uint32_t ext_md_length = tag_length + sizeof(uint32_t);
+
+    uint16_t attr_count = 0;
+    uint16_t vatt_len = 0;
+    uint16_t vaty_len = 0;
+
     if (!entry.vertex_attributes.empty()) {
-      const auto attr_count = (uint16_t)entry.vertex_attributes.size();
+      attr_count = (uint16_t)entry.vertex_attributes.size();
       ext_md_length += 2u * (tag_length + sizeof(uint16_t)); // VATT and VATY
-      uint16_t vatt_len = sizeof(uint16_t) /* attr count */ +
-                          2u * attr_count /* per-attr info */;
-      uint16_t vaty_len =
+      vatt_len =
+          sizeof(uint16_t) /* attr count */ +
+          2u * attr_count /* per-attr info */;
+      vaty_len =
           sizeof(uint16_t) /* attr count */ + attr_count /* per-attr type */;
       for (const auto &vattr : entry.vertex_attributes) {
         vatt_len += vattr.name.size() + 1u;
       }
       ext_md_length += vatt_len + vaty_len;
-      ext_md_stream.write((const char *)&ext_md_length, sizeof(uint32_t));
+    }
 
+    uint16_t cnst_count = 0;
+    uint16_t cnst_len = 0;
+
+    if (!entry.function_constants.empty()) {
+      cnst_count = (uint16_t)entry.function_constants.size();
+      ext_md_length += tag_length + sizeof(uint16_t); // CNST
+      cnst_len =
+          sizeof(uint16_t) + /* cnst count */
+          ((sizeof(uint8_t) + sizeof(uint16_t) + sizeof(uint8_t)) * cnst_count) /* per-cnst info */;
+      for (const auto& cnst : entry.function_constants) {
+        cnst_len += cnst.name.size() + 1u;
+      }
+      ext_md_length += cnst_len;
+    }
+
+    ext_md_stream.write((const char *)&ext_md_length, sizeof(uint32_t));
+
+    if (!entry.vertex_attributes.empty()) {
       static const auto vatt_tag = TAG_TYPE::VATT;
       static const auto vaty_tag = TAG_TYPE::VATY;
 
@@ -991,9 +1065,27 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       for (const auto &vattr : entry.vertex_attributes) {
         ext_md_stream.write((const char *)&vattr.type, sizeof(DATA_TYPE));
       }
-    } else {
-      ext_md_stream.write((const char *)&ext_md_length, sizeof(uint32_t));
     }
+
+    if (!entry.function_constants.empty()) {
+      static const auto cnst_tag = TAG_TYPE::CNST;
+
+      // CNST
+      ext_md_stream.write((const char *)&cnst_tag, tag_length);
+      ext_md_stream.write((const char *)&cnst_len, sizeof(cnst_len));
+      ext_md_stream.write((const char *)&cnst_count, sizeof(cnst_count));
+      for (const auto& cnst : entry.function_constants) {
+        ext_md_stream.write(cnst.name.c_str(), cnst.name.size());
+        ext_md_stream.write('\0');
+
+        ext_md_stream.write((const char *)&cnst.type, sizeof(DATA_TYPE));
+
+        uint16_t index = (uint16_t)cnst.index;
+        ext_md_stream.write((const char *)&index, sizeof(index));
+        ext_md_stream.write((const char *)&cnst.active, sizeof(uint8_t));
+      }
+    }
+
     ext_md_stream.write((const char *)&end_tag, tag_length);
     ext_md_stream.flush();
 
