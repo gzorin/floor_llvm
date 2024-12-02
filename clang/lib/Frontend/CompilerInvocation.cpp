@@ -3275,6 +3275,7 @@ void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
 
   // as Vulkan is largely compiled as OpenCL, also enable + init opencl
   if (LangStd == LangStandard::lang_vulkan13 ||
+      LangStd == LangStandard::lang_vulkan14 ||
       IK.getLanguage() == Language::Vulkan) {
     Opts.Vulkan = 1;
     Opts.OpenCL = 1;
@@ -3282,6 +3283,8 @@ void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
 
     if (LangStd == LangStandard::lang_vulkan13)
       Opts.VulkanVersion = 130;
+    else if (LangStd == LangStandard::lang_vulkan14)
+      Opts.VulkanVersion = 140;
   }
 
   // OpenCL has some additional defaults.
