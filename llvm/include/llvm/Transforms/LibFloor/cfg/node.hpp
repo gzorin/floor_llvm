@@ -150,8 +150,13 @@ private:
   static CFGNode *find_common_post_dominator(CFGNode *a, CFGNode *b);
   CFGNode *get_immediate_dominator_loop_header();
   bool can_backtrace_to(const CFGNode *parent) const;
+  bool can_backtrace_to_with_blockers(
+      const CFGNode *parent, const std::vector<CFGNode *> &block_nodes) const;
   bool can_backtrace_to(const CFGNode *parent,
                         std::unordered_set<const CFGNode *> &node_cache) const;
+  bool can_backtrace_to_with_blockers(
+      const CFGNode *parent, const std::vector<CFGNode *> &block_nodes,
+      std::unordered_set<const CFGNode *> &node_cache) const;
   bool post_dominates_any_work() const;
   bool post_dominates_any_work(
       const CFGNode *parent,

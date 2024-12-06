@@ -3343,6 +3343,7 @@ bool CFGStructurizer::serialize_interleaved_merge_scopes() {
 
     auto *idom = node->immediate_dominator;
 
+    std::vector<CFGNode *> complex_inner_constructs;
     std::vector<CFGNode *> inner_constructs;
     std::vector<CFGNode *> valid_constructs;
 
@@ -3361,9 +3362,92 @@ bool CFGStructurizer::serialize_interleaved_merge_scopes() {
         // The candidate must not try to merge to other code since we might end
         // up introducing loops that way. All code reachable by candidate must
         // cleanly break to node.
+        // We can make use of a simpler rewrite path if all code paths to node
+        // goes through our candidates. Accept a construct and determine if we
+        // need to promote the complex constructs instead of the inner
+        // constructs. The inner construct may just be a false positive that
+        // ends up blocking the rewrite.
         if (direct_dominance_frontier) {
           inner_constructs.push_back(candidate);
+        } else {
+          complex_inner_constructs.push_back(candidate);
         }
+      }
+    }
+
+    // If true, we need a complex rewrite. This means taking unrelated branches
+    // to node and fuse them into one big merge. This requires very simple
+    // control flow from the candidates, since otherwise we end up with
+    // unintended loops in the rewrite. The simplified flow requires that all
+    // code paths from idom flow through the complex inner candidates.
+    bool collect_all_paths_to_pdom = true;
+
+    if (inner_constructs.size() == 1 && complex_inner_constructs.size() >= 2) {
+      auto *candidate_inner = inner_constructs.front();
+      inner_constructs.clear();
+
+      // Try to detect a false positive where we should ignore inner_constructs.
+
+      // Ensure that the inner construct comes after the candidate constructs.
+      bool should_promote_complex = true;
+      for (auto *candidate : complex_inner_constructs) {
+        if (!query_reachability(*candidate, *candidate_inner)) {
+          should_promote_complex = false;
+          break;
+        }
+      }
+
+      if (should_promote_complex) {
+        // The inner candidate should not post-dominate any other block.
+        // We're looking for unusual merge patterns here.
+        for (auto *pred : candidate_inner->pred) {
+          if (candidate_inner->post_dominates(pred)) {
+            should_promote_complex = false;
+            break;
+          }
+        }
+      }
+
+      if (should_promote_complex) {
+        // In complex merges, we focus on merging as early as possible, rather
+        // than as late as possible. Remove any candidates which are reachable
+        // by other candidates.
+
+        // Disregard the inner constructs, promote the complex ones.
+        collect_all_paths_to_pdom = false;
+
+        // Ensure stable order.
+        std::sort(
+            complex_inner_constructs.begin(), complex_inner_constructs.end(),
+            [](const CFGNode *a, const CFGNode *b) {
+              return a->forward_post_visit_order > b->forward_post_visit_order;
+            });
+
+        size_t count = complex_inner_constructs.size();
+        for (size_t j = 0; j < count; j++) {
+          bool is_reachable = false;
+          for (size_t i = 0; i < j && !is_reachable; i++) {
+            if (query_reachability(*complex_inner_constructs[i],
+                                   *complex_inner_constructs[j])) {
+              is_reachable = true;
+            }
+          }
+
+          if (!is_reachable) {
+            inner_constructs.push_back(complex_inner_constructs[j]);
+          }
+        }
+      }
+
+      if (should_promote_complex && inner_constructs.size() >= 2) {
+        // Verify that all paths to node must go through the inner constructs.
+        // We cannot handle more awkward merges.
+        should_promote_complex =
+            !node->can_backtrace_to_with_blockers(idom, inner_constructs);
+      }
+
+      if (!should_promote_complex) {
+        continue;
       }
     }
 
@@ -3373,6 +3457,10 @@ bool CFGStructurizer::serialize_interleaved_merge_scopes() {
                 return a->forward_post_visit_order <
                        b->forward_post_visit_order;
               });
+
+    if (inner_constructs.size() < 2) {
+      continue;
+    }
 
     // Prune any candidate that can reach another candidate. The sort ensures
     // that candidate to be removed comes last.
@@ -3504,7 +3592,8 @@ bool CFGStructurizer::serialize_interleaved_merge_scopes() {
     }
 
     if (need_deinterleave) {
-      collect_and_dispatch_control_flow(idom, node, valid_constructs, true);
+      collect_and_dispatch_control_flow(idom, node, valid_constructs,
+                                        collect_all_paths_to_pdom);
       // This completely transposes the CFG, so need to recompute CFG to keep
       // going.
       recompute_cfg();
@@ -3735,9 +3824,9 @@ CFGNode *CFGStructurizer::find_natural_switch_merge_block(
       if (!front)
         continue;
 
-      if (front->forward_post_visit_order !=
-              post_dominator->forward_post_visit_order &&
-          query_reachability(*front, *post_dominator)) {
+      if (!post_dominator || (front->forward_post_visit_order !=
+                                  post_dominator->forward_post_visit_order &&
+                              query_reachability(*front, *post_dominator))) {
         // If this is reachable by a different case label, we have a winner.
         // This must be a fake fallthrough that we should promote to switch
         // merge.
@@ -3895,6 +3984,48 @@ bool CFGStructurizer::find_switch_blocks(unsigned pass) {
 
     auto *merge = find_common_post_dominator(node->succ);
     auto *natural_merge = find_natural_switch_merge_block(node, merge);
+
+    // If there are early exits inside the switch statement, post-dominance
+    // analysis won't work. Just pick the natural merge. This only seems to
+    // happen in dxbc2dxil.
+    if (!merge) {
+      merge = natural_merge;
+    }
+
+    // If there is still nothing, it's possible one of the case labels is the
+    // only non-exiting path. If we have no natural merge either, this is the
+    // likely merge point.
+    if (!merge) {
+      CFGNode *pdom = nullptr;
+      for (auto *succ : node->succ) {
+        if (!succ->dominates_all_reachable_exits()) {
+          if (!pdom) {
+            pdom = succ;
+          } else {
+            auto *new_pdom = CFGNode::find_common_post_dominator(pdom, succ);
+            if (new_pdom) {
+              pdom = new_pdom;
+            }
+          }
+
+          // If there is at least one exit, have a fallback.
+          merge = succ;
+          natural_merge = succ;
+        }
+      }
+
+      // If we have a valid pdom, that is the more reasonable target.
+      if (pdom) {
+        merge = pdom;
+        natural_merge = pdom;
+      }
+    }
+
+    if (!merge) {
+      // Merge to unreachable.
+      node->merge = MergeType::Selection;
+      continue;
+    }
 
     if (node->freeze_structured_analysis &&
         node->merge == MergeType::Selection) {
@@ -4059,6 +4190,11 @@ bool CFGStructurizer::find_switch_blocks(unsigned pass) {
         (!node->dominates(merge) || block_is_plain_continue(merge))) {
       create_switch_merge_ladder(node, merge);
       merge = find_common_post_dominator(node->succ);
+      // If there are early-exits, the pdom may be nullptr. Safeguard against
+      // this. This only seems to happen in dxbc2dxil.
+      if (!merge) {
+        merge = merge_ladder;
+      }
       modified_cfg = true;
     }
 
@@ -5487,9 +5623,20 @@ bool CFGStructurizer::find_loops(unsigned pass) {
       // node->name.c_str());
     } else if (dominated_exit.size() == 1 && non_dominated_exit.empty() &&
                inner_dominated_exit.empty()) {
-      // Clean merge.
-      // This is a unique merge block. There can be no other merge candidate.
-      node->loop_merge_block = dominated_exit.front();
+      CFGNode *direct_exit_pdom = nullptr;
+      if (!result.direct_exits.empty()) {
+        direct_exit_pdom = find_common_post_dominator(result.direct_exits);
+      }
+
+      if (direct_exit_pdom &&
+          query_reachability(*dominated_exit.front(), *direct_exit_pdom)) {
+        node->loop_ladder_block = dominated_exit.front();
+        node->loop_merge_block = direct_exit_pdom;
+      } else {
+        // Clean merge.
+        // This is a unique merge block. There can be no other merge candidate.
+        node->loop_merge_block = dominated_exit.front();
+      }
 
       const_cast<CFGNode *>(node->loop_merge_block)->add_unique_header(node);
       // LOGI("Loop with simple merge: %p (%s) -> %p (%s)\n", static_cast<const
