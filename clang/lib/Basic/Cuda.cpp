@@ -62,6 +62,8 @@ const char *CudaVersionToString(CudaVersion V) {
     return "12.5";
   case CudaVersion::CUDA_126:
     return "12.6";
+  case CudaVersion::CUDA_127:
+    return "12.7";
   case CudaVersion::NEW:
     return "";
   }
@@ -95,6 +97,7 @@ CudaVersion CudaStringToVersion(const llvm::Twine &S) {
       .Case("12.4", CudaVersion::CUDA_124)
       .Case("12.5", CudaVersion::CUDA_125)
       .Case("12.6", CudaVersion::CUDA_126)
+      .Case("12.7", CudaVersion::CUDA_127)
       .Default(CudaVersion::UNKNOWN);
 }
 
@@ -122,7 +125,8 @@ static const CudaArchToStringMap arch_names[] = {
     SM(75),                          // Turing
     SM(80), SM(82), SM(86), SM(87), SM(88), // Ampere
     SM(89),                          // Ada
-    SM(90),                          // Hopper
+    SM(90), SM(90a),                 // Hopper
+    SM(100), SM(100a), SM(101), SM(101a), // Blackwell
     GFX(600),  // gfx600
     GFX(601),  // gfx601
     GFX(602),  // gfx602
@@ -229,7 +233,13 @@ CudaVersion MinVersionForCudaArch(CudaArch A) {
     return CudaVersion::CUDA_116;
   case CudaArch::SM_89:
   case CudaArch::SM_90:
+  case CudaArch::SM_90a:
     return CudaVersion::CUDA_118;
+  case CudaArch::SM_100:
+  case CudaArch::SM_100a:
+  case CudaArch::SM_101:
+  case CudaArch::SM_101a:
+    return CudaVersion::CUDA_127;
   default:
     llvm_unreachable("invalid enum");
   }
@@ -307,6 +317,8 @@ CudaVersion ToCudaVersion(llvm::VersionTuple Version) {
     return CudaVersion::CUDA_125;
   case 126:
     return CudaVersion::CUDA_126;
+  case 127:
+    return CudaVersion::CUDA_127;
   default:
     return CudaVersion::UNKNOWN;
   }
