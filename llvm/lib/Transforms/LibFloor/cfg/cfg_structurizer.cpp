@@ -29,9 +29,11 @@
 //
 //===----------------------------------------------------------------------===//
 
-#if !defined(_LIBCPP_HARDENING_MODE)
-#define _LIBCPP_HARDENING_MODE (1 << 1) /* none */
+// opt out of libc++ hardening (this will fail in std::sort otherwise)
+#if defined(_LIBCPP_HARDENING_MODE)
+#undef _LIBCPP_HARDENING_MODE
 #endif
+#define _LIBCPP_HARDENING_MODE (1 << 1) /* none */
 
 #include "llvm/Transforms/LibFloor/cfg/cfg_structurizer.hpp"
 #include "llvm/Transforms/LibFloor/cfg/node.hpp"
