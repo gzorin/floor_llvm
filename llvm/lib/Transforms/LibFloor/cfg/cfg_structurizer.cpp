@@ -447,6 +447,34 @@ bool CFGStructurizer::block_is_breaking_phi_construct(
     }
   }
 
+  // A more complicated case where we want the block to remain as a ladder
+  // block.
+  auto *loop_header = get_innermost_loop_header_for(node);
+  if (loop_header && loop_header->pred_back_edge &&
+      loop_header->dominates(node) &&
+      loop_header->pred_back_edge->succ.empty()) {
+    bool merge_is_outside_loop =
+        !query_reachability(*node, *loop_header->pred_back_edge);
+    if (merge_is_outside_loop) {
+      auto *header_pdom = loop_header->pred_back_edge->immediate_post_dominator;
+
+      // We only want to avoid the split when this is a meaningful ladder.
+      // If the paths all end up in the same merge anyway, it's safer to split.
+      for (auto *df : node->dominance_frontier) {
+        if (df == header_pdom) {
+          return true;
+        }
+      }
+
+      for (auto *pdf : node->post_dominance_frontier) {
+        // We can't reach, but the PDF can. We're confident we're a loop exit.
+        if (query_reachability(*pdf, *loop_header->pred_back_edge)) {
+          return false;
+        }
+      }
+    }
+  }
+
   return true;
 }
 
@@ -6640,14 +6668,35 @@ void CFGStructurizer::traverse_dominated_blocks_and_rewrite_branch(
   dominator->fixup_merge_info_after_branch_rewrite(from, to);
 
   // Force all post-domination information to be recomputed.
+  std::vector<CFGNode *> linear_visitation_cache;
+  linear_visitation_cache.reserve(visitation_cache.size());
+
   for (auto *n : visitation_cache) {
     if (n->immediate_post_dominator == from) {
-      n->immediate_post_dominator = nullptr;
+      if (n->fake_succ.empty()) {
+        n->immediate_post_dominator = nullptr;
+        // Ignore any infinite continue blocks.
+        // They wreak havoc in post-dominance analysis.
+        linear_visitation_cache.push_back(n);
+      } else {
+        // Infinite loop blocks must not be traversed again.
+        n->immediate_post_dominator = to;
+      }
     }
   }
 
   // Will recompute everything that was cleared out.
-  find_common_post_dominator(dominator->succ);
+  // Compute later nodes first. This way we avoid a potential recursive loop.
+  std::sort(linear_visitation_cache.begin(), linear_visitation_cache.end(),
+            [](const CFGNode *a, const CFGNode *b) {
+              return a->forward_post_visit_order < b->forward_post_visit_order;
+            });
+
+  for (auto *n : linear_visitation_cache) {
+    if (!n->immediate_post_dominator) {
+      n->recompute_immediate_post_dominator();
+    }
+  }
   dominator->recompute_immediate_post_dominator();
 }
 
