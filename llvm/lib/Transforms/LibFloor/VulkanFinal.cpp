@@ -909,8 +909,9 @@ namespace {
 						const auto storage_class = (is_iub || !is_sized ? SPIRAS_Uniform : SPIRAS_StorageBuffer);
 						
 						// transform storage class if necessary +
-						// for IUBs/SSBO-Uniform: enclose in struct if the element type is not a struct
-						if ((is_iub || is_ssbo_uniform) && !elem_type->isStructTy()) {
+						// for IUBs/SSBO-Uniform: enclose in unique struct type, because we later need to add a "Block" decoration on it,
+						//                        for which we need to have a unique LLVM type to not run into nested Block/BufferBlock issues
+						if (is_iub || is_ssbo_uniform) {
 							llvm::Type* st_elems[] { elem_type };
 							elem_type = llvm::StructType::create(*ctx, st_elems, "enclose." + arg.getName().str());
 							arg_type = elem_type->getPointerTo(storage_class);
