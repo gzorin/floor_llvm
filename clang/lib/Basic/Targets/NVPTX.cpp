@@ -44,6 +44,7 @@ NVPTXTargetInfo::NVPTXTargetInfo(const llvm::Triple &Triple,
     if (!Feature.startswith("+ptx"))
       continue;
     PTXVersion = llvm::StringSwitch<unsigned>(Feature)
+                     .Case("+ptx87", 87)
                      .Case("+ptx86", 86)
                      .Case("+ptx85", 85)
                      .Case("+ptx84", 84)
@@ -289,6 +290,10 @@ void NVPTXTargetInfo::getTargetDefines(const LangOptions &Opts,
         return "1010";
       case CudaArch::SM_101a:
         return "101a0";
+      case CudaArch::SM_120:
+        return "1200";
+      case CudaArch::SM_120a:
+        return "120a0";
       }
       llvm_unreachable("unhandled CudaArch");
     }();
@@ -299,6 +304,8 @@ void NVPTXTargetInfo::getTargetDefines(const LangOptions &Opts,
       Builder.defineMacro("__CUDA_ARCH_FEAT_SM100_ALL", "1");
     if (GPU == CudaArch::SM_101a)
       Builder.defineMacro("__CUDA_ARCH_FEAT_SM101_ALL", "1");
+    if (GPU == CudaArch::SM_120a)
+      Builder.defineMacro("__CUDA_ARCH_FEAT_SM120_ALL", "1");
   }
 }
 
