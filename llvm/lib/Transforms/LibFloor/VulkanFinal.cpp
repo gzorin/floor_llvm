@@ -865,7 +865,7 @@ namespace {
 				//  * change the return type to void (vs/fs returns have already been modified)
 				//  * transform constant AS pointers to either Uniform or StorageBuffer AS
 				//  * transform StorageBuffer AS image pointers to Uniform AS
-				//  * enclose non-struct Uniform parameters in a struct (note that enclosing SSBOs happens later)
+				//  * enclose Uniform parameters in a struct (note that enclosing SSBOs happens later)
 				//  * handle SSBO array transforms
 				// NOTE: must be called after visiting rets and other ret type/val users
 				std::vector<Type*> param_types;
@@ -922,7 +922,7 @@ namespace {
 								llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0),
 								llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0),
 							};
-							libfloor_utils::for_all_users(arg, [&arg, &idx_list](User& user) {
+							libfloor_utils::for_all_users(arg, [&arg, &idx_list, &storage_class](User& user) {
 								if (auto instr = dyn_cast<Instruction>(&user)) {
 									if (isa<LoadInst>(instr)) {
 										auto elem_gep = llvm::GetElementPtrInst::CreateInBounds(arg.getType()->getScalarType()->getPointerElementType(),
@@ -942,6 +942,17 @@ namespace {
 										if (GEP->isInBounds()) {
 											repl_instr->setIsInBounds();
 										}
+										repl_instr->setDebugLoc(instr->getDebugLoc());
+										instr->replaceAllUsesWith(repl_instr, true /* allow address space change */);
+										instr->eraseFromParent();
+									} else if (auto BC = dyn_cast_or_null<BitCastInst>(instr); BC) {
+										auto dst_type = BC->getDestTy();
+										assert(dst_type->isPointerTy());
+										assert(dst_type->getPointerAddressSpace() != storage_class);
+										auto dst_elem_type = dst_type->getPointerElementType();
+										dst_type = dst_elem_type->getPointerTo(storage_class);
+										auto src = BC->User::getOperand(0);
+										auto repl_instr = new BitCastInst(src, dst_type, "", instr);
 										repl_instr->setDebugLoc(instr->getDebugLoc());
 										instr->replaceAllUsesWith(repl_instr, true /* allow address space change */);
 										instr->eraseFromParent();
