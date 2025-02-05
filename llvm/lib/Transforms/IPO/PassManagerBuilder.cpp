@@ -1109,7 +1109,13 @@ void PassManagerBuilder::populateModulePassManager(
     MPM.add(createVulkanBuiltinParamHandlingPass());
 
     // "pre-final" vulkanization (prior to cfg structurization)
+    // NOTE: we perform some loop+vector passes after this to clean up lowered memcpy's
     MPM.add(createVulkanPreFinalPass());
+    MPM.add(createSimpleLoopUnrollPass(OptLevel, DisableUnrollLoops, ForgetAllSCEVInLoopUnroll));
+    MPM.add(createLoopDistributePass());
+    addVectorPasses(MPM, /* IsFullLTO */ false);
+    addVectorPasses(MPM, true);
+    MPM.add(createVulkanPreFinalPass()); // yes, run again
 
     // Vulkan requires structured control flow:
     // -> hit it with LLVM passes/fixes first

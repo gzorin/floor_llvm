@@ -314,11 +314,10 @@ struct metallib_program_info {
 static bool is_used_in_function(const Function *F, const GlobalVariable *GV) {
   bool used = false;
   libfloor_utils::for_all_instruction_users(
-      *GV, [&F, &used](const Instruction &I) {
-        if (I.getParent()->getParent() == F) {
-          used = true;
-        }
-      });
+      *GV, [&used](const Instruction &) {
+        // always true with restriction below
+        used = true;
+      }, F /* restrict to this function */);
   return used;
 }
 

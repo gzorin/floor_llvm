@@ -124,6 +124,9 @@ OPENCL_EXTENSION(vk_capability_int64, true, 120)
 OPENCL_EXTENSION(vk_capability_float16, true, 120)
 OPENCL_EXTENSION(vk_capability_float64, true, 120)
 OPENCL_EXTENSION(vk_capability_multiview, true, 120)
+OPENCL_EXTENSION(vk_capability_workgroup_memory_explicit_layout, true, 120)
+OPENCL_EXTENSION(vk_capability_workgroup_memory_explicit_layout_8bit_access, true, 120)
+OPENCL_EXTENSION(vk_capability_workgroup_memory_explicit_layout_16bit_access, true, 120)
 
 #undef OPENCL_OPTIONALCOREFEATURE
 #undef OPENCL_COREFEATURE

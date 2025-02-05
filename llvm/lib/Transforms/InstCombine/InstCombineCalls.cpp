@@ -165,6 +165,15 @@ Instruction *InstCombinerImpl::SimplifyAnyMemTransfer(AnyMemTransferInst *MI) {
   Type *NewSrcPtrTy = PointerType::get(IntType, SrcAddrSp);
   Type *NewDstPtrTy = PointerType::get(IntType, DstAddrSp);
 
+  // Vulkan: do not perform any of these memcpy -> bitcast/load replacements,
+  // this would lead to bitcasts that are not supported by Vulkan/SPIR-V and
+  // various strange/unnecessary instruction sequences ...
+  // -> rather perform loads/stores using the actual underlying types
+  // NOTE: we still allow this when fully done on function memory
+  if (isVulkan && (SrcAddrSp != 0 || DstAddrSp != 0)) {
+	  return nullptr;
+  }
+
   // If the memcpy has metadata describing the members, see if we can get the
   // TBAA tag describing our copy.
   MDNode *CopyMD = nullptr;

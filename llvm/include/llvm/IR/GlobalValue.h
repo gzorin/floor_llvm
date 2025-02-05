@@ -272,6 +272,10 @@ public:
 
   Type *getValueType() const { return ValueType; }
 
+  void mutateValueType(Type *VTy) {
+    ValueType = VTy;
+  }
+
   bool isImplicitDSOLocal() const {
     return hasLocalLinkage() ||
            (!hasDefaultVisibility() && !hasExternalWeakLinkage());
