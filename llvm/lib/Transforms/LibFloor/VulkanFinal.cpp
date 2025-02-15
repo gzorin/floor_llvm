@@ -889,23 +889,23 @@ namespace {
 						// handle IUBs
 						const auto iub_attr = F.getAttributeAtIndex(llvm::AttributeList::FirstArgIndex + arg_idx, "vulkan_iub");
 						const auto is_iub = (iub_attr.getRawPointer() != nullptr);
+						assert((!is_iub || (is_iub && arg.onlyReadsMemory())) && "IUB must be read-only");
 						DBG(
 							if (is_iub) {
 								errs() << " (IUB)";
 							}
 						)
 						
-						// since there is a limit on how many IUBs we can have and how large they can be, some arguments might fall back to using SSBOs
-						const auto is_ssbo_uniform = (!is_iub && arg.onlyReadsMemory() &&
-													  (arg.hasAttribute(Attribute::Dereferenceable) ||
-													   arg.hasAttribute(Attribute::DereferenceableOrNull)));
-						
 						// handle SSBO arrays
 						const auto ssbo_array_attr = F.getAttributeAtIndex(llvm::AttributeList::FirstArgIndex + arg_idx, "vulkan_ssbo_array");
 						const auto is_ssbo_array = (ssbo_array_attr.getRawPointer() != nullptr);
 						assert(!(is_ssbo_array && is_iub) && "can't be both IUB and SSBO array");
-						assert(!(is_ssbo_array && is_ssbo_uniform) && "can't be both SSBO uniform and SSBO array");
 						assert((!is_ssbo_array || (is_ssbo_array && ptr_as == SPIRAS_StorageBuffer)) && "wrong SSBO array address space");
+						
+						// since there is a limit on how many IUBs we can have and how large they can be, some arguments might fall back to using SSBOs
+						const auto is_ssbo_uniform = (!is_iub && !is_ssbo_array && arg.onlyReadsMemory() &&
+													  (arg.hasAttribute(Attribute::Dereferenceable) ||
+													   arg.hasAttribute(Attribute::DereferenceableOrNull)));
 						
 						// any image/opaque type is unsized
 						const auto is_sized = elem_type->isSized();
@@ -942,6 +942,7 @@ namespace {
 				auto new_func_type = FunctionType::get(llvm::Type::getVoidTy(*ctx), param_types, false);
 				F.mutateType(PointerType::get(new_func_type, 0));
 				F.mutateFunctionType(new_func_type);
+				F.removeRetAttr(Attribute::NoUndef);
 			}
 			
 			// ensure all work-group/local memory variables are enclosed inside a unique struct + code is updated accordingly
@@ -1680,22 +1681,6 @@ namespace {
 				return;
 			}
 			phi_ptrs.emplace_back(&PHI);
-		}
-		
-		CallInst* insert_keep_block_marker(BasicBlock* keep_block) {
-			Function* keep_block_func = M->getFunction("floor.keep_block");
-			if(keep_block_func == nullptr) {
-				FunctionType* keep_block_type = FunctionType::get(llvm::Type::getVoidTy(*ctx), false);
-				keep_block_func = (Function*)M->getOrInsertFunction("floor.keep_block", keep_block_type).getCallee();
-				keep_block_func->setCallingConv(CallingConv::FLOOR_FUNC);
-				keep_block_func->setCannotDuplicate();
-				keep_block_func->setDoesNotThrow();
-				keep_block_func->setNotConvergent();
-				keep_block_func->setDoesNotRecurse();
-			}
-			CallInst* keep_block_call = CallInst::Create(keep_block_func, "", keep_block->getTerminator());
-			keep_block_call->setCallingConv(CallingConv::FLOOR_FUNC);
-			return keep_block_call;
 		}
 		
 		void handle_pointers() {

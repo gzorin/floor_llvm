@@ -1117,6 +1117,10 @@ void PassManagerBuilder::populateModulePassManager(
     addVectorPasses(MPM, true);
     MPM.add(createVulkanPreFinalPass()); // yes, run again
 
+    // run attribute inference again so that we can safely assume which arguments are read-only/write-only/read-write
+    MPM.add(createInferFunctionAttrsLegacyPass());
+    MPM.add(createAttributorLegacyPass());
+
     // Vulkan requires structured control flow:
     // -> hit it with LLVM passes/fixes first
     MPM.add(createFixIrreduciblePass());

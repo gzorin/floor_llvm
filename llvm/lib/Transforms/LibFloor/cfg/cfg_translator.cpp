@@ -584,6 +584,7 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
               // structured control flow requirements)
               auto new_entry_block = BasicBlock::Create(
                   ctx, node.name + ".new_entry.fake_continue", &F, &node.BB);
+              new_entry_block->markVulkanFakeContinue();
               BranchInst::Create(&node.BB, new_entry_block);
             }
 
@@ -591,6 +592,7 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
             // -> need to create a fake incoming block
             auto continue_block = BasicBlock::Create(
                 ctx, node.name + ".fake_continue", &F, &node.BB);
+            continue_block->markVulkanFakeContinue();
             BranchInst::Create(&node.BB, continue_block);
             create_loop_merge(term, &node.ir.merge_info.merge_block->BB,
                               continue_block,
