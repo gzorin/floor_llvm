@@ -799,6 +799,35 @@ namespace {
 				I.eraseFromParent();
 				return;
 			}
+			else if(func_name == "floor.exit") {
+				// NOTE: we assume everything has been inlined at this point, so that we can just return/exit
+				if (is_fragment_func) {
+					auto func_type = llvm::FunctionType::get(llvm::Type::getVoidTy(*ctx), false);
+					auto discard_func = dyn_cast<Function>(M->getOrInsertFunction("air.discard_fragment", func_type).getCallee());
+					discard_func->addFnAttr(Attribute::NoReturn);
+					auto discard_call = CallInst::Create(func_type, discard_func, "", &I);
+					discard_call->setDebugLoc(I.getDebugLoc());
+				} else if (is_kernel_func || is_tess_control_func || func->getReturnType()->isVoidTy()) {
+					assert(func->getReturnType()->isVoidTy());
+					ReturnInst::Create(*ctx, I.getParent());
+				} else {
+					// we need to create a dummy return value before we can return here
+					auto ret_type = func->getReturnType();
+					if (ret_type->isAggregateType() || ret_type->isVectorTy()) {
+						ReturnInst::Create(*ctx, ConstantAggregateZero::get(ret_type), I.getParent());
+					} else if (ret_type->isIntegerTy()) {
+						ReturnInst::Create(*ctx, ConstantInt::get(ret_type, 0), I.getParent());
+					} else if (ret_type->isFloatingPointTy()) {
+						ReturnInst::Create(*ctx, ConstantFP::get(ret_type, 0.0), I.getParent());
+					} else {
+						// last resort: create dummy alloca and return it
+						auto dummy_alloca = new AllocaInst(ret_type, 0, "dummy_exit_ret", &*func->getEntryBlock().begin());
+						ReturnInst::Create(*ctx, dummy_alloca, I.getParent());
+					}
+				}
+				I.eraseFromParent();
+				return;
+			}
 			// unknown -> ignore for now
 			else return;
 			

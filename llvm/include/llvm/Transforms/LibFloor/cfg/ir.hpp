@@ -99,7 +99,7 @@ struct PHI {
 };
 
 struct Terminator {
-  enum class Type { Unreachable, Branch, Condition, Switch, Return, Kill };
+  enum class Type { Unreachable, Branch, Condition, Switch, Return, Kill, Exit };
 
   // NOTE: this may be nullptr for newly created conditions
   Instruction *terminator = nullptr;

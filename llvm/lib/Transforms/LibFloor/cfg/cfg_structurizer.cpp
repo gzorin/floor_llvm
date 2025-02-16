@@ -199,6 +199,10 @@ void CFGStructurizer::log_cfg(const char *tag) const {
     case Terminator::Type::Kill:
       LOGI("  Kill\n");
       break;
+
+    case Terminator::Type::Exit:
+      LOGI("  Exit\n");
+      break;
     }
 
     switch (node->merge) {
@@ -343,7 +347,8 @@ bool CFGStructurizer::cleanup_breaking_return_constructs() {
   CFGNode *split_candidate = nullptr;
 
   for (auto *node : forward_post_visit_order) {
-    if (node->ir.terminator.type != Terminator::Type::Return) {
+    if (node->ir.terminator.type != Terminator::Type::Return &&
+        node->ir.terminator.type != Terminator::Type::Exit) {
       continue;
     }
 
@@ -2956,7 +2961,8 @@ void CFGStructurizer::fixup_broken_selection_merges(unsigned pass) {
 
           const auto node_is_degenerate_merge_block = [](const CFGNode *n) {
             return n->ir.terminator.type == Terminator::Type::Unreachable ||
-                   (n->ir.terminator.type == Terminator::Type::Return &&
+                   ((n->ir.terminator.type == Terminator::Type::Return ||
+                     n->ir.terminator.type == Terminator::Type::Exit) &&
                     n->ir.operations.empty());
           };
 

@@ -22,4 +22,7 @@ Macros:
 #pragma GCC system_header
 #endif
 
-#define assert(...)
+// use assert definition provided by libfloor if this define is set
+#if !defined(FLOOR_ASSERT)
+#define assert(...) __builtin_expect(!(expr), 0)
+#endif
