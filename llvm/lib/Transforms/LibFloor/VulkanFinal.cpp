@@ -2252,24 +2252,27 @@ namespace {
 		void lower_mem_instructions() {
 			for (auto& mem_instr : mem_instrs) {
 				if (auto memcpy_instr = dyn_cast_or_null<MemCpyInst>(mem_instr)) {
-					lower_memcpy(*memcpy_instr);
+					was_modified |= lower_memcpy(*memcpy_instr);
 				} else if (auto memmove_instr = dyn_cast_or_null<MemMoveInst>(mem_instr)) {
-					llvm::errs() << "can't lower memmove yet: " << *mem_instr << "\n";
+					llvm::errs() << "can't lower memmove yet: " << *memmove_instr << "\n";
 				} else if (auto memset_instr = dyn_cast_or_null<MemSetInst>(mem_instr)) {
-					llvm::errs() << "can't lower memset yet: " << *mem_instr << "\n";
+					llvm::errs() << "can't lower memset yet: " << *memset_instr << "\n";
 				} else {
 					llvm::errs() << "unknown/unhandled memory instruction: " << *mem_instr << "\n";
 				}
 			}
 		}
-		
-		void lower_memcpy(MemCpyInst& memcpy_instr) {
+		//! tries to lower "memcpy_instr" to LLVM instructions,
+		//! returns true if the lowering happened
+		bool lower_memcpy(MemCpyInst& memcpy_instr) {
 			auto len_op = memcpy_instr.getLength();
 			auto const_len_op = dyn_cast_or_null<ConstantInt>(len_op);
+#if 0
 			if (const_len_op && const_len_op->getZExtValue() <= 1 /* not sure if 0 is possible */) {
 				// -> only copying one value, can be handled by OpCopyMemory
-				return;
+				return false;
 			}
+#endif
 			
 			// optimize length operand
 			if (const_len_op) {
@@ -2287,13 +2290,13 @@ namespace {
 			auto dst = memcpy_instr.getRawDest();
 			auto src_orig_type = src->getType();
 			auto dst_orig_type = dst->getType();
-			auto src_bitcast = dyn_cast_or_null<BitCastInst>(src);
-			auto dst_bitcast = dyn_cast_or_null<BitCastInst>(dst);
-			if (src_bitcast) {
-				src_orig_type = src_bitcast->getOperand(0)->getType();
+			auto src_bitcast_op = libfloor_utils::get_underlying_bitcast_operand_or_null(src);
+			auto dst_bitcast_op = libfloor_utils::get_underlying_bitcast_operand_or_null(dst);
+			if (src_bitcast_op) {
+				src_orig_type = src_bitcast_op->getType();
 			}
-			if (dst_bitcast) {
-				dst_orig_type = dst_bitcast->getOperand(0)->getType();
+			if (dst_bitcast_op) {
+				dst_orig_type = dst_bitcast_op->getType();
 			}
 			auto elem_type = src_orig_type->getPointerElementType();
 			llvm::Type* override_loop_op_type = nullptr;
@@ -2301,8 +2304,8 @@ namespace {
 				auto elem_size = M->getDataLayout().getTypeStoreSize(elem_type).getFixedValue();
 				if (elem_size > 1) {
 					// original source and destination types are compatible -> copy based on this type instead
-					src = (src_bitcast ? src_bitcast->getOperand(0) : src);
-					dst = (dst_bitcast ? dst_bitcast->getOperand(0) : dst);
+					src = (src_bitcast_op ? src_bitcast_op : src);
+					dst = (dst_bitcast_op ? dst_bitcast_op : dst);
 					override_loop_op_type = elem_type;
 					assert(!const_len_op || (const_len_op->getZExtValue() % elem_size == 0u));
 				}
@@ -2320,7 +2323,7 @@ namespace {
 											memcpy_instr.isVolatile(), memcpy_instr.isVolatile(), TTI, override_loop_op_type);
 			}
 			memcpy_instr.eraseFromParent();
-			was_modified = true;
+			return true;
 		}
 	};
 	

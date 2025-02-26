@@ -254,6 +254,23 @@ static inline bool simplify_gep_indices(llvm::LLVMContext& ctx, llvm::GetElement
 }
 // TODO: should do the same for extractelement/insertelement/extractvalue/insertvalue
 
+//! returns the underlying bitcast operand of "val" if value is a bitcast,
+//! will recursively look through bitcasts if "val" contains a chain of bitcasts
+static inline llvm::Value* get_underlying_bitcast_operand_or_null(llvm::Value* val) {
+	llvm::Value* op = val;
+	do {
+		if (auto bc = dyn_cast_or_null<llvm::BitCastInst>(op); bc) {
+			op = bc->getOperand(0);
+		} else if (auto cexpr = dyn_cast_or_null<llvm::ConstantExpr>(op);
+				   cexpr && cexpr->getOpcode() == llvm::Instruction::BitCast) {
+			op = cexpr->getOperand(0);
+		} else {
+			break;
+		}
+	} while (true);
+	return (op != val ? op : nullptr);
+}
+
 } // namespace libfloor_utils
 
 #endif
