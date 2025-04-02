@@ -2830,6 +2830,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 					COMPUTE_IMAGE_TYPE::FLAG_MSAA
 				};
 				const auto masked_image_type = image_type & opaque_image_mask;
+				const auto is_16bit = (image_type & COMPUTE_IMAGE_TYPE::FLAG_16_BIT_SAMPLING) != COMPUTE_IMAGE_TYPE::NONE;
 				
 				std::string img_type_str;
 				switch (masked_image_type) {
@@ -2892,13 +2893,13 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				img_type_str += '<';
 				switch (image_type & COMPUTE_IMAGE_TYPE::__DATA_TYPE_MASK) {
 					case COMPUTE_IMAGE_TYPE::FLOAT:
-						img_type_str += "float";
+						img_type_str += (is_16bit ? "half" : "float");
 						break;
 					case COMPUTE_IMAGE_TYPE::INT:
-						img_type_str += "int";
+						img_type_str += (is_16bit ? "short" : "int");
 						break;
 					case COMPUTE_IMAGE_TYPE::UINT:
-						img_type_str += "uint";
+						img_type_str += (is_16bit ? "ushort" : "uint");
 						break;
 					default:
 						break;
@@ -3024,6 +3025,9 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				case BuiltinType::OCLImage1dArray:
 					tex_type_name += "texture1d_array";
 					break;
+				case BuiltinType::OCLImage1dBuffer:
+					tex_type_name += "texture1d_buffer";
+					break;
 				case BuiltinType::OCLImage2d:
 					tex_type_name += "texture2d";
 					break;
@@ -3039,8 +3043,14 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				case BuiltinType::OCLImage2dMSAA:
 					tex_type_name += "texture2d_ms";
 					break;
+				case BuiltinType::OCLImage2dArrayMSAA:
+					tex_type_name += "texture2d_ms_array";
+					break;
 				case BuiltinType::OCLImage2dMSAADepth:
 					tex_type_name += "depth2d_ms";
+					break;
+				case BuiltinType::OCLImage2dArrayMSAADepth:
+					tex_type_name += "depth2d_ms_array";
 					break;
 				case BuiltinType::OCLImage3d:
 					tex_type_name += "texture3d";
@@ -3066,9 +3076,19 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			std::string sample_type_str = "float";
 			if (data_type) {
 				const auto canon_data_type = data_type->getImageDataType().getCanonicalType();
-				if (canon_data_type->isIntegerType()) sample_type_str = "int";
-				if (canon_data_type->isUnsignedIntegerType()) sample_type_str = "uint";
-				// else: just assume float
+				const auto llvm_canon_data_type = getTypes().ConvertTypeForMem(canon_data_type);
+				const auto data_type_size = getDataLayout().getTypeStoreSize(llvm_canon_data_type).getFixedValue();
+				
+				if (canon_data_type->isSignedIntegerType()) {
+					sample_type_str = (data_type_size == 2 ? "short" : "int");
+				} else if (canon_data_type->isUnsignedIntegerType()) {
+					sample_type_str = (data_type_size == 2 ? "ushort" : "uint");
+				} else {
+					// else: just assume float
+					if (data_type_size == 2) {
+						sample_type_str = "half";
+					}
+				}
 			}
 			tex_type_name += sample_type_str;
 			tex_type_name += ", ";

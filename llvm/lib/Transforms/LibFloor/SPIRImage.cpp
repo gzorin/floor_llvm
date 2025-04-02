@@ -374,19 +374,20 @@ namespace {
 			// (this is actually easy enough, since everything is very static)
 			std::string cl_func_name;
 			llvm::Type* ret_type;
-			if(func_name.endswith(".float")) {
+			bool needs_uint_to_ushort_conversion = false;
+			bool needs_int_to_short_conversion = false;
+			if (func_name.endswith(".float")) {
 				cl_func_name = "_Z11read_imagef";
 				ret_type = llvm::FixedVectorType::get(llvm::Type::getFloatTy(*ctx), 4);
-			}
-			else if(func_name.endswith(".int")) {
+			} else if (func_name.endswith(".int") || func_name.endswith(".short")) {
 				cl_func_name = "_Z11read_imagei";
 				ret_type = llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 4);
-			}
-			else if(func_name.endswith(".uint")) {
+				needs_int_to_short_conversion = func_name.endswith(".short");
+			} else if (func_name.endswith(".uint") || func_name.endswith(".ushort")) {
 				cl_func_name = "_Z12read_imageui";
 				ret_type = llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 4);
-			}
-			else if(func_name.endswith(".half")) {
+				needs_uint_to_ushort_conversion = func_name.endswith(".ushort");
+			} else if (func_name.endswith(".half")) {
 				cl_func_name = "_Z11read_imageh";
 				ret_type = llvm::FixedVectorType::get(llvm::Type::getHalfTy(*ctx), 4);
 			}
@@ -539,7 +540,7 @@ namespace {
 			
 			// if this is a depth read/sample, the return type is a float -> create a float4
 			llvm::Value* read_call_result = read_call;
-			if(is_depth) {
+			if (is_depth) {
 				read_call_result = UndefValue::get(llvm::FixedVectorType::get(llvm::Type::getFloatTy(*ctx), 4));
 				if(!is_compare) {
 					read_call_result = builder->CreateInsertElement(read_call_result, read_call, builder->getInt32(0));
@@ -549,6 +550,12 @@ namespace {
 					emulate_depth_compare(read_call_result, read_call, compare_function, compare_value_arg);
 				}
 				// NOTE: rest of vector is undef/zero (and will be stripped away again anyways)
+			} else if (needs_uint_to_ushort_conversion) {
+				// convert result from uint32 to uint16
+				read_call_result = builder->CreateZExtOrTrunc(read_call, llvm::FixedVectorType::get(llvm::Type::getInt16Ty(*ctx), 4));
+			} else if (needs_int_to_short_conversion) {
+				// convert result from int32 to int16
+				read_call_result = builder->CreateSExtOrTrunc(read_call, llvm::FixedVectorType::get(llvm::Type::getInt16Ty(*ctx), 4));
 			}
 			
 			//
@@ -588,19 +595,20 @@ namespace {
 			}
 			
 			std::string cl_func_name, dtype;
-			if(func_name.endswith(".float")) {
+			bool needs_ushort_to_uint_conversion = false;
+			bool needs_short_to_int_conversion = false;
+			if (func_name.endswith(".float")) {
 				cl_func_name = "_Z12write_imagef";
 				dtype = "f";
-			}
-			else if(func_name.endswith(".int")) {
+			} else if (func_name.endswith(".int") || func_name.endswith(".short")) {
 				cl_func_name = "_Z12write_imagei";
 				dtype = "i";
-			}
-			else if(func_name.endswith(".uint")) {
+				needs_short_to_int_conversion = func_name.endswith(".short");
+			} else if (func_name.endswith(".uint") || func_name.endswith(".ushort")) {
 				cl_func_name = "_Z13write_imageui";
 				dtype = "j";
-			}
-			else if(func_name.endswith(".half")) {
+				needs_ushort_to_uint_conversion = func_name.endswith(".ushort");
+			} else if (func_name.endswith(".half")) {
 				cl_func_name = "_Z12write_imageh";
 				dtype = "h";
 			}
@@ -658,8 +666,14 @@ namespace {
 			// data is always a vector4, unless we're writing depth
 			if(!is_depth) {
 				cl_func_name += "Dv4_";
-				func_arg_types.push_back(data_arg->getType());
-				func_args.push_back(data_arg);
+				Value* data_arg_ptr = data_arg;
+				if (needs_ushort_to_uint_conversion) {
+					data_arg_ptr = builder->CreateZExt(data_arg, llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 4));
+				} else if (needs_short_to_int_conversion) {
+					data_arg_ptr = builder->CreateSExt(data_arg, llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 4));
+				}
+				func_arg_types.push_back(data_arg_ptr->getType());
+				func_args.push_back(data_arg_ptr);
 			}
 			else {
 				// extract and use depth elem

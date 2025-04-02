@@ -75,7 +75,7 @@ namespace {
 	struct VulkanImage : public FloorImageBasePass {
 		static char ID; // Pass identification, replacement for typeid
 		
-		//! Vulkan currently (as of Vulkan 1.3 / SPIR-V 1.6) does not actually support float16 sampling,
+		//! Vulkan currently (as of Vulkan 1.3 / SPIR-V 1.6) does not actually support any 16-bit sampling,
 		//! if this ever changes / gets supported properly, set this to true
 		static constexpr const bool can_vulkan_handle_float16 = false;
 		
@@ -372,15 +372,19 @@ namespace {
 			std::string vk_func_name;
 			llvm::Type* ret_type;
 			bool needs_float_to_half_conversion = false;
+			bool needs_uint_to_ushort_conversion = false;
+			bool needs_int_to_short_conversion = false;
 			if (func_name.endswith(".float")) {
 				vk_func_name = "_Z11read_imagef";
 				ret_type = llvm::FixedVectorType::get(llvm::Type::getFloatTy(*ctx), 4);
-			} else if (func_name.endswith(".int")) {
+			} else if (func_name.endswith(".int") || func_name.endswith(".short")) {
 				vk_func_name = "_Z11read_imagei";
 				ret_type = llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 4);
-			} else if (func_name.endswith(".uint")) {
+				needs_int_to_short_conversion = func_name.endswith(".short");
+			} else if (func_name.endswith(".uint") || func_name.endswith(".ushort")) {
 				vk_func_name = "_Z12read_imageui";
 				ret_type = llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 4);
+				needs_uint_to_ushort_conversion = func_name.endswith(".ushort");
 			} else if (func_name.endswith(".half")) {
 				vk_func_name = "_Z11read_imageh";
 				if constexpr (can_vulkan_handle_float16) {
@@ -610,6 +614,12 @@ namespace {
 			if (needs_float_to_half_conversion) {
 				// convert result from float32 to float16
 				read_call_result = builder->CreateFPTrunc(read_call, llvm::FixedVectorType::get(llvm::Type::getHalfTy(*ctx), 4));
+			} else if (needs_uint_to_ushort_conversion) {
+				 // convert result from uint32 to uint16
+				 read_call_result = builder->CreateZExtOrTrunc(read_call, llvm::FixedVectorType::get(llvm::Type::getInt16Ty(*ctx), 4));
+			} else if (needs_int_to_short_conversion) {
+				 // convert result from int32 to int16
+				 read_call_result = builder->CreateSExtOrTrunc(read_call, llvm::FixedVectorType::get(llvm::Type::getInt16Ty(*ctx), 4));
 			} else if (is_depth && is_compare) {
 				// if this is a depth compare, the return type is a float -> create a float4
 				read_call_result = UndefValue::get(llvm::FixedVectorType::get(llvm::Type::getFloatTy(*ctx), 4));
@@ -663,15 +673,19 @@ namespace {
 			
 			std::string vk_func_name, dtype;
 			bool needs_half_to_float_conversion = false;
+			bool needs_ushort_to_uint_conversion = false;
+			bool needs_short_to_int_conversion = false;
 			if (func_name.endswith(".float")) {
 				vk_func_name = "_Z12write_imagef";
 				dtype = "f";
-			} else if (func_name.endswith(".int")) {
+			} else if (func_name.endswith(".int") || func_name.endswith(".short")) {
 				vk_func_name = "_Z12write_imagei";
 				dtype = "i";
-			} else if (func_name.endswith(".uint")) {
+				needs_short_to_int_conversion = func_name.endswith(".short");
+			} else if (func_name.endswith(".uint") || func_name.endswith(".ushort")) {
 				vk_func_name = "_Z13write_imageui";
 				dtype = "j";
+				needs_ushort_to_uint_conversion = func_name.endswith(".ushort");
 			} else if (func_name.endswith(".half")) {
 				vk_func_name = "_Z12write_imageh";
 				if constexpr (can_vulkan_handle_float16) {
@@ -728,6 +742,10 @@ namespace {
 			Value* data_arg_ptr = data_arg;
 			if (needs_half_to_float_conversion) {
 				data_arg_ptr = builder->CreateFPExt(data_arg, llvm::FixedVectorType::get(llvm::Type::getFloatTy(*ctx), 4));
+			} else if (needs_ushort_to_uint_conversion) {
+				data_arg_ptr = builder->CreateZExt(data_arg, llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 4));
+			} else if (needs_short_to_int_conversion) {
+				data_arg_ptr = builder->CreateSExt(data_arg, llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 4));
 			}
 			func_arg_types.push_back(data_arg_ptr->getType());
 			func_args.push_back(data_arg_ptr);

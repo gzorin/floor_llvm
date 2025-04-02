@@ -830,7 +830,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
         static const std::unordered_map<uint32_t, const char *> ident_versions{
             {250, "Apple metal version 31001.638 (metalfe-31001.638.1)"},
             {260, "Apple metal version 32023.155 (metalfe-32023.155)"},
-            {270, "Apple metal version 32023.331 (metalfe-32023.331)"},
+            {270, "Apple metal version 32023.619 (metalfe-32023.619)"},
         };
         ident_op->replaceOperandWith(
             0, llvm::MDString::get(cloned_mod->getContext(),

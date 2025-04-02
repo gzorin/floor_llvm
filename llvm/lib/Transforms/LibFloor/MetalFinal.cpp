@@ -1222,6 +1222,7 @@ namespace {
 				static const std::unordered_map<std::string, std::string> metal_name_lut {
 					{ "struct._texture_1d_t", "struct.metal::texture1d" },
 					{ "struct._texture_1d_array_t", "struct.metal::texture1d_array" },
+					{ "struct._texture_1d_buffer_t", "struct.metal::texture1d_buffer" },
 					{ "struct._texture_2d_t", "struct.metal::texture2d" },
 					{ "struct._texture_2d_array_t", "struct.metal::texture2d_array" },
 					{ "struct._depth_2d_t", "struct.metal::depth2d" },

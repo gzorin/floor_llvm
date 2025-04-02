@@ -121,6 +121,28 @@ namespace {
 			}
 		}
 		
+		static uint32_t get_metal_version(Module& M) {
+			llvm::NamedMDNode* AIRLangVersion = M.getNamedMetadata("air.language_version");
+			assert(AIRLangVersion);
+			const MDNode* language_version_md = AIRLangVersion->getOperand(0);
+			assert(language_version_md->getNumOperands() >= 4);
+			
+			const MDOperand& version_major_op = language_version_md->getOperand(1);
+			const MDOperand& version_minor_op = language_version_md->getOperand(2);
+			uint32_t metal_version = 0;
+			if (const ConstantAsMetadata* version_major_md = dyn_cast_or_null<ConstantAsMetadata>(version_major_op.get())) {
+				if (const ConstantInt* version_major_int = dyn_cast_or_null<ConstantInt>(version_major_md->getValue())) {
+					metal_version += version_major_int->getZExtValue() * 100u;
+				}
+			}
+			if (const ConstantAsMetadata* version_minor_md = dyn_cast_or_null<ConstantAsMetadata>(version_minor_op.get())) {
+				if (const ConstantInt* version_minor_int = dyn_cast_or_null<ConstantInt>(version_minor_md->getValue())) {
+					metal_version += version_minor_int->getZExtValue() * 10u;
+				}
+			}
+			return metal_version;
+		}
+		
 		void handle_read_image(Instruction& I,
 							   const StringRef& func_name,
 							   llvm::Value* img_handle_arg,
@@ -250,15 +272,32 @@ namespace {
 				if (cache_iter != sample_state_cache.end()) {
 					sampler_state = cache_iter->second;
 				} else {
-					sampler_state = new GlobalVariable(*M,
-													   sampler_constant_value->getType(),
-													   true,
-													   GlobalVariable::InternalLinkage,
-													   sampler_constant_value,
-													   "__air_sampler_state",
-													   nullptr,
-													   GlobalValue::NotThreadLocal,
-													   Metal_ConstantAS);
+					const auto metal_version = get_metal_version(*M);
+					if (metal_version < 320) {
+						sampler_state = new GlobalVariable(*M,
+														   sampler_constant_value->getType(),
+														   true,
+														   GlobalVariable::InternalLinkage,
+														   sampler_constant_value,
+														   "__air_sampler_state",
+														   nullptr,
+														   GlobalValue::NotThreadLocal,
+														   Metal_ConstantAS);
+					} else {
+						auto sampler_const_array = ConstantArray::get(ArrayType::get(sampler_constant_value->getType(), 2u), {
+							ConstantInt::get(Type::getInt64Ty(*ctx), sampler_constant_value_u64),
+							ConstantInt::get(Type::getInt64Ty(*ctx), 0ull)
+						});
+						sampler_state = new GlobalVariable(*M,
+														   sampler_const_array->getType(),
+														   true,
+														   GlobalVariable::InternalLinkage,
+														   sampler_const_array,
+														   "__air_sampler_state",
+														   nullptr,
+														   GlobalValue::NotThreadLocal,
+														   Metal_ConstantAS);
+					}
 					sampler_state->setAlignment(MaybeAlign { 8u }); // always 8-byte aligned
 					sample_state_cache.emplace(sampler_constant_value_u64, sampler_state);
 					
