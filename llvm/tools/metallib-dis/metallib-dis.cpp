@@ -72,6 +72,10 @@ static cl::opt<bool> PreserveAssemblyUseListOrder(
     cl::desc("Preserve use-list order when writing LLVM assembly."),
     cl::init(false), cl::Hidden);
 
+static cl::opt<std::string>
+FunctionFilter("filter", cl::desc("Only print/dump functions starting with <name>"),
+               cl::value_desc("name"), cl::init(""));
+
 /* .metallib layout (as of Metal 2.4 / macOS 12.0)
  
  versioning:
@@ -113,7 +117,7 @@ static cl::opt<bool> PreserveAssemblyUseListOrder(
  [debug metadata ...]
  
  bitcode:
- [LLVM 5.0 bitcode binaries ...]
+ [LLVM 5.0/14.0 bitcode binaries ...]
  
  (opt) embedded source code:
  [source archive count: uint32_t]
@@ -484,10 +488,12 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	os << "program_count: " << program_count << '\n';
 	info.entries.resize(program_count);
 	
-	hex_dump(os, program_ptr, header.header_control.programs_length, "program metadata");
-	hex_dump(os, add_program_md_ptr, add_program_md_length, "additional program metadata");
-	hex_dump(os, extended_md_ptr, header.header_control.extended_md_length, "extended metadata");
-	hex_dump(os, debug_ptr, header.header_control.debug_length, "debug metadata");
+	if (FunctionFilter.empty()) {
+		hex_dump(os, program_ptr, header.header_control.programs_length, "program metadata");
+		hex_dump(os, add_program_md_ptr, add_program_md_length, "additional program metadata");
+		hex_dump(os, extended_md_ptr, header.header_control.extended_md_length, "extended metadata");
+		hex_dump(os, debug_ptr, header.header_control.debug_length, "debug metadata");
+	}
 	
 	for(uint32_t i = 0; i < program_count; ++i) {
 		auto& entry = info.entries[i];
@@ -939,6 +945,12 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	
 	//
 	for(const auto& prog : info.entries) {
+		if (!FunctionFilter.empty()) {
+			if (!prog.name.starts_with(FunctionFilter)) {
+				continue;
+			}
+		}
+		
 		os << '\n';
 		os << "################################################################################\n";
 		os << '\n';
