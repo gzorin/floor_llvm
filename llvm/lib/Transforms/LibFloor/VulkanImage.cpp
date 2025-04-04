@@ -84,9 +84,10 @@ namespace {
 			initializeVulkanImagePass(*PassRegistry::getPassRegistry());
 		}
 		
+		template <uint32_t func_arg_count = 8u>
 		llvm::Function* get_or_create_spirv_function(std::string func_name,
 													 llvm::Type* ret_type,
-													 const SmallVector<llvm::Type*, 8>& func_arg_types,
+													 const SmallVector<llvm::Type*, func_arg_count>& func_arg_types,
 													 const bool is_readnone = false) {
 			const auto func_type = llvm::FunctionType::get(ret_type, func_arg_types, false);
 			auto func = M->getFunction(func_name);
@@ -173,6 +174,7 @@ namespace {
 			return ret;
 		}
 		
+		template <uint32_t func_arg_count = 8u>
 		void handle_vk_coord(llvm::Value* img_handle_arg,
 							 Instruction& I,
 							 llvm::Value* coord_arg,
@@ -186,8 +188,8 @@ namespace {
 							 llvm::Value* offset_arg,
 							 const std::string& geom,
 							 std::string& vk_func_name,
-							 SmallVector<llvm::Type*, 8>& func_arg_types,
-							 SmallVector<llvm::Value*, 8>& func_args) {
+							 SmallVector<llvm::Type*, func_arg_count>& func_arg_types,
+							 SmallVector<llvm::Value*, func_arg_count>& func_args) {
 			auto coord_vec_type = dyn_cast_or_null<FixedVectorType>(coord_arg->getType());
 			const auto coord_dim = coord_vec_type->getNumElements();
 			if (!coord_vec_type) {
@@ -986,6 +988,102 @@ namespace {
 			//
 			I.replaceAllUsesWith(ret_vec);
 			I.eraseFromParent();
+			
+			//
+			simplify_image_handle(img_handle_arg);
+		}
+		
+		void handle_query_image_lod(Instruction& I,
+									const StringRef& func_name,
+									llvm::Value* img_handle_arg,
+									const COMPUTE_IMAGE_TYPE& image_type,
+									llvm::ConstantInt* const_sampler_arg,
+									llvm::Value* dyn_sampler_arg,
+									llvm::Value* coord_arg) override {
+			SmallVector<llvm::Type*, 3> func_arg_types;
+			SmallVector<llvm::Value*, 3> func_args;
+			
+			// NOTE: query_image_lod call will be constructed as follows ([arg] are optional args):
+			// query_image_lod(image, sampler_idx, coord)
+			// -> this will use cxx mangling, since we still need to differentiate the calls later on
+			
+			// must be constant/constexpr for now
+			if (const_sampler_arg == nullptr) {
+				ctx->emitError(&I, "sampler must be a constant");
+				return;
+			}
+			
+			// get geom string / mangled name + flags
+			const auto geom_cstr = type_to_geom(image_type);
+			if (!geom_cstr) {
+				ctx->emitError(&I, "unknown or incorrect image type");
+				return;
+			}
+			std::string geom = geom_cstr;
+			
+			// filter types that are not allowed
+			switch (image_type) {
+				case COMPUTE_IMAGE_TYPE::IMAGE_1D_BUFFER:
+				case COMPUTE_IMAGE_TYPE::IMAGE_2D_MSAA:
+				case COMPUTE_IMAGE_TYPE::IMAGE_2D_MSAA_ARRAY:
+				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_MSAA:
+				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_MSAA_ARRAY:
+					ctx->emitError(&I, "invalid image type - LOD can not be queried for this image type");
+					return;
+				default:
+					break;
+			}
+			
+			// -> return data and vulkan function name (with manual C++ mangling)
+			std::string vk_func_name = "_Z18query_image_lodv2f";
+			llvm::Type* ret_type = llvm::FixedVectorType::get(llvm::Type::getFloatTy(*ctx), 2u);
+			
+			// -> geom/image
+			vk_func_name += geom;
+			func_arg_types.push_back(img_handle_arg->getType());
+			func_args.push_back(img_handle_arg);
+			
+			// -> sampler
+			vk_func_name += "11ocl_sampler"; // technically "i"
+			func_arg_types.push_back(const_sampler_arg->getType());
+			func_args.push_back(const_sampler_arg);
+			
+			// -> coord (simplified vs normal image read)
+			handle_vk_coord(img_handle_arg,
+							I,
+							coord_arg,
+							nullptr /* no layer */,
+							false /* !is_array */,
+							false /* !is_msaa */,
+							false /* !is_non_cube_array_depth_compare */,
+							false /* always float */,
+							false /* !is_offset_dynamic */,
+							nullptr /* no offset */,
+							geom,
+							vk_func_name,
+							func_arg_types,
+							func_args);
+			
+			// create the Vulkan call
+			// NOTE: always returns a vector2
+			auto query_lod_func = get_or_create_spirv_function(vk_func_name, ret_type, func_arg_types, true);
+			llvm::CallInst* query_lod_call = builder->CreateCall(query_lod_func, func_args);
+			query_lod_call->setConvergent();
+			query_lod_call->setOnlyAccessesArgMemory();
+			query_lod_call->setDoesNotThrow();
+			query_lod_call->setOnlyReadsMemory(); // all reads are readonly (can be optimized away if unused)
+			query_lod_call->setDebugLoc(I.getDebugLoc()); // keep debug loc
+			query_lod_call->setCallingConv(CallingConv::FLOOR_FUNC);
+			
+			// extract the first value, this is the result that we want
+			llvm::Value* result = builder->CreateExtractElement(query_lod_call, uint64_t(0u));
+			
+			//
+			I.replaceAllUsesWith(result);
+			I.eraseFromParent();
+			
+			//
+			simplify_image_handle(img_handle_arg);
 		}
 		
 	};

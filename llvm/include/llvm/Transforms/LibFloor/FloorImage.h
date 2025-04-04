@@ -62,6 +62,7 @@ namespace llvm {
 		
 		void handle_image(CallBase& CB, const StringRef& func_name);
 		void handle_image_query(CallBase& CB, const StringRef& func_name);
+		void handle_query_lod(CallBase& CB, const StringRef& func_name);
 		
 		virtual void handle_read_image(Instruction& I,
 									   const StringRef& func_name,
@@ -107,11 +108,20 @@ namespace llvm {
 										  const COMPUTE_IMAGE_TYPE& image_type,
 										  llvm::Value* lod_arg) = 0;
 		
+		virtual void handle_query_image_lod(Instruction& I,
+											const StringRef& func_name,
+											llvm::Value* img_handle_arg,
+											const COMPUTE_IMAGE_TYPE& image_type,
+											llvm::ConstantInt* const_sampler_arg,
+											llvm::Value* dyn_sampler_arg,
+											llvm::Value* coord_arg) = 0;
+		
 	protected:
 		const IMAGE_TYPE_ID image_type_id;
 		const char* image_read_prefix;
 		const char* image_write_prefix;
 		const char* image_get_dim_prefix;
+		const char* image_query_lod_prefix;
 		Module* M { nullptr };
 		LLVMContext* ctx { nullptr };
 		Function* func { nullptr };

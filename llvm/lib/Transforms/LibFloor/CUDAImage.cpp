@@ -841,6 +841,17 @@ namespace {
 			I.eraseFromParent();
 		}
 		
+		void handle_query_image_lod(Instruction& I,
+									const StringRef&,
+									llvm::Value*,
+									const COMPUTE_IMAGE_TYPE&,
+									llvm::ConstantInt*,
+									llvm::Value*,
+									llvm::Value*) override {
+			ctx->emitError(&I, "image LOD query is not supported by CUDA");
+			return;
+		}
+		
 	};
 }
 
