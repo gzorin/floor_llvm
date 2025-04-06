@@ -483,6 +483,7 @@ void initializeSPIRFinalPass(PassRegistry&);
 void initializeSPIRFinalModulePass(PassRegistry&);
 void initializeSPIRImagePass(PassRegistry&);
 void initializeCFGStructurizationPass(PassRegistry&);
+void initializeVulkanEarlyArgBufferFunctionClonePass(PassRegistry&);
 void initializeVulkanImagePass(PassRegistry&);
 void initializeVulkanFinalPass(PassRegistry&);
 void initializeVulkanBuiltinParamHandlingPass(PassRegistry&);

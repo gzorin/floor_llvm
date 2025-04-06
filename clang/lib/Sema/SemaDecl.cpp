@@ -14296,28 +14296,45 @@ void Sema::ActOnFinishKNRParamDeclarations(Scope *S, Declarator &D,
 }
 
 static void AggregateTypeCompleter(Sema& S, const CXXRecordDecl* decl) {
-	if(decl == nullptr) return;
+	if (!decl) {
+		return;
+	}
 	
 	// make sure decl is complete
 	S.RequireCompleteType(decl->getBeginLoc(), QualType(decl->getTypeForDecl(), 0),
 						  diag::err_typecheck_decl_incomplete_type);
 	
 	// must have definition
-	if(!decl->hasDefinition()) return;
+	if (!decl->hasDefinition()) {
+		return;
+	}
 	
 	// iterate over / recurse into all bases, and complete all their fields
-	for(const auto& base : decl->bases()) {
+	for (const auto& base : decl->bases()) {
 		AggregateTypeCompleter(S, base.getType()->getAsCXXRecordDecl());
 	}
 	
 	// iterate over and complete all fields
-	for(const auto& field : decl->fields()) {
+	for (const auto& field : decl->fields()) {
 		auto field_type = field->getType();
 		if (field_type->isPointerType() || field_type->isReferenceType()) {
 			field_type = field_type->getPointeeType();
 		}
 		S.RequireCompleteType(field->getBeginLoc(), field_type,
 							  diag::err_typecheck_decl_incomplete_type);
+		if (auto field_cxx_rdecl = field_type->getAsCXXRecordDecl(); field_cxx_rdecl) {
+			AggregateTypeCompleter(S, field_cxx_rdecl);
+		}
+		
+		if (auto CAT = S.getASTContext().getAsConstantArrayType(field_type); CAT) {
+			auto elem_type = CAT->getElementType();
+			if (elem_type->isPointerType() || elem_type->isReferenceType()) {
+				elem_type = elem_type->getPointeeType();
+			}
+			if (auto elem_cxx_rdecl = elem_type->getAsCXXRecordDecl(); elem_cxx_rdecl) {
+				AggregateTypeCompleter(S, elem_cxx_rdecl);
+			}
+		}
 	}
 }
 

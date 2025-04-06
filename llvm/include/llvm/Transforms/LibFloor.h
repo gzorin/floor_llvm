@@ -108,6 +108,12 @@ FunctionPass *createCFGStructurizationPass();
 
 //===----------------------------------------------------------------------===//
 //
+// VulkanEarlyArgBufferFunctionClone - Clones functions for arg buffer use.
+//
+ModulePass *createVulkanEarlyArgBufferFunctionClonePass();
+
+//===----------------------------------------------------------------------===//
+//
 // VulkanImage - This pass applies SPIR-V-specific floor image transformations.
 //
 FunctionPass *createVulkanImagePass(const uint32_t image_capabilities = 0);

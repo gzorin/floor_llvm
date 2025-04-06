@@ -12,6 +12,7 @@ add_llvm_component_library(LLVMLibFloor
   PropagateRangeInfo.cpp
   SPIRFinal.cpp
   SPIRImage.cpp
+  VulkanEarly.cpp
   VulkanFinal.cpp
   VulkanImage.cpp
   

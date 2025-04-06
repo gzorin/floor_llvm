@@ -819,6 +819,12 @@ void PassManagerBuilder::populateModulePassManager(
   if (AttributorRun & AttributorRunOption::MODULE)
     MPM.add(createAttributorLegacyPass());
 
+  if (EnableVulkanPasses) {
+    // fix/clone functions that are called with Vulkan argument buffer arguments
+    // NOTE: this needs to be done prior to any function argument optimizations
+    MPM.add(createVulkanEarlyArgBufferFunctionClonePass());
+  }
+
   addExtensionsToPM(EP_ModuleOptimizerEarly, MPM);
 
   if (OptLevel > 2)

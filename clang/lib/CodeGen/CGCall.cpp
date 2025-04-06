@@ -3518,7 +3518,8 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
 			
 			if (field.field_decl) {
 				// array of images/buffers and singular images
-				if (field.type->isArrayImageType(false) || field.type->isArrayBufferType()) {
+				if (field.type->isArrayImageType(false) || field.type->isArrayBufferType()||
+					field.type->isArrayType()) {
 					LValue SubLV = EmitLValueForField(LV, field.field_decl, true);
 					Builder.CreateStore(&*AI, SubLV.getAddress(*this));
 				} else { // all else
@@ -5169,6 +5170,27 @@ public:
 
 } // namespace
 
+static llvm::Value* handle_call_arg_buffer_indirection(llvm::Value* V, llvm::Type* param_type, CGBuilderTy& Builder) {
+	auto base_alloca = dyn_cast_or_null<llvm::AllocaInst>(V);
+	if (!base_alloca) {
+		return nullptr;
+	}
+	
+	auto annotation_md = base_alloca->getMetadata(llvm::LLVMContext::MD_annotation);
+	if (!annotation_md || annotation_md->getNumOperands() == 0) {
+		return nullptr;
+	}
+	auto annotation_str = dyn_cast_or_null<llvm::MDString>(annotation_md->getOperand(0));
+	if (!annotation_str || !annotation_str->getString().equals("vulkan_arg_buffer")) {
+		return nullptr;
+	}
+	
+	// annotate bitcast with "vulkan_arg_buffer" for later fix-up
+	auto bc = Builder.CreateBitCast(V, param_type);
+	((llvm::Instruction*)bc)->addAnnotationMetadata("vulkan_arg_buffer");
+	return bc;
+}
+
 RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
                                  const CGCallee &Callee,
                                  ReturnValueSlot ReturnValue,
@@ -5502,6 +5524,8 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
             // it's not ideal to emit an address space cast at all,
             // but we have no other option here if src AS is 0
             V = Builder.CreateAddrSpaceCast(V, param_type);
+          } else if (auto arg_buffer_indirection = handle_call_arg_buffer_indirection(V, param_type, Builder); arg_buffer_indirection) {
+            V = arg_buffer_indirection;
           } else {
             V = Builder.CreateBitCast(V, param_type);
           }

@@ -46,6 +46,7 @@ void llvm::initializeLibFloor(PassRegistry &Registry) {
   initializeSPIRFinalModulePass(Registry);
   initializeSPIRImagePass(Registry);
   initializeCFGStructurizationPass(Registry);
+  initializeVulkanEarlyArgBufferFunctionClonePass(Registry);
   initializeVulkanImagePass(Registry);
   initializeVulkanFinalPass(Registry);
   initializeVulkanBuiltinParamHandlingPass(Registry);
@@ -97,6 +98,10 @@ void LLVMAddSPIRImagePass(LLVMPassManagerRef PM) {
 
 void LLVMAddCFGStructurizationPass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createCFGStructurizationPass());
+}
+
+void LLVMAddVulkanEarlyArgBufferFunctionClonePass(LLVMPassManagerRef PM) {
+  unwrap(PM)->add(createVulkanEarlyArgBufferFunctionClonePass());
 }
 
 void LLVMAddVulkanImagePass(LLVMPassManagerRef PM) {
