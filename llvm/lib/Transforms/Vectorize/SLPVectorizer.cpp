@@ -9696,11 +9696,14 @@ tryToVectorizeSequence(SmallVectorImpl<T *> &Incoming,
 /// of the second cmp instruction.
 template <bool IsCompatibility>
 static bool compareCmp(Value *V, Value *V2,
-                       function_ref<bool(Instruction *)> IsDeleted) {
+                       const DominatorTree &DT) {
+  assert(isValidElementType(V->getType()) &&
+         isValidElementType(V2->getType()) &&
+         "Expected valid element types only.");
+  if (V == V2)
+    return IsCompatibility;
   auto *CI1 = cast<CmpInst>(V);
   auto *CI2 = cast<CmpInst>(V2);
-  if (IsDeleted(CI2) || !isValidElementType(CI2->getType()))
-    return false;
   if (CI1->getOperand(0)->getType()->getTypeID() <
       CI2->getOperand(0)->getType()->getTypeID())
     return !IsCompatibility;
@@ -9723,18 +9726,38 @@ static bool compareCmp(Value *V, Value *V2,
   for (int I = 0, E = CI1->getNumOperands(); I < E; ++I) {
     auto *Op1 = CI1->getOperand(LEPreds ? I : E - I - 1);
     auto *Op2 = CI2->getOperand(GEPreds ? I : E - I - 1);
+    if (Op1 == Op2)
+      continue;
     if (Op1->getValueID() < Op2->getValueID())
       return !IsCompatibility;
     if (Op1->getValueID() > Op2->getValueID())
       return false;
     if (auto *I1 = dyn_cast<Instruction>(Op1))
       if (auto *I2 = dyn_cast<Instruction>(Op2)) {
-        if (I1->getParent() != I2->getParent())
-          return false;
+        if (IsCompatibility) {
+          if (I1->getParent() != I2->getParent())
+            return false;
+        } else {
+          // Try to compare nodes with same parent.
+          DomTreeNodeBase<BasicBlock> *NodeI1 = DT.getNode(I1->getParent());
+          DomTreeNodeBase<BasicBlock> *NodeI2 = DT.getNode(I2->getParent());
+          if (!NodeI1)
+            return NodeI2 != nullptr;
+          if (!NodeI2)
+            return false;
+          assert((NodeI1 == NodeI2) ==
+                     (NodeI1->getDFSNumIn() == NodeI2->getDFSNumIn()) &&
+                 "Different nodes should have different DFS numbers");
+          if (NodeI1 != NodeI2)
+            return NodeI1->getDFSNumIn() < NodeI2->getDFSNumIn();
+        }
         InstructionsState S = getSameOpcode({I1, I2});
-        if (S.getOpcode())
+        if (S.getOpcode() && (IsCompatibility || !S.isAltShuffle()))
           continue;
-        return false;
+        if (IsCompatibility)
+          return false;
+        if (I1->getOpcode() != I2->getOpcode())
+          return I1->getOpcode() < I2->getOpcode();
       }
   }
   return IsCompatibility;
@@ -9771,40 +9794,45 @@ bool SLPVectorizerPass::vectorizeSimpleInstructions(
     }
     // Try to vectorize list of compares.
     // Sort by type, compare predicate, etc.
-    auto &&CompareSorter = [&R](Value *V, Value *V2) {
-      return compareCmp<false>(V, V2,
-                               [&R](Instruction *I) { return R.isDeleted(I); });
+    auto &&CompareSorter = [this](Value *V, Value *V2) {
+      if (V == V2)
+        return false;
+      return compareCmp<false>(V, V2, *DT);
     };
 
-    auto &&AreCompatibleCompares = [&R](Value *V1, Value *V2) {
+    auto &&AreCompatibleCompares = [this](Value *V1, Value *V2) {
       if (V1 == V2)
         return true;
-      return compareCmp<true>(V1, V2,
-                              [&R](Instruction *I) { return R.isDeleted(I); });
+      return compareCmp<true>(V1, V2, *DT);
     };
     auto Limit = [&R](Value *V) {
       unsigned EltSize = R.getVectorElementSize(V);
       return std::max(2U, R.getMaxVecRegSize() / EltSize);
     };
 
-    SmallVector<Value *> Vals(PostponedCmps.begin(), PostponedCmps.end());
-    OpsChanged |= tryToVectorizeSequence<Value>(
-        Vals, Limit, CompareSorter, AreCompatibleCompares,
-        [this, &R](ArrayRef<Value *> Candidates, bool LimitForRegisterSize) {
-          // Exclude possible reductions from other blocks.
-          bool ArePossiblyReducedInOtherBlock =
-              any_of(Candidates, [](Value *V) {
-                return any_of(V->users(), [V](User *U) {
-                  return isa<SelectInst>(U) &&
-                         cast<SelectInst>(U)->getParent() !=
-                             cast<Instruction>(V)->getParent();
+    SmallVector<Value *> Vals;
+    for (Instruction *V : PostponedCmps)
+      if (!R.isDeleted(V) && isValidElementType(V->getType()))
+        Vals.push_back(V);
+    if (Vals.size() > 1) {
+      OpsChanged |= tryToVectorizeSequence<Value>(
+          Vals, Limit, CompareSorter, AreCompatibleCompares,
+          [this, &R](ArrayRef<Value *> Candidates, bool LimitForRegisterSize) {
+            // Exclude possible reductions from other blocks.
+            bool ArePossiblyReducedInOtherBlock =
+                any_of(Candidates, [](Value *V) {
+                  return any_of(V->users(), [V](User *U) {
+                    return isa<SelectInst>(U) &&
+                           cast<SelectInst>(U)->getParent() !=
+                               cast<Instruction>(V)->getParent();
+                  });
                 });
-              });
-          if (ArePossiblyReducedInOtherBlock)
-            return false;
-          return tryToVectorizeList(Candidates, R, LimitForRegisterSize);
-        },
-        /*LimitForRegisterSize=*/true);
+            if (ArePossiblyReducedInOtherBlock)
+              return false;
+            return tryToVectorizeList(Candidates, R, LimitForRegisterSize);
+          },
+          /*LimitForRegisterSize=*/true);
+    }
     Instructions.clear();
   } else {
     // Insert in reverse order since the PostponedCmps vector was filled in
