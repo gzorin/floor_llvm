@@ -2238,7 +2238,8 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 	static const std::string prefix_ssbo_array = "ssbo_array:";
 	
 	//
-	const auto handle_stage_input_output = [this, &stage_infos, &is_vertex, &is_fragment](const QualType& clang_type,
+	const auto handle_stage_input_output = [this, &stage_infos, &is_vertex, &is_fragment](const FunctionDecl* FD,
+																						  const QualType& clang_type,
 																						  llvm::Type* llvm_type,
 																						  const bool is_return,
 																						  arg_idx_handler_t* arg_idx) {
@@ -2247,11 +2248,26 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 		const bool is_vertex_io = (is_return && is_vertex) || (!is_return && is_fragment);
 		const bool is_fragment_io = (is_return && is_fragment);
 		
-		const auto add_fbo_output = [this, &stage_infos](const QualType& type, const uint32_t location) {
-			const auto canon_data_type = type.getCanonicalType();
-			std::string output_type_str = "float";
-			if (canon_data_type->isIntegerType()) output_type_str = "int";
-			if (canon_data_type->isUnsignedIntegerType()) output_type_str = "uint";
+		const auto add_fbo_output = [this, &stage_infos](const QualType& type, const uint32_t location, const SourceLocation& src_loc) {
+			auto canon_scalar_type = type.getCanonicalType();
+			if (auto cxx_rdecl = canon_scalar_type->getAsCXXRecordDecl(); cxx_rdecl && cxx_rdecl->hasAttr<VectorCompatAttr>()) {
+				canon_scalar_type = getContext().get_compat_vector_type(cxx_rdecl).getCanonicalType();
+			}
+			if (canon_scalar_type->isVectorType()) {
+				canon_scalar_type = cast<VectorType>(canon_scalar_type)->getElementType().getCanonicalType();
+			}
+			
+			std::string output_type_str;
+			if (canon_scalar_type->isUnsignedIntegerType()) {
+				output_type_str = "uint";
+			} else if (canon_scalar_type->isSignedIntegerType()) {
+				output_type_str = "int";
+			} else if (canon_scalar_type->isFloatingType()) {
+				output_type_str = "float";
+			} else {
+				Error(src_loc, StringRef("invalid fragment shader output type"));
+				return;
+			}
 			stage_infos.push_back(llvm::MDString::get(VMContext, prefix_stage + "fbo_output:" + output_type_str + ":" + std::to_string(location)));
 		};
 		
@@ -2302,7 +2318,8 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 						}
 					} else if (is_fragment_io) {
 						if (field.hasAttr<GraphicsFBOColorLocationAttr>()) {
-							add_fbo_output(field.type, field.getAttr<GraphicsFBOColorLocationAttr>()->getEvalLocation());
+							add_fbo_output(field.type, field.getAttr<GraphicsFBOColorLocationAttr>()->getEvalLocation(),
+										   field.getAttr<GraphicsFBOColorLocationAttr>()->getLocation());
 						} else if (field.hasAttr<GraphicsFBODepthTypeAttr>()) {
 							const auto depth_attr = field.getAttr<GraphicsFBODepthTypeAttr>();
 							if (!field.type->isFloatingType()) {
@@ -2327,7 +2344,7 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 									break;
 								}
 							}
-							add_fbo_output(field.type, fbo_location);
+							add_fbo_output(field.type, fbo_location, field.field_decl->getLocation());
 							++fbo_location;
 						}
 					}
@@ -2342,16 +2359,15 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 				if (is_vertex_io) {
 					stage_infos.push_back(llvm::MDString::get(VMContext, prefix_stage + "position"));
 				} else if (is_fragment_io) {
-					add_fbo_output(clang_type, 0);
+					add_fbo_output(clang_type, 0, FD->getLocation());
 				}
 			}
 		} else if (!clang_type->isVoidType()) {
-			// TODO: anything else?
 			// stage defaults (can only be those)
 			if (is_vertex_io) {
 				stage_infos.push_back(llvm::MDString::get(VMContext, prefix_stage + "position"));
 			} else if (is_fragment_io) {
-				add_fbo_output(clang_type, 0);
+				add_fbo_output(clang_type, 0, FD->getLocation());
 			}
 		} else {
 			return;
@@ -2377,10 +2393,16 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 		std::string sample_type_str = "float";
 		if (data_type) {
 			const auto canon_data_type = data_type->getImageDataType().getCanonicalType();
-			if (canon_data_type->isIntegerType()) sample_type_str = "int";
-			if (canon_data_type->isUnsignedIntegerType()) sample_type_str = "uint";
-			if (canon_data_type->isHalfType()) sample_type_str = "half";
-			// else: just assume float
+			if (canon_data_type->isUnsignedIntegerType()) {
+				sample_type_str = "uint";
+			} else if (canon_data_type->isSignedIntegerType()) {
+				sample_type_str = "int";
+			} else if (canon_data_type->isHalfType()) {
+				sample_type_str = "half";
+			} else {
+				// else: just assume float
+				assert(canon_data_type->isFloatingType());
+			}
 		}
 		
 		stage_infos.push_back(llvm::MDString::get(VMContext, (prefix + access_str +
@@ -2425,7 +2447,7 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 		
 		// stage input
 		if (parm->hasAttr<GraphicsStageInputAttr>()) {
-			handle_stage_input_output(clang_type, llvm_type, false, &arg_idx);
+			handle_stage_input_output(FD, clang_type, llvm_type, false, &arg_idx);
 			// don't inc arg idx at the end
 			inc_arg_idx_at_end = false;
 		} else if (parm->hasAttr<FloorArgBufferAttr>()) {
@@ -2626,7 +2648,7 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 	// handle return value
 	stage_infos.push_back(llvm::MDString::get(VMContext, "stage_output"));
 	if (is_vertex || is_fragment) {
-		handle_stage_input_output(FD->getReturnType(), Fn->getReturnType(), true, nullptr);
+		handle_stage_input_output(FD, FD->getReturnType(), Fn->getReturnType(), true, nullptr);
 	}
 	
 	// add to global stage_io node
