@@ -903,9 +903,10 @@ namespace {
 						assert((!is_ssbo_array || (is_ssbo_array && ptr_as == SPIRAS_StorageBuffer)) && "wrong SSBO array address space");
 						
 						// since there is a limit on how many IUBs we can have and how large they can be, some arguments might fall back to using SSBOs
+						// NOTE: DereferenceableOrNull is not considered as SSBO-uniform, because it likely (always?) means that the argument is a
+						//       "runtime array" of some sort, which must not be enclosed in a struct here, but will be dealt with in the SPIR-V backend
 						const auto is_ssbo_uniform = (!is_iub && !is_ssbo_array && arg.onlyReadsMemory() &&
-													  (arg.hasAttribute(Attribute::Dereferenceable) ||
-													   arg.hasAttribute(Attribute::DereferenceableOrNull)));
+													  arg.hasAttribute(Attribute::Dereferenceable));
 						
 						// any image/opaque type is unsized
 						const auto is_sized = elem_type->isSized();
