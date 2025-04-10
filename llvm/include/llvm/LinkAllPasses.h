@@ -268,6 +268,7 @@ namespace {
       (void) llvm::createVulkanImagePass();
       (void) llvm::createVulkanFinalPass();
       (void) llvm::createVulkanPreFinalPass();
+      (void) llvm::createVulkanPreFinalPointerBCFixupPass();
       (void) llvm::createVulkanFinalModuleCleanupPass();
       (void) llvm::createPropagateRangeInfoPass();
       (void) llvm::createFMACombinerPass();

@@ -51,6 +51,7 @@ void llvm::initializeLibFloor(PassRegistry &Registry) {
   initializeVulkanFinalPass(Registry);
   initializeVulkanBuiltinParamHandlingPass(Registry);
   initializeVulkanPreFinalPass(Registry);
+  initializeVulkanPreFinalPointerBCFixupPass(Registry);
   initializeVulkanFinalModuleCleanupPass(Registry);
   initializePropagateRangeInfoPass(Registry);
   initializeFMACombinerPass(Registry);
@@ -118,6 +119,10 @@ void LLVMAddVulkanBuiltinParamHandlingPass(LLVMPassManagerRef PM) {
 
 void LLVMAddVulkanPreFinalPass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createVulkanPreFinalPass());
+}
+
+void LLVMAddVulkanPreFinalPointerBCFixupPass(LLVMPassManagerRef PM) {
+  unwrap(PM)->add(createVulkanPreFinalPointerBCFixupPass());
 }
 
 void LLVMAddVulkanFinalModuleCleanupPass(LLVMPassManagerRef PM) {

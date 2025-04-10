@@ -578,7 +578,14 @@ static bool isMinMaxWithLoads(Value *V, Type *&LoadTy) {
 /// later. However, it is risky in case some backend or other part of LLVM is
 /// relying on the exact type loaded to select appropriate atomic operations.
 static Instruction *combineLoadToOperationType(InstCombinerImpl &IC,
-                                               LoadInst &LI) {
+                                               LoadInst &LI,
+                                               const bool isVulkan) {
+  if (isVulkan) {
+    // Vulkan vendor backends do not like pointer bitcasts ...
+    // -> prefer bitcasting the value instead of the pointer
+    return nullptr;
+  }
+
   // FIXME: We could probably with some care handle both volatile and ordered
   // atomic loads here but it isn't clear that this is important.
   if (!LI.isUnordered())
@@ -933,7 +940,7 @@ Instruction *InstCombinerImpl::visitLoadInst(LoadInst &LI) {
   Value *Op = LI.getOperand(0);
 
   // Try to canonicalize the loaded type.
-  if (Instruction *Res = combineLoadToOperationType(*this, LI))
+  if (Instruction *Res = combineLoadToOperationType(*this, LI, isVulkan))
     return Res;
 
   // Attempt to improve the alignment.

@@ -1123,6 +1123,9 @@ void PassManagerBuilder::populateModulePassManager(
     addVectorPasses(MPM, true);
     MPM.add(createVulkanPreFinalPass()); // yes, run again
 
+    // try to fix invalid pointer bitcasts (must be done after memcpy lowering)
+    MPM.add(createVulkanPreFinalPointerBCFixupPass());
+
     // run attribute inference again so that we can safely assume which arguments are read-only/write-only/read-write
     MPM.add(createInferFunctionAttrsLegacyPass());
     MPM.add(createAttributorLegacyPass());

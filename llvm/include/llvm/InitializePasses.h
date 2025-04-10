@@ -488,6 +488,7 @@ void initializeVulkanImagePass(PassRegistry&);
 void initializeVulkanFinalPass(PassRegistry&);
 void initializeVulkanBuiltinParamHandlingPass(PassRegistry&);
 void initializeVulkanPreFinalPass(PassRegistry&);
+void initializeVulkanPreFinalPointerBCFixupPass(PassRegistry&);
 void initializeVulkanFinalModuleCleanupPass(PassRegistry&);
 void initializePropagateRangeInfoPass(PassRegistry&);
 void initializeFMACombinerPass(PassRegistry&);

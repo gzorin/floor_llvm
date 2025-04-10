@@ -140,6 +140,13 @@ FunctionPass *createVulkanPreFinalPass();
 
 //===----------------------------------------------------------------------===//
 //
+// VulkanPreFinalPointerBCFixup - This pass tries to fix invalid pointer
+// bitcasts prior to CFG structurization and VulkanFinal.
+//
+FunctionPass *createVulkanPreFinalPointerBCFixupPass();
+
+//===----------------------------------------------------------------------===//
+//
 // VulkanFinalModuleCleanup - This pass removes unused functions/etc.
 //
 ModulePass *createVulkanFinalModuleCleanupPass();

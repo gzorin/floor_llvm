@@ -2327,6 +2327,347 @@ namespace {
 			return true;
 		}
 	};
+
+	// VulkanPreFinalPointerBCFixup
+	struct VulkanPreFinalPointerBCFixup : public FunctionPass, InstVisitor<VulkanPreFinalPointerBCFixup> {
+		friend class InstVisitor<VulkanPreFinalPointerBCFixup>;
+		
+		static char ID; // Pass identification, replacement for typeid
+		
+		Module* M { nullptr };
+		const DataLayout* DL { nullptr };
+		LLVMContext* ctx { nullptr };
+		Function* func { nullptr };
+		bool is_kernel_func { false };
+		bool is_vertex_func { false };
+		bool is_fragment_func { false };
+		bool is_tess_control_func { false };
+		bool is_tess_eval_func { false };
+		bool was_modified { false };
+		ConstantFolder folder;
+		
+		// gather pointer bitcast instructions
+		std::vector<BitCastInst*> ptr_bc_instrs;
+		
+		VulkanPreFinalPointerBCFixup() :
+		FunctionPass(ID) {
+			initializeVulkanPreFinalPass(*PassRegistry::getPassRegistry());
+		}
+		
+		void getAnalysisUsage(AnalysisUsage &AU) const override {
+			AU.addRequired<AAResultsWrapperPass>();
+			AU.addRequired<GlobalsAAWrapperPass>();
+			AU.addRequired<AssumptionCacheTracker>();
+			AU.addRequired<TargetLibraryInfoWrapperPass>();
+			AU.addRequired<AssumptionCacheTracker>();
+			AU.addRequired<DominatorTreeWrapperPass>();
+			AU.addRequired<TargetTransformInfoWrapperPass>();
+		}
+		
+		bool runOnFunction(Function &F) override {
+			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
+			is_vertex_func = F.getCallingConv() == CallingConv::FLOOR_VERTEX;
+			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
+			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
+			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
+			if (!is_kernel_func &&
+				!is_vertex_func &&
+				!is_fragment_func &&
+				!is_tess_control_func &&
+				!is_tess_eval_func) {
+				return false;
+			}
+			
+			//
+			M = F.getParent();
+			DL = &M->getDataLayout();
+			ctx = &M->getContext();
+			func = &F;
+			ptr_bc_instrs.clear();
+			
+			// gather all stuff
+			was_modified = false;
+			visit(F);
+			
+			// fix invalid pointer bitcasts
+			if (!ptr_bc_instrs.empty()) {
+				was_modified |= fix_pointer_bitcasts();
+			}
+			
+			return was_modified;
+		}
+		
+		// InstVisitor overrides...
+		using InstVisitor<VulkanPreFinalPointerBCFixup>::visit;
+		void visit(Instruction& I) {
+			InstVisitor<VulkanPreFinalPointerBCFixup>::visit(I);
+		}
+		
+		void visitBitCastInst(BitCastInst& BC) {
+			if (BC.getSrcTy()->isPointerTy() && BC.getDestTy()->isPointerTy()) {
+				ptr_bc_instrs.emplace_back(&BC);
+				return;
+			}
+			assert(!BC.getSrcTy()->isPointerTy() && !BC.getDestTy()->isPointerTy()); // just in case ...
+		}
+		
+		struct struct_element_t {
+			std::vector<llvm::Value*> indices;
+			std::vector<uint32_t> const_indices;
+			llvm::Type* type { nullptr };
+		};
+		static std::vector<struct_element_t> get_struct_elements(BitCastInst& BC, llvm::Type* in_st_type, LLVMContext& ctx) {
+			assert(in_st_type->isStructTy());
+			auto st_type = cast<StructType>(in_st_type);
+			
+			std::vector<struct_element_t> elems;
+			std::vector<llvm::Value*> indices;
+			std::vector<uint32_t> const_indices;
+			for (;;) {
+				const auto elem_count = st_type->getNumElements();
+				assert(elem_count > 0);
+				if (elem_count == 1 && st_type->getElementType(0)->isStructTy()) {
+					// recurse
+					const_indices.emplace_back(0u);
+					indices.emplace_back(ConstantInt::get(llvm::Type::getInt32Ty(ctx), const_indices.back()));
+					st_type = cast<StructType>(st_type->getElementType(0));
+					continue;
+				}
+				
+				for (uint32_t i = 0; i < elem_count; ++i) {
+					auto elem_type = st_type->getElementType(i);
+					if (elem_type->isStructTy()) {
+						ctx.emitError(&BC, "invalid pointer bitcast: can't handle nested structs");
+						return {};
+					}
+					auto elem_indices = indices;
+					const_indices.emplace_back(i);
+					elem_indices.emplace_back(ConstantInt::get(llvm::Type::getInt32Ty(ctx), const_indices.back()));
+					elems.emplace_back(struct_element_t {
+						.indices = std::move(elem_indices),
+						.const_indices = std::move(const_indices),
+						.type = elem_type,
+					});
+				}
+				break;
+			}
+			return elems;
+		}
+		
+		std::optional<bool> fix_pointer_bitcast_with_loads(BitCastInst& BC, Function& F, const std::vector<LoadInst*>& loads) {
+			const auto src_ptr_type = cast<PointerType>(BC.getSrcTy());
+			const auto dst_ptr_type = cast<PointerType>(BC.getDestTy());
+			const auto dst_type = dst_ptr_type->getPointerElementType();
+			const auto dst_size = DL->getTypeStoreSize(dst_type).getFixedSize();
+			
+			auto src_type = src_ptr_type->getPointerElementType();
+			auto src_size = DL->getTypeStoreSize(src_type).getFixedSize();
+			auto src = cast<Instruction>(BC.getOperand(0));
+			
+			GetElementPtrInst* src_gep = nullptr;
+			if ((src_type->isVectorTy() && dst_type->isStructTy()) ||
+				(src_type->isStructTy() && dst_type->isVectorTy())) {
+				if (loads.size() > 1) {
+					ctx->emitError(&BC, "invalid pointer bitcast: can't replace more than one load");
+					return {};
+				}
+				
+				// if either side is a struct and the other is a vector type,
+				// we need to do a (full) extraction and insertion of elements
+				const auto src_st_elements = (src_type->isStructTy() ? get_struct_elements(BC, src_type, *ctx) : std::vector<struct_element_t> {});
+				const auto dst_st_elements = (dst_type->isStructTy() ? get_struct_elements(BC, dst_type, *ctx) : std::vector<struct_element_t> {});
+				const auto src_elem_count = (src_type->isStructTy() ? src_st_elements.size() : size_t(cast<VectorType>(src_type)->getElementCount().getFixedValue()));
+				const auto dst_elem_count = (dst_type->isStructTy() ? dst_st_elements.size() : size_t(cast<VectorType>(dst_type)->getElementCount().getFixedValue()));
+				if (src_elem_count == 0 || dst_elem_count == 0) {
+					ctx->emitError(&BC, "invalid pointer bitcast: invalid destination or source vector type (no or invalid elements)");
+					return {};
+				}
+				if (dst_elem_count > src_elem_count) {
+					ctx->emitError(&BC, "invalid pointer bitcast: destination vector type has more elements than the source vector type");
+					return {};
+				}
+				src_gep = dyn_cast_or_null<GetElementPtrInst>(src);
+				
+				//
+				auto& ld = loads[0];
+				auto insertion_point = ld;
+				
+				// only do this for as many dst elements that we have
+				llvm::Value* new_dst = UndefValue::get(dst_type);
+				for (uint32_t i = 0, count = uint32_t(dst_elem_count); i < count; ++i) {
+					// extract
+					llvm::Value* src_elem = nullptr;
+					if (!src_st_elements.empty()) {
+						// extract struct elem
+						const auto& elem = src_st_elements[i];
+						GetElementPtrInst* elem_gep = nullptr;
+						if (src_gep) {
+							SmallVector<Value*> indices;
+							for (auto& idx : src_gep->indices()) {
+								indices.emplace_back(idx);
+							}
+							for (auto& idx : elem.indices) {
+								indices.emplace_back(idx);
+							}
+							elem_gep = GetElementPtrInst::Create(src_gep->getSourceElementType(), src_gep->getOperand(0), indices, "", insertion_point);
+						} else {
+							// NOTE/TODO: untested path!
+							elem_gep = GetElementPtrInst::Create(src_type, src, elem.indices, "", insertion_point);
+						}
+						elem_gep->setIsInBounds(true);
+						elem_gep->setDebugLoc(ld->getDebugLoc());
+						auto elem_ld = new LoadInst(elem.type, elem_gep, "", false, insertion_point);
+						src_elem = elem_ld;
+					} else {
+						// extract vector elem
+						auto extract_elem = ExtractElementInst::Create(src, ConstantInt::get(llvm::Type::getInt32Ty(*ctx), i), "", insertion_point);
+						extract_elem->setDebugLoc(ld->getDebugLoc());
+						src_elem = extract_elem;
+					}
+					
+					// insert
+					if (!dst_st_elements.empty()) {
+						// NOTE/TODO: untested path!
+						// insert struct elem
+						const auto& elem = dst_st_elements[i];
+						auto insert_val = InsertValueInst::Create(new_dst, src_elem, elem.const_indices, "", insertion_point);
+						insert_val->setDebugLoc(ld->getDebugLoc());
+						new_dst = insert_val;
+					} else {
+						// insert vector elem
+						auto insert_elem = InsertElementInst::Create(new_dst, src_elem, ConstantInt::get(llvm::Type::getInt32Ty(*ctx), i), "", insertion_point);
+						insert_elem->setDebugLoc(ld->getDebugLoc());
+						new_dst = insert_elem;
+					}
+				}
+				
+				// finally: replace load with newly created/loaded construct
+				ld->replaceAllUsesWith(new_dst);
+				ld->eraseFromParent();
+			} else {
+				// -> non vector<->struct BC+load
+				
+				// if the source size is larger, the source pointer likely orignates from a struct GEP at a higher level
+				// -> drill down
+				assert(src_size >= dst_size && "source must always be >= destination");
+				if (src_size > dst_size) {
+					src_gep = dyn_cast_or_null<GetElementPtrInst>(src);
+					if (!src_gep) {
+						ctx->emitError(&BC, "invalid pointer bitcast: invalid src -> dst cast (can't replace non-GEP src)");
+						return {};
+					}
+					SmallVector<llvm::Value*> indices;
+					for (auto& idx : src_gep->indices()) {
+						indices.emplace_back(idx);
+					}
+					
+					for (;;) {
+						auto src_st_type = dyn_cast_or_null<StructType>(src_type);
+						if (!src_st_type) {
+							ctx->emitError(&BC, "invalid pointer bitcast: invalid src -> dst cast (src is not a struct type)");
+							return {};
+						}
+						indices.emplace_back(ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0u));
+						src_type = src_st_type->getStructElementType(0);
+						src_size = DL->getTypeStoreSize(src_type).getFixedSize();
+						if (src_size == dst_size) {
+							// if this is still a struct type, do another round (struct containing a single element)
+							// also: if this matches the dst type (for some reason, which shouldn't occur ...), use it straight away
+							if (src_type->isStructTy() && src_type != dst_type) {
+								assert(cast<StructType>(src_type)->getStructNumElements() == 1);
+								continue;
+							}
+							
+							src = GetElementPtrInst::Create(src_gep->getSourceElementType(), src_gep->getOperand(0), indices,
+															src_gep->getName(), src_gep);
+							((GetElementPtrInst*)src)->setIsInBounds(src_gep->isInBounds());
+							src->setDebugLoc(src_gep->getDebugLoc());
+							break;
+						}
+					}
+				}
+				
+				// fix up by emitting a load of the original (src) pointer, then bitcast to the dst type
+				// NOTE: I would expect there to only be one load, but handle all just in case
+				for (auto& ld : loads) {
+					auto src_ld = new LoadInst(src_type, src, ld->getName(), ld->isVolatile(), ld->getAlign(), ld);
+					src_ld->copyMetadata(*ld);
+					src_ld->setDebugLoc(ld->getDebugLoc());
+					
+					auto src_bc = new BitCastInst(src_ld, dst_type, ld->getName() + ".bc", ld);
+					src_bc->setDebugLoc(ld->getDebugLoc());
+					
+					// cleanup
+					ld->replaceAllUsesWith(src_bc);
+					ld->eraseFromParent();
+				}
+			}
+			
+			// cleanup
+			if (BC.users().empty() && BC.uses().empty()) {
+				BC.eraseFromParent();
+			}
+			if (src_gep && src_gep->users().empty() && src_gep->uses().empty()) {
+				src_gep->eraseFromParent();
+			}
+			
+			return true;
+		}
+		
+		bool fix_pointer_bitcasts() {
+			bool did_modify = false;
+			for (auto& BC : ptr_bc_instrs) {
+				const auto src_ptr_type = cast<PointerType>(BC->getSrcTy());
+				const auto dst_ptr_type = cast<PointerType>(BC->getDestTy());
+				
+				// bitcasts aren't technically allowed to bitcast address spaces, but still check this
+				if (src_ptr_type->getAddressSpace() != dst_ptr_type->getAddressSpace()) {
+					ctx->emitError(BC, "invalid pointer bitcast: address space cast is not allowed");
+					return false;
+				}
+				
+				// we will only replace the pointer bitcast if all users are simple loads or stores
+				bool all_users_are_loads_or_stores = true;
+				std::vector<LoadInst*> loads;
+				std::vector<StoreInst*> stores;
+				libfloor_utils::for_all_instruction_users(*BC, [&all_users_are_loads_or_stores, &loads, &stores](Instruction& instr) {
+					if (auto ld = dyn_cast_or_null<LoadInst>(&instr); ld) {
+						loads.emplace_back(ld);
+					} else if (auto st = dyn_cast_or_null<StoreInst>(&instr); st) {
+						stores.emplace_back(st);
+					} else if (dyn_cast_or_null<CallInst>(&instr)) {
+						// ignore external function calls (may e.g. be used for atomic functions)
+					} else {
+						all_users_are_loads_or_stores = false;
+					}
+				});
+				if (!all_users_are_loads_or_stores) {
+					ctx->emitError(BC, "invalid pointer bitcast: failed to run bitcast fixup (unhandled instructions)");
+					return false;
+				}
+				if (!stores.empty() && !loads.empty()) {
+					ctx->emitError(BC, "invalid pointer bitcast: failed to run bitcast fixup (can't handle both loads and stores)");
+					return false;
+				}
+				if (loads.empty()) {
+					// ignore this bitcast
+					continue;
+				}
+				
+				if (!loads.empty()) {
+					auto result = fix_pointer_bitcast_with_loads(*BC, *func, loads);
+					if (!result) {
+						return false;
+					}
+					did_modify |= *result;
+				}
+				
+				// TODO: handle stores (don't have a test case for this yet)
+				assert(stores.empty() && "unhandled bitcast stores");
+			}
+			return did_modify;
+		}
+	};
 	
 	// VulkanFinalModuleCleanup:
 	// * strip unused functions/prototypes/externs
@@ -2394,6 +2735,19 @@ INITIALIZE_PASS_DEPENDENCY(CallGraphWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_END(VulkanPreFinal, "VulkanPreFinal", "VulkanPreFinal Pass", false, false)
+
+char VulkanPreFinalPointerBCFixup::ID = 0;
+FunctionPass *llvm::createVulkanPreFinalPointerBCFixupPass() {
+	return new VulkanPreFinalPointerBCFixup();
+}
+INITIALIZE_PASS_BEGIN(VulkanPreFinalPointerBCFixup, "VulkanPreFinalPointerBCFixup", "VulkanPreFinalPointerBCFixup Pass", false, false)
+INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(GlobalsAAWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
+INITIALIZE_PASS_DEPENDENCY(CallGraphWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
+INITIALIZE_PASS_END(VulkanPreFinalPointerBCFixup, "VulkanPreFinalPointerBCFixup", "VulkanPreFinalPointerBCFixup Pass", false, false)
 
 char VulkanFinalModuleCleanup::ID = 0;
 ModulePass *llvm::createVulkanFinalModuleCleanupPass() {
