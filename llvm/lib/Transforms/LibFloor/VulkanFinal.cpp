@@ -78,6 +78,7 @@
 #include <unordered_set>
 #include <deque>
 #include <array>
+#include <optional>
 using namespace llvm;
 
 #define DEBUG_TYPE "VulkanFinal"
