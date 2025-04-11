@@ -469,18 +469,18 @@ uint32_t CodeGenTypes::getMetalVulkanImplicitArgCount(const FunctionDecl* FD) co
     if (FD->hasAttr<ComputeKernelAttr>() || FD->hasAttr<GraphicsTessellationControlShaderAttr>()) {
       return 10 + printf_arg;
     } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
-      return 2 + printf_arg;
+      return 4 + printf_arg;
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
       return 1 + printf_arg + (CodeGenOpts.GraphicsPrimitiveID ? 1 : 0) + (CodeGenOpts.GraphicsBarycentricCoord ? 1 : 0);
     } else if (FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
-      return 3 + printf_arg;
+      return 4 + printf_arg;
     }
   } else if(LangOpts.Vulkan) {
     const uint32_t printf_arg = (CodeGenOpts.VulkanSoftPrintf > 0 ? 1 : 0);
     if (FD->hasAttr<ComputeKernelAttr>()) {
       return 6 + printf_arg;
     } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
-      return 3 + printf_arg;
+      return 5 + printf_arg;
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
       return 3 + printf_arg + (CodeGenOpts.GraphicsPrimitiveID ? 1 : 0) + (CodeGenOpts.GraphicsBarycentricCoord ? 1 : 0);
     } else if (FD->hasAttr<GraphicsTessellationControlShaderAttr>()) {
@@ -568,7 +568,9 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
     } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
       // only vertex id and instance id for now:
       add_arg(Ctx.IntTy, "__metal__vertex_id__");
+      add_arg(Ctx.IntTy, "__metal__base_vertex_id__");
       add_arg(Ctx.IntTy, "__metal__instance_id__");
+      add_arg(Ctx.IntTy, "__metal__base_instance_id__");
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
       // optional: primitive id and barycentric coord
       if (CodeGenOpts.GraphicsPrimitiveID) {
@@ -586,6 +588,7 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       // patch id, instance id and position-in-patch:
       add_arg(Ctx.IntTy, "__metal__patch_id__");
       add_arg(Ctx.IntTy, "__metal__instance_id__");
+      add_arg(Ctx.IntTy, "__metal__base_instance_id__");
       // TODO: figure out a way to support both triangles and quads! -> for now, triangle only
       auto float3_type = Ctx.getExtVectorType(Ctx.FloatTy, 3);
       add_arg(float3_type, "__metal__position_in_patch__");
@@ -610,8 +613,10 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       // only vertex id + view index + instance id for now:
       auto int_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.IntTy, LangAS::vulkan_input));
       add_arg(int_ptr_type, "vulkan.vertex_index");
+      add_arg(int_ptr_type, "vulkan.base_vertex_index");
       add_arg(int_ptr_type, "vulkan.view_index");
       add_arg(int_ptr_type, "vulkan.instance_index");
+      add_arg(int_ptr_type, "vulkan.base_instance_index");
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
       auto int_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.IntTy, LangAS::vulkan_input));
 

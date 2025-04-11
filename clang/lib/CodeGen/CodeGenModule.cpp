@@ -2631,8 +2631,10 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "num_sub_groups"));
 	} else if (is_vertex) {
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "vertex_index"));
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "base_vertex_index"));
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "view_index"));
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "instance_index"));
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "base_instance_index"));
 	} else if (is_fragment) {
 		if (getCodeGenOpts().GraphicsPrimitiveID) {
 			stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "primitive_id"));
@@ -3692,15 +3694,29 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		add_id_arg("__metal__num_sub_groups__", "air.simdgroups_per_threadgroup", "uint");
 	} else if (is_vertex || is_tess_eval) {
 		if (is_vertex) {
-			SmallVector<llvm::Metadata*, 6> arg_info;
-			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
-			arg_info.push_back(llvm::MDString::get(VMContext, "air.vertex_id"));
-			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
-			arg_info.push_back(llvm::MDString::get(VMContext, "uint"));
-			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
-			arg_info.push_back(llvm::MDString::get(VMContext, "__metal__vertex_id__"));
-			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
-			++arg_idx; // next llvm arg
+			{
+				SmallVector<llvm::Metadata*, 6> arg_info;
+				arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.vertex_id"));
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+				arg_info.push_back(llvm::MDString::get(VMContext, "uint"));
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+				arg_info.push_back(llvm::MDString::get(VMContext, "__metal__vertex_id__"));
+				arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+				++arg_idx; // next llvm arg
+			}
+			
+			{
+				SmallVector<llvm::Metadata*, 6> arg_info;
+				arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.base_vertex"));
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+				arg_info.push_back(llvm::MDString::get(VMContext, "uint"));
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+				arg_info.push_back(llvm::MDString::get(VMContext, "__metal__base_vertex_id__"));
+				arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+				++arg_idx; // next llvm arg
+			}
 		} else if (is_tess_eval) {
 			SmallVector<llvm::Metadata*, 6> arg_info;
 			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
@@ -3721,6 +3737,18 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			arg_info.push_back(llvm::MDString::get(VMContext, "uint"));
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
 			arg_info.push_back(llvm::MDString::get(VMContext, "__metal__instance_id__"));
+			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+			++arg_idx; // next llvm arg
+		}
+		
+		{
+			SmallVector<llvm::Metadata*, 6> arg_info;
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.base_instance"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "uint"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "__metal__base_instance_id__"));
 			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
 			++arg_idx; // next llvm arg
 		}

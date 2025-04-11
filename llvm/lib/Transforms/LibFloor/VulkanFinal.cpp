@@ -133,7 +133,9 @@ namespace {
 			
 			// added vertex function args
 			Argument* vertex_id { nullptr };
+			Argument* base_vertex_id { nullptr };
 			Argument* instance_id { nullptr };
+			Argument* base_instance_id { nullptr };
 			
 			// added fragment function args
 			Argument* point_coord { nullptr };
@@ -186,9 +188,11 @@ namespace {
 		};
 		
 		enum VULKAN_VERTEX_ARG_REV_IDX : int32_t {
-			VULKAN_VERTEX_ID = -3,
-			VULKAN_VERTEX_VIEW_INDEX = -2,
-			VULKAN_INSTANCE_ID = -1,
+			VULKAN_VERTEX_ID = -5,
+			VULKAN_BASE_VERTEX_ID = -4,
+			VULKAN_VERTEX_VIEW_INDEX = -3,
+			VULKAN_INSTANCE_ID = -2,
+			VULKAN_BASE_INSTANCE_ID = -1,
 			
 			VULKAN_VERTEX_ARG_COUNT = 3,
 		};
@@ -282,8 +286,10 @@ namespace {
 				if (F.arg_size() >= VULKAN_VERTEX_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
 					// TODO: this should be optional / only happen on request
 					state.vertex_id = get_arg_by_idx(VULKAN_VERTEX_ID);
+					state.base_vertex_id = get_arg_by_idx(VULKAN_BASE_VERTEX_ID);
 					state.view_index = get_arg_by_idx(VULKAN_VERTEX_VIEW_INDEX);
 					state.instance_id = get_arg_by_idx(VULKAN_INSTANCE_ID);
+					state.base_instance_id = get_arg_by_idx(VULKAN_BASE_INSTANCE_ID);
 					if (has_soft_printf) {
 						state.soft_printf = get_arg_by_idx(-(VULKAN_VERTEX_ARG_COUNT + 1));
 					}
@@ -676,12 +682,24 @@ namespace {
 					return;
 				}
 				I.replaceAllUsesWith(builder->CreateLoad(state.vertex_id->getType()->getPointerElementType(), state.vertex_id, "vertex_index"));
+			} else if (func_name == "floor.builtin.base_vertex_id.i32") {
+				if(state.base_vertex_id == nullptr) {
+					DBG(printf("failed to get base_vertex_id arg, probably not in a vertex function?\n"); fflush(stdout);)
+					return;
+				}
+				I.replaceAllUsesWith(builder->CreateLoad(state.base_vertex_id->getType()->getPointerElementType(), state.vertex_id, "base_vertex_index"));
 			} else if (func_name == "floor.builtin.instance_id.i32") {
 				if(state.instance_id == nullptr) {
 					DBG(printf("failed to get instance_id arg, probably not in a vertex function?\n"); fflush(stdout);)
 					return;
 				}
 				I.replaceAllUsesWith(builder->CreateLoad(state.instance_id->getType()->getPointerElementType(), state.instance_id, "instance_index"));
+			} else if (func_name == "floor.builtin.base_instance_id.i32") {
+				if(state.base_instance_id == nullptr) {
+					DBG(printf("failed to get base_instance_id arg, probably not in a vertex function?\n"); fflush(stdout);)
+					return;
+				}
+				I.replaceAllUsesWith(builder->CreateLoad(state.base_instance_id->getType()->getPointerElementType(), state.base_instance_id, "base_instance_index"));
 			} else if (func_name == "floor.builtin.point_coord.float2") {
 				if(state.point_coord == nullptr) {
 					DBG(printf("failed to get point_coord arg, probably not in a fragment function?\n"); fflush(stdout);)

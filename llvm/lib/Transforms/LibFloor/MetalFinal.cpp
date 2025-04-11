@@ -173,7 +173,9 @@ namespace {
 			
 			// added vertex function args
 			Argument* vertex_id { nullptr };
+			Argument* base_vertex_id { nullptr };
 			Argument* instance_id { nullptr };
+			Argument* base_instance_id { nullptr };
 			
 			// added fragment function args
 			Argument* point_coord { nullptr };
@@ -206,10 +208,12 @@ namespace {
 		};
 		
 		enum METAL_VERTEX_ARG_REV_IDX : int32_t {
-			METAL_VERTEX_ID = -2,
-			METAL_VS_INSTANCE_ID = -1,
+			METAL_VERTEX_ID = -4,
+			METAL_BASE_VERTEX_ID = -3,
+			METAL_VS_INSTANCE_ID = -2,
+			METAL_VS_BASE_INSTANCE_ID = -1,
 			
-			METAL_VERTEX_ARG_COUNT = 2,
+			METAL_VERTEX_ARG_COUNT = 4,
 		};
 		
 		enum METAL_FRAGMENT_ARG_REV_IDX : int32_t {
@@ -219,11 +223,12 @@ namespace {
 		};
 		
 		enum METAL_TESS_EVAL_ARG_REV_IDX : int32_t {
-			METAL_PATCH_ID = -3,
-			METAL_TES_INSTANCE_ID = -2,
+			METAL_PATCH_ID = -4,
+			METAL_TES_INSTANCE_ID = -3,
+			METAL_TES_BASE_INSTANCE_ID = -2,
 			METAL_POSITION_IN_PATCH = -1,
 			
-			METAL_TESS_EVAL_ARG_COUNT = 3,
+			METAL_TESS_EVAL_ARG_COUNT = 4,
 		};
 		
 		bool runOnFunction(Function &F) override {
@@ -252,13 +257,13 @@ namespace {
 			
 			// check for optional features: soft-printf, primitive id, barycentric coord
 			bool has_soft_printf = false, has_primitive_id = false, has_barycentric_coord = false;
-			if (auto soft_printf_meta = M->getNamedMetadata("floor.soft_printf")) {
+			if (M->getNamedMetadata("floor.soft_printf")) {
 				has_soft_printf = true;
 			}
-			if (auto primitive_id_meta = M->getNamedMetadata("floor.primitive_id")) {
+			if (M->getNamedMetadata("floor.primitive_id")) {
 				has_primitive_id = true;
 			}
-			if (auto barycentric_coord_meta = M->getNamedMetadata("floor.barycentric_coord")) {
+			if (M->getNamedMetadata("floor.barycentric_coord")) {
 				has_barycentric_coord = true;
 			}
 			
@@ -301,7 +306,9 @@ namespace {
 				if (F.arg_size() >= METAL_VERTEX_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
 					// TODO: this should be optional / only happen on request
 					state.vertex_id = get_arg_by_idx(METAL_VERTEX_ID);
+					state.base_vertex_id = get_arg_by_idx(METAL_BASE_VERTEX_ID);
 					state.instance_id = get_arg_by_idx(METAL_VS_INSTANCE_ID);
+					state.base_instance_id = get_arg_by_idx(METAL_VS_BASE_INSTANCE_ID);
 					if (has_soft_printf) {
 						state.soft_printf = get_arg_by_idx(-(METAL_VERTEX_ARG_COUNT + 1));
 					}
@@ -317,6 +324,7 @@ namespace {
 					// TODO: this should be optional / only happen on request
 					state.patch_id = get_arg_by_idx(METAL_PATCH_ID);
 					state.instance_id = get_arg_by_idx(METAL_TES_INSTANCE_ID);
+					state.base_instance_id = get_arg_by_idx(METAL_TES_BASE_INSTANCE_ID);
 					state.position_in_patch = get_arg_by_idx(METAL_POSITION_IN_PATCH);
 					if (has_soft_printf) {
 						state.soft_printf = get_arg_by_idx(-(METAL_TESS_EVAL_ARG_COUNT + 1));
@@ -377,7 +385,7 @@ namespace {
 		using InstVisitor<MetalFinal>::visit;
 		void visit(Instruction& I) {
 			// remove fpmath metadata from all instructions
-			if (MDNode* MD = I.getMetadata(LLVMContext::MD_fpmath)) {
+			if (I.getMetadata(LLVMContext::MD_fpmath)) {
 				I.setMetadata(LLVMContext::MD_fpmath, nullptr);
 				was_modified = true;
 			}
@@ -726,6 +734,16 @@ namespace {
 				I.eraseFromParent();
 				return;
 			}
+			else if(func_name == "floor.get_base_vertex_id.i32") {
+				if(state.base_vertex_id == nullptr) {
+					DBG(printf("failed to get base_vertex_id arg, probably not in a vertex function?\n"); fflush(stdout);)
+					return;
+				}
+				
+				I.replaceAllUsesWith(state.base_vertex_id);
+				I.eraseFromParent();
+				return;
+			}
 			else if(func_name == "floor.get_patch_id.i32") {
 				if(state.patch_id == nullptr) {
 					DBG(printf("failed to get patch_id arg, probably not in a tessellation-evaluation function?\n"); fflush(stdout);)
@@ -743,6 +761,16 @@ namespace {
 				}
 				
 				I.replaceAllUsesWith(state.instance_id);
+				I.eraseFromParent();
+				return;
+			}
+			else if(func_name == "floor.get_base_instance_id.i32") {
+				if(state.base_instance_id == nullptr) {
+					DBG(printf("failed to get base_instance_id arg, probably not in a vertex or tessellation-evaluation function?\n"); fflush(stdout);)
+					return;
+				}
+				
+				I.replaceAllUsesWith(state.base_instance_id);
 				I.eraseFromParent();
 				return;
 			}
