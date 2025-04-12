@@ -2474,21 +2474,72 @@ namespace {
 		}
 		
 		std::optional<bool> fix_pointer_bitcast_with_loads(BitCastInst& BC, Function& F, const std::vector<LoadInst*>& loads) {
-			const auto src_ptr_type = cast<PointerType>(BC.getSrcTy());
-			const auto dst_ptr_type = cast<PointerType>(BC.getDestTy());
-			const auto dst_type = dst_ptr_type->getPointerElementType();
+			const auto dst_type = cast<PointerType>(BC.getDestTy())->getPointerElementType();
 			const auto dst_size = DL->getTypeStoreSize(dst_type).getFixedSize();
 			
-			auto src_type = src_ptr_type->getPointerElementType();
+			auto src_ptr_type = cast<PointerType>(BC.getSrcTy());
+			auto src_type = cast<PointerType>(BC.getSrcTy())->getPointerElementType();
 			auto src_size = DL->getTypeStoreSize(src_type).getFixedSize();
 			auto src = cast<Instruction>(BC.getOperand(0));
-			
 			GetElementPtrInst* src_gep = nullptr;
-			if ((src_type->isVectorTy() && dst_type->isStructTy()) ||
-				(src_type->isStructTy() && dst_type->isVectorTy())) {
+			
+			std::vector<Instruction*> cleanup_instrs { &BC };
+			
+			// direct struct<->vector bitcast+load?
+			bool is_vec_struct_load = ((src_type->isVectorTy() && dst_type->isStructTy()) ||
+									   (src_type->isStructTy() && dst_type->isVectorTy()));
+			
+			// indirect struct->vector bitcast+load?
+			// src might already point to the lowest element of a struct -> need to go up
+			if (!is_vec_struct_load && src_size < dst_size && dst_type->isVectorTy()) {
+				if (auto gep = dyn_cast_or_null<GetElementPtrInst>(src); gep && gep->getSourceElementType()->isStructTy()) {
+					const auto src_elem_type = gep->getSourceElementType();
+					SmallVector<Value*> indices;
+					for (auto& idx : gep->indices()) {
+						indices.emplace_back(idx);
+					}
+					
+					for (size_t i = 1, count = indices.size(); i < count; ++i) {
+						// last index must be 0 for this to work
+						const auto last_idx = dyn_cast_or_null<ConstantInt>(indices.back());
+						if (!last_idx || last_idx->getZExtValue() != 0) {
+							break;
+						}
+						indices.pop_back();
+						
+						auto higher_src_type = GetElementPtrInst::getIndexedType(src_elem_type, indices);
+						if (higher_src_type) {
+							if (auto new_src_size = DL->getTypeStoreSize(higher_src_type).getFixedSize(); new_src_size >= dst_size) {
+								// found it, create a new GEP with the current indices
+								src_gep = GetElementPtrInst::Create(gep->getSourceElementType(), gep->getOperand(0),
+																	indices, src->getName() + ".adj", src);
+								src_gep->setIsInBounds(gep->isInBounds());
+								src_gep->setDebugLoc(gep->getDebugLoc());
+								
+								// set new src
+								auto new_src_ptr_type = PointerType::get(higher_src_type, src_ptr_type->getPointerAddressSpace());
+								src_ptr_type = new_src_ptr_type;
+								src_size = new_src_size;
+								src_type = higher_src_type;
+								src = src_gep;
+								cleanup_instrs.emplace_back(src);
+								
+								is_vec_struct_load = true;
+								break;
+							}
+						}
+					}
+				}
+			}
+			
+			if (is_vec_struct_load) {
 				if (loads.size() > 1) {
 					ctx->emitError(&BC, "invalid pointer bitcast: can't replace more than one load");
 					return {};
+				}
+				if (!src_gep) {
+					src_gep = dyn_cast_or_null<GetElementPtrInst>(src);
+					cleanup_instrs.emplace_back(src_gep);
 				}
 				
 				// if either side is a struct and the other is a vector type,
@@ -2505,7 +2556,6 @@ namespace {
 					ctx->emitError(&BC, "invalid pointer bitcast: destination vector type has more elements than the source vector type");
 					return {};
 				}
-				src_gep = dyn_cast_or_null<GetElementPtrInst>(src);
 				
 				//
 				auto& ld = loads[0];
@@ -2575,6 +2625,8 @@ namespace {
 						ctx->emitError(&BC, "invalid pointer bitcast: invalid src -> dst cast (can't replace non-GEP src)");
 						return {};
 					}
+					cleanup_instrs.emplace_back(src_gep);
+					
 					SmallVector<llvm::Value*> indices;
 					for (auto& idx : src_gep->indices()) {
 						indices.emplace_back(idx);
@@ -2623,11 +2675,10 @@ namespace {
 			}
 			
 			// cleanup
-			if (BC.users().empty() && BC.uses().empty()) {
-				BC.eraseFromParent();
-			}
-			if (src_gep && src_gep->users().empty() && src_gep->uses().empty()) {
-				src_gep->eraseFromParent();
+			for (auto& cleanup_instr : cleanup_instrs) {
+				if (cleanup_instr && cleanup_instr->users().empty() && cleanup_instr->uses().empty()) {
+					cleanup_instr->eraseFromParent();
+				}
 			}
 			
 			return true;
