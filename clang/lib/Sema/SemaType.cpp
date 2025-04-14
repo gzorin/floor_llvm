@@ -8345,6 +8345,7 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
     case ParsedAttr::AT_GraphicsPointSize:
     case ParsedAttr::AT_GraphicsStageInput:
     case ParsedAttr::AT_GraphicsTessellationPatch:
+    case ParsedAttr::AT_GraphicsEarlyFragmentTests:
     case ParsedAttr::AT_ComputeKernelDim:
     case ParsedAttr::AT_ComputeKernelWorkGroupSize:
       attr.setUsedAsTypeAttr();

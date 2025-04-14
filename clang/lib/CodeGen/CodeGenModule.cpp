@@ -3995,6 +3995,11 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		
 		kernelMDArgs.push_back(llvm::MDNode::get(VMContext, max_work_group_size_info));
 	}
+	
+	// is early fragment tests set?
+	if (FD->getAttr<GraphicsEarlyFragmentTestsAttr>()) {
+		kernelMDArgs.push_back(llvm::MDString::get(VMContext, "early_fragment_tests"));
+	}
 }
 
 namespace libfloor {

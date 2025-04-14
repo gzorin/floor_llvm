@@ -674,6 +674,11 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
     Fn->setMetadata("kernel_dim", llvm::MDNode::get(Context, AttrMDArgs));
   }
 
+  if (FD->getAttr<GraphicsEarlyFragmentTestsAttr>()) {
+    Fn->setMetadata("early_fragment_tests", llvm::MDNode::get(Context,
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::IntegerType::get(Context, 32), 1))));
+  }
+
   llvm::MDNode *kernelMDNode = llvm::MDNode::get(Context, kernelMDArgs);
   llvm::NamedMDNode *MainMetadataNode;
   if (!CGM.getLangOpts().Metal) {

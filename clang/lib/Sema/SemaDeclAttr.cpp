@@ -3241,6 +3241,14 @@ void Sema::AddComputeKernelWorkGroupSizeAttr(SourceRange AttrRange, Decl *D,
   D->addAttr(::new (Context) ComputeKernelWorkGroupSizeAttr(TmpAttr));
 }
 
+static void handleGraphicsEarlyFragmentTestsAttr(Sema &S, Decl *D, const ParsedAttr &Attr) {
+  if (!Attr.checkAtMostNumArgs(S, 0)) {
+    Attr.setInvalid();
+    return;
+  }
+  D->addAttr(::new (S.Context) GraphicsEarlyFragmentTestsAttr(S.Context, Attr));
+}
+
 static void handleGraphicsFBODepthTypeAttr(Sema &S, Decl *D, const ParsedAttr &Attr) {
   if (!Attr.checkExactlyNumArgs(S, 1)) {
     Attr.setInvalid();
@@ -8901,6 +8909,9 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
     break;
   case ParsedAttr::AT_ComputeKernelWorkGroupSize:
     handleComputeKernelWorkGroupSizeAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_GraphicsEarlyFragmentTests:
+    handleGraphicsEarlyFragmentTestsAttr(S, D, AL);
     break;
   case ParsedAttr::AT_GraphicsFBOColorLocation:
     handleGraphicsFBOColorLocationAttr(S, D, AL);

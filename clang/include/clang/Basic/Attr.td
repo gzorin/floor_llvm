@@ -1402,6 +1402,15 @@ def GraphicsFBODepthType : InheritableAttr {
   let Documentation = [Undocumented];
 }
 
+// fragment shader attribute: enable early fragment tests/culling regardless
+// of shader side effects (discard, r/w resource access, dynamic depth write)
+def GraphicsEarlyFragmentTests : InheritableAttr {
+  let Spellings = [GNU<"early_fragment_tests">,
+                   CXX11<"","early_fragment_tests", 200809>];
+  let Subjects = SubjectList<[Function], ErrorDiag>;
+  let Documentation = [Undocumented];
+}
+
 // vertex output position (used in vertex output structs)
 def GraphicsVertexPosition : InheritableAttr {
   let Spellings = [GNU<"position">, CXX11<"","position", 200809>];
