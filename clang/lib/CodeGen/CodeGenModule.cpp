@@ -2841,7 +2841,8 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				// floor vector type
 				const auto vec_size = type_name_str.substr(type_param_start - 1, 1);
 				return strip_cvr(template_param + vec_size);
-			} else if (type_name_str.find("floor_image::image") == 0) {
+			} else if (type_name_str.starts_with("floor_image::image") ||
+					   type_name_str.starts_with("fl::floor_image::image")) {
 				// floor image type
 				// NOTE: this handling is slightly different than the one further down below
 				const auto image_type = (COMPUTE_IMAGE_TYPE)strtoull(template_param.c_str(), nullptr, 10);
@@ -2946,7 +2947,8 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				
 				img_type_str += '>';
 				return img_type_str;
-			} else if (type_name_str.find("std::array") == 0) {
+			} else if (type_name_str.starts_with("std::array") ||
+					   type_name_str.starts_with("fl::const_array")) {
 				auto arr_def = cxx_rdecl->getDefinition();
 				if (!arr_def || !arr_def->isCompleteDefinition()) {
 					break;

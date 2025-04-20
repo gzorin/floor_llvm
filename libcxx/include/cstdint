@@ -7,7 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#if defined(FLOOR_COMPUTE_HOST_DEVICE) // we don't want this for other backends
+#if defined(FLOOR_DEVICE_HOST_COMPUTE_IS_DEVICE) || defined(FLOOR_COMPUTE_HOST_DEVICE) // we don't want this for other backends
 
 #ifndef _LIBCPP_CSTDINT
 #define _LIBCPP_CSTDINT

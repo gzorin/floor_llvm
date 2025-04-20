@@ -854,7 +854,7 @@ namespace {
 				}
 				src_array_type = cast<ArrayType>(src_array_ptr_type->getPointerElementType());
 				
-				// abort if array elem type is a pointer (we're expecting [N x %"class.floor_image::const_image"])
+				// abort if array elem type is a pointer (we're expecting [N x %"class.fl::floor_image::const_image"])
 				if(array_type->getArrayElementType()->isPointerTy()) {
 					return;
 				}

@@ -623,7 +623,8 @@ namespace {
 						} else if (elem_type->isStructTy()) {
 							// if this is a struct type, we need to fully traverse it to figure out if it may be cloneable or not
 							const std::function<void(const llvm::StructType*)> traverse_st_type = [&traverse_st_type, &is_clonable, &is_constant_as](const llvm::StructType* st_type) {
-								if (st_type->getName().startswith("class.floor_image::image")) {
+								if (st_type->getName().startswith("class.floor_image::image") ||
+									st_type->getName().startswith("class.fl::floor_image::image")) {
 									is_clonable = false;
 									return;
 								}

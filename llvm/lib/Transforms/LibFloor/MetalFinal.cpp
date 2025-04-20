@@ -1209,18 +1209,22 @@ namespace {
 		
 		// this finds all libfloor image storage class structs and other structs, and replaces their names with the appropriate Apple Metal struct type name
 		// NOTE: we need to do this, since Apple decided to handle these specially based on their name alone (e.g. no allocating additional registers)
-		bool run_array_of_images_name_replacement() {
+		bool run_metal_name_replacement() {
 			std::vector<llvm::StructType*> image_storage_types;
 			for (auto& st_type : ctx->pImpl->NamedStructTypes) {
-				if (st_type.first().startswith("class.floor_image::image")) {
+				if (st_type.first().startswith("class.floor_image::image") ||
+					st_type.first().startswith("class.fl::floor_image::image")) {
 					image_storage_types.emplace_back(st_type.second);
 				} else {
 					// simple libfloor/std name -> Metal name replacement
 					// NOTE: since we need to match the start of the name, we can't simply use a map here
 					static const std::vector<std::pair<std::string, std::string>> simple_repl_lut {
 						{ "struct.std::__1::array", "struct.metal::array" },
+						{ "struct.fl::const_array", "struct.metal::array" },
 						{ "struct.triangle_tessellation_levels_t", "struct.metal::MTLTriangleTessellationFactorsHalf" },
+						{ "struct.fl::triangle_tessellation_levels_t", "struct.metal::MTLTriangleTessellationFactorsHalf" },
 						{ "struct.quad_tessellation_levels_t", "struct.metal::MTLQuadTessellationFactorsHalf" },
+						{ "struct.fl::quad_tessellation_levels_t", "struct.metal::MTLQuadTessellationFactorsHalf" },
 					};
 					for (const auto& repl : simple_repl_lut) {
 						if (st_type.first().startswith(repl.first)) {
@@ -1281,7 +1285,7 @@ namespace {
 			M = &Mod;
 			ctx = &M->getContext();
 			
-			bool module_modified = run_array_of_images_name_replacement();
+			bool module_modified = run_metal_name_replacement();
 			
 			// * strip floor_* calling convention from all functions and their users (replace it with C CC)
 			// * kill all functions named floor.*
