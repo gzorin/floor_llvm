@@ -33,11 +33,19 @@
 #pragma push_macro("SM_100a")
 #pragma push_macro("SM_101")
 #pragma push_macro("SM_101a")
+#pragma push_macro("SM_103")
+#pragma push_macro("SM_103a")
 #pragma push_macro("SM_120")
 #pragma push_macro("SM_120a")
-#define SM_120a "sm_120a"
+#pragma push_macro("SM_121")
+#pragma push_macro("SM_121a")
+#define SM_121a "sm_121a"
+#define SM_121 "sm_121|" SM_121a
+#define SM_120a "sm_120a|" SM_121
 #define SM_120 "sm_120|" SM_120a
-#define SM_101a "sm_101a|" SM_120
+#define SM_103a "sm_103a|" SM_120
+#define SM_103 "sm_103|" SM_103a
+#define SM_101a "sm_101a|" SM_103
 #define SM_101 "sm_101|" SM_101a
 #define SM_100a "sm_100a|" SM_101
 #define SM_100 "sm_100|" SM_100a
@@ -80,7 +88,9 @@
 #pragma push_macro("PTX85")
 #pragma push_macro("PTX86")
 #pragma push_macro("PTX87")
-#define PTX87 "ptx87"
+#pragma push_macro("PTX88")
+#define PTX88 "ptx88"
+#define PTX87 "ptx87|" PTX88
 #define PTX86 "ptx86|" PTX87
 #define PTX85 "ptx85|" PTX86
 #define PTX84 "ptx84|" PTX85
@@ -897,8 +907,12 @@ TARGET_BUILTIN(__nvvm_cp_async_wait_all, "v", "", AND(SM_80,PTX70))
 #pragma pop_macro("SM_100a")
 #pragma pop_macro("SM_101")
 #pragma pop_macro("SM_101a")
+#pragma pop_macro("SM_103")
+#pragma pop_macro("SM_103a")
 #pragma pop_macro("SM_120")
 #pragma pop_macro("SM_120a")
+#pragma pop_macro("SM_121")
+#pragma pop_macro("SM_121a")
 #pragma pop_macro("PTX60")
 #pragma pop_macro("PTX61")
 #pragma pop_macro("PTX62")
@@ -922,3 +936,4 @@ TARGET_BUILTIN(__nvvm_cp_async_wait_all, "v", "", AND(SM_80,PTX70))
 #pragma pop_macro("PTX85")
 #pragma pop_macro("PTX86")
 #pragma pop_macro("PTX87")
+#pragma pop_macro("PTX88")
