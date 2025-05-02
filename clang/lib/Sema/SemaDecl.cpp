@@ -10175,17 +10175,24 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
       llvm::SmallPtrSet<const Type *, 16> ValidTypes;
       for (auto Param : NewFD->parameters())
         checkIsValidOpenCLKernelParameter(*this, D, Param, ValidTypes, getLangOpts().Metal,
-										  getLangOpts().Vulkan && getLangOpts().VulkanDescriptorBufferSupport);
-	}
+                                          getLangOpts().Vulkan && getLangOpts().VulkanDescriptorBufferSupport);
+    }
 
-	// arg_buffer<> must only be used directly
-	for (auto Param : NewFD->parameters()) {
-	  if (Param->hasAttr<FloorArgBufferAttr>() &&
-	      !Param->getType()->isStructureOrClassType()) {
-	    Diag(Param->getLocation(), diag::err_libfloor_indirect_arg_buffer_in_entry_point);
-	    D.setInvalidType();
-	  }
-	}
+    // arg_buffer<> must only be used directly
+    for (auto Param : NewFD->parameters()) {
+      auto param_type = Param->getType();
+      if ((getLangOpts().CUDA || getLangOpts().FloorHostCompute) &&
+          Param->hasAttr<FloorArgBufferAttr>()) {
+        // on CUDA and Host-Compute, this is actually always a reference
+        assert(param_type->isReferenceType());
+        param_type = param_type->getPointeeType();
+      }
+      if (Param->hasAttr<FloorArgBufferAttr>() &&
+          !param_type->isStructureOrClassType()) {
+        Diag(Param->getLocation(), diag::err_libfloor_indirect_arg_buffer_in_entry_point);
+        D.setInvalidType();
+      }
+    }
 
     if (getLangOpts().OpenCLCPlusPlus) {
       if (DC->isRecord()) {
