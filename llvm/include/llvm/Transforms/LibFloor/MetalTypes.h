@@ -70,6 +70,7 @@ enum TAG_TYPE : uint32_t {
 	SARC        = make_tag_type('S', 'A', 'R', 'C'),
 	// TODO/TBD
 	LAYR        = make_tag_type('L', 'A', 'Y', 'R'),
+	ILST        = make_tag_type('I', 'L', 'S', 'T'),
 	// generic end tag
 	END         = make_tag_type('E', 'N', 'D', 'T'),
 };

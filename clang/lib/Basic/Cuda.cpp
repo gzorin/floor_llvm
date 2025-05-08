@@ -133,7 +133,7 @@ static const CudaArchToStringMap arch_names[] = {
     SM(89),                          // Ada
     SM(90), SM(90a),                 // Hopper
     SM(100), SM(100a), SM(101), SM(101a), SM(103), SM(103a), // Blackwell Server
-    SM(120), SM(120a) ,SM(121), SM(121a), // Blackwell Consumer
+    SM(120), SM(120a), SM(121), SM(121a), // Blackwell Consumer
     GFX(600),  // gfx600
     GFX(601),  // gfx601
     GFX(602),  // gfx602
