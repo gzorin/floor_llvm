@@ -992,25 +992,46 @@ namespace {
 					// move all local memory variables into a single combined struct
 					std::vector<llvm::Type*> combined_elem_types;
 					std::vector<llvm::Value*> combined_elems;
-					uint64_t min_alignment = std::numeric_limits<uint64_t>::max();
 					uint64_t total_size = 0u;
 					for (auto& GV : lmem_vars) {
-						min_alignment = std::min(GV->getAlignment(), min_alignment);
+						const auto elemental_type_size = M->getDataLayout().getTypeStoreSize(libfloor_utils::get_elemental_type(GV->getValueType())).getFixedValue();
+						if (auto cur_alignment = total_size % elemental_type_size; cur_alignment != 0u) {
+							// need to add padding
+							auto padding = elemental_type_size - cur_alignment;
+							total_size += padding;
+							// if the padding is small enough, just add small types
+							if (padding < 4) {
+								if (padding == 3) {
+									combined_elem_types.emplace_back(llvm::Type::getInt8Ty(*ctx));
+									combined_elems.emplace_back(nullptr);
+									combined_elem_types.emplace_back(llvm::Type::getInt16Ty(*ctx));
+									combined_elems.emplace_back(nullptr);
+								} else if (padding == 2) {
+									combined_elem_types.emplace_back(llvm::Type::getInt16Ty(*ctx));
+									combined_elems.emplace_back(nullptr);
+								} else {
+									assert(padding == 1);
+									combined_elem_types.emplace_back(llvm::Type::getInt8Ty(*ctx));
+									combined_elems.emplace_back(nullptr);
+								}
+							} else {
+								// otherwise: add an array
+								combined_elem_types.emplace_back(llvm::ArrayType::get(llvm::Type::getInt8Ty(*ctx), padding));
+								combined_elems.emplace_back(nullptr);
+							}
+						}
+						
+						total_size += M->getDataLayout().getTypeStoreSize(GV->getValueType()).getFixedValue();
 						combined_elem_types.emplace_back(GV->getValueType());
 						combined_elems.emplace_back(GV);
-						total_size += M->getDataLayout().getTypeStoreSize(GV->getValueType()).getFixedValue();
 					}
 					assert(total_size > 0u);
-					assert(min_alignment <= 65536u);
 					
 					const auto combined_name = "wg.enclose." + F.getName().str();
 					auto combined_st_type = llvm::StructType::create(*ctx, combined_elem_types, combined_name + ".struct");
 					GlobalVariable* combined_st_gv = new GlobalVariable(*M, combined_st_type, false, GlobalValue::InternalLinkage,
 																		nullptr, combined_name, lmem_vars[0] /* insert before first original GV */,
 																		GlobalValue::NotThreadLocal, SPIRAS_Local, false);
-					if (min_alignment > 1u) {
-						combined_st_gv->setAlignment(MaybeAlign { min_alignment });
-					}
 					
 					// adjust all instructions accordingly
 					enclose_in_struct(std::move(combined_elems), std::move(combined_elem_types), *combined_st_gv, combined_st_type, F,
@@ -1076,6 +1097,10 @@ namespace {
 			
 			// replace users
 			for (uint32_t st_elem_idx = 0, st_elem_count = uint32_t(elem_types.size()); st_elem_idx < st_elem_count; ++st_elem_idx) {
+				if (!vals[st_elem_idx]) {
+					// padding values are nullptr
+					continue;
+				}
 				llvm::Value* idx_list[] {
 					llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0),
 					llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), st_elem_idx),

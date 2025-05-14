@@ -271,6 +271,31 @@ static inline llvm::Value* get_underlying_bitcast_operand_or_null(llvm::Value* v
 	return (op != val ? op : nullptr);
 }
 
+//! returns the underlying elemental type of the specified "type",
+//! i.e. the innermost type that can not be decomposed further,
+//! returns nullptr for invalid types
+static inline llvm::Type* get_elemental_type(llvm::Type* type) {
+	if (!type) {
+		return nullptr;
+	}
+	
+	// struct types: return the elemental type of the first field (recursively if necessary)
+	if (auto st_type = dyn_cast_or_null<llvm::StructType>(type)) {
+		if (st_type->getStructNumElements() == 0) {
+			return nullptr;
+		}
+		return get_elemental_type(st_type->getStructElementType(0));
+	}
+	
+	// array types: can just use the element type, then recurse
+	if (auto arr_type = dyn_cast_or_null<llvm::ArrayType>(type)) {
+		return get_elemental_type(arr_type->getElementType());
+	}
+	
+	// else: assume we already have an elemental type
+	return type;
+}
+
 } // namespace libfloor_utils
 
 #endif
