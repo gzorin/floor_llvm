@@ -39,6 +39,8 @@
 #include "llvm/Transforms/LibFloor/cfg/node.hpp"
 #include "llvm/Transforms/LibFloor/VulkanSampling.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/Support/Debug.h"
+#include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <assert.h>
 
@@ -1012,9 +1014,12 @@ CFGNode *CFGStructurizer::get_entry_block() const { return entry_block; }
 static bool block_is_control_dependent(const CFGNode *node) {
   // control dependent if:
   //  * barrier
-  //  * derivative function
-  //  * implicit LOD image function
+  //  * derivative functions
+  //  * implicit LOD image functions
+  //  * query LOD functions
   //  * any sub-group operation
+
+  // direct matches
   static const std::unordered_set<std::string> control_dep_funcs{
       // barrier
       "_Z7barrierj",
@@ -1024,6 +1029,7 @@ static bool block_is_control_dependent(const CFGNode *node) {
       "floor.dfdy.f32",
       "floor.fwidth.f32",
   };
+
   for (auto *op : node->ir.operations) {
     auto call = dyn_cast_or_null<CallBase>(op);
     if (!call) {
@@ -1034,33 +1040,32 @@ static bool block_is_control_dependent(const CFGNode *node) {
       continue;
     }
 
-    // check fix function names
+    // check fixed function names
     const auto func_name_ref = func->getName();
     const auto func_name = func_name_ref.str();
     if (control_dep_funcs.count(func_name) > 0) {
       return true;
     } else if (func_name_ref.startswith("floor.sub_group") ||
-               func_name_ref.startswith("floor.barrier")) {
+               func_name_ref.startswith("floor.barrier") ||
+               func_name_ref.startswith("_Z18query_image_lodv2f")) {
       return true;
     }
 
     // check implicit LOD image function names
-    // NOTE/TODO: LOD query, gather and sparse-gather not emitted yet by
-    // frontend
-    if (func_name.find("_Z11read_image") != 0) {
-      continue;
-    }
-    assert(call->arg_size() >= 4 && "invalid arg count");
-    // always: read(image, sampler_idx, coord_with_layer, lod_type, ...)
-    const auto lod_type_arg = call->getArgOperand(3);
-    if (const auto lod_type_const_int =
-            dyn_cast_or_null<ConstantInt>(lod_type_arg);
-        lod_type_const_int) {
-      const auto lod_type =
-          (vulkan_sampling::LOD_TYPE)lod_type_const_int->getZExtValue();
-      if (lod_type == vulkan_sampling::LOD_TYPE::IMPLICIT_LOD ||
-          lod_type == vulkan_sampling::LOD_TYPE::IMPLICIT_LOD_WITH_BIAS) {
-        return true;
+    // NOTE/TODO: gather and sparse-gather not emitted yet
+    if (func_name_ref.startswith("_Z11read_image")) {
+      assert(call->arg_size() >= 4 && "invalid arg count");
+      // always: read(image, sampler_idx, coord_with_layer, lod_type, ...)
+      const auto lod_type_arg = call->getArgOperand(3);
+      if (const auto lod_type_const_int =
+              dyn_cast_or_null<ConstantInt>(lod_type_arg);
+          lod_type_const_int) {
+        const auto lod_type =
+            (vulkan_sampling::LOD_TYPE)lod_type_const_int->getZExtValue();
+        if (lod_type == vulkan_sampling::LOD_TYPE::IMPLICIT_LOD ||
+            lod_type == vulkan_sampling::LOD_TYPE::IMPLICIT_LOD_WITH_BIAS) {
+          return true;
+        }
       }
     }
   }
