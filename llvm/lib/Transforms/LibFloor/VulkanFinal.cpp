@@ -244,13 +244,13 @@ namespace {
 			
 			// check for optional features: soft-printf, primitive id, barycentric coord
 			bool has_soft_printf = false, has_primitive_id = false, has_barycentric_coord = false;
-			if (auto soft_printf_meta = M->getNamedMetadata("floor.soft_printf")) {
+			if (auto soft_printf_meta = M->getNamedMetadata("floor.soft_printf"); soft_printf_meta) {
 				has_soft_printf = true;
 			}
-			if (auto primitive_id_meta = M->getNamedMetadata("floor.primitive_id")) {
+			if (auto primitive_id_meta = M->getNamedMetadata("floor.primitive_id"); primitive_id_meta) {
 				has_primitive_id = true;
 			}
-			if (auto barycentric_coord_meta = M->getNamedMetadata("floor.barycentric_coord")) {
+			if (auto barycentric_coord_meta = M->getNamedMetadata("floor.barycentric_coord"); barycentric_coord_meta) {
 				has_barycentric_coord = true;
 			}
 			
@@ -2709,6 +2709,205 @@ namespace {
 			return true;
 		}
 		
+		std::optional<bool> fix_pointer_bitcast_with_stores(BitCastInst& BC, Function& F, const std::vector<StoreInst*>& stores) {
+			const auto dst_type = cast<PointerType>(BC.getDestTy())->getPointerElementType();
+			const auto dst_size = DL->getTypeStoreSize(dst_type).getFixedSize();
+			
+			auto src_ptr_type = cast<PointerType>(BC.getSrcTy());
+			auto src_type = cast<PointerType>(BC.getSrcTy())->getPointerElementType();
+			auto src_size = DL->getTypeStoreSize(src_type).getFixedSize();
+			auto src = cast<Instruction>(BC.getOperand(0));
+			GetElementPtrInst* src_gep = nullptr;
+			
+			std::vector<Instruction*> cleanup_instrs { &BC };
+			
+			// direct struct<->vector bitcast+store?
+			bool is_vec_struct_store = ((src_type->isVectorTy() && dst_type->isStructTy()) ||
+										(src_type->isStructTy() && dst_type->isVectorTy()));
+			
+			// indirect struct->vector bitcast+store?
+			// src might already point to the lowest element of a struct -> need to go up
+			if (!is_vec_struct_store && src_size < dst_size && dst_type->isVectorTy()) { // TODO: is this correct?
+				if (auto gep = dyn_cast_or_null<GetElementPtrInst>(src); gep && gep->getSourceElementType()->isStructTy()) {
+					const auto src_elem_type = gep->getSourceElementType();
+					SmallVector<Value*> indices;
+					for (auto& idx : gep->indices()) {
+						indices.emplace_back(idx);
+					}
+					
+					for (size_t i = 1, count = indices.size(); i < count; ++i) {
+						// last index must be 0 for this to work
+						const auto last_idx = dyn_cast_or_null<ConstantInt>(indices.back());
+						if (!last_idx || last_idx->getZExtValue() != 0) {
+							break;
+						}
+						indices.pop_back();
+						
+						auto higher_src_type = GetElementPtrInst::getIndexedType(src_elem_type, indices);
+						if (higher_src_type) {
+							if (auto new_src_size = DL->getTypeStoreSize(higher_src_type).getFixedSize(); new_src_size >= dst_size) {
+								// found it, create a new GEP with the current indices
+								src_gep = GetElementPtrInst::Create(gep->getSourceElementType(), gep->getOperand(0),
+																	indices, src->getName() + ".adj", src);
+								src_gep->setIsInBounds(gep->isInBounds());
+								src_gep->setDebugLoc(gep->getDebugLoc());
+								
+								// set new src
+								auto new_src_ptr_type = PointerType::get(higher_src_type, src_ptr_type->getPointerAddressSpace());
+								src_ptr_type = new_src_ptr_type;
+								src_size = new_src_size;
+								src_type = higher_src_type;
+								src = src_gep;
+								cleanup_instrs.emplace_back(src);
+								
+								is_vec_struct_store = true;
+								break;
+							}
+						}
+					}
+				}
+			}
+			
+			if (is_vec_struct_store) {
+				if (stores.size() > 1) {
+					ctx->emitError(&BC, "invalid pointer bitcast: can't replace more than one store");
+					return {};
+				}
+				// TODO: implement this
+				assert(false && "unhandled bitcast store replacement");
+			} else {
+				// -> non vector<->struct BC+store
+				
+				// if the source size is larger, the source pointer likely orignates from a struct GEP at a higher level
+				// -> drill down
+				if (src_size > dst_size) { // TODO: is this correct?
+					src_gep = dyn_cast_or_null<GetElementPtrInst>(src);
+					if (!src_gep) {
+						ctx->emitError(&BC, "invalid pointer bitcast: invalid src -> dst cast (can't replace non-GEP src)");
+						return {};
+					}
+					cleanup_instrs.emplace_back(src_gep);
+					
+					SmallVector<llvm::Value*> indices;
+					for (auto& idx : src_gep->indices()) {
+						indices.emplace_back(idx);
+					}
+					
+					for (;;) {
+						auto src_st_type = dyn_cast_or_null<StructType>(src_type);
+						if (!src_st_type) {
+							ctx->emitError(&BC, "invalid pointer bitcast: invalid src -> dst cast (src is not a struct type)");
+							return {};
+						}
+						indices.emplace_back(ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0u));
+						src_type = src_st_type->getStructElementType(0);
+						src_size = DL->getTypeStoreSize(src_type).getFixedSize();
+						if (src_size == dst_size) {
+							// if this is still a struct type, do another round (struct containing a single element)
+							// also: if this matches the dst type (for some reason, which shouldn't occur ...), use it straight away
+							if (src_type->isStructTy() && src_type != dst_type) {
+								assert(cast<StructType>(src_type)->getStructNumElements() == 1);
+								continue;
+							}
+							
+							src = GetElementPtrInst::Create(src_gep->getSourceElementType(), src_gep->getOperand(0), indices,
+															src_gep->getName(), src_gep);
+							((GetElementPtrInst*)src)->setIsInBounds(src_gep->isInBounds());
+							src->setDebugLoc(src_gep->getDebugLoc());
+							break;
+						}
+					}
+					// TODO: implement this
+					assert(false && "unhandled bitcast store replacement");
+				} else if (src_size < dst_size) {
+					if (stores.size() > 1) {
+						ctx->emitError(&BC, "invalid pointer bitcast: can't replace more than one store");
+						return {};
+					}
+					
+					src_gep = dyn_cast_or_null<GetElementPtrInst>(src);
+					if (!src_gep) {
+						ctx->emitError(&BC, "invalid pointer bitcast: invalid src -> dst cast (can't replace non-GEP src)");
+						return {};
+					}
+					
+					// if this happens, a larger value/type is stored to a pointer of lower bit depth (e.g. i64 into i8*)
+					// -> split up value into parts that fit into the used pointer element type
+					assert((dst_size % src_size) == 0u && "uneven store using a larger value type into a smaller pointer type");
+					const auto split_count = (dst_size / src_size);
+					const auto src_bitness = src_size * 8u;
+					
+					SmallVector<Value*, 8> src_gep_indices;
+					for (auto& idx : src_gep->indices()) {
+						src_gep_indices.emplace_back(idx);
+					}
+					
+					const auto store = stores[0];
+					auto store_value = store->getValueOperand();
+					Type* store_value_int_type = nullptr;
+					if (!store_value->getType()->isIntegerTy()) {
+						// if the source value is not an integer, we need to bitcast it to an integer
+						// NOTE/TODO: this probably won't work in all cases ...
+						assert(dst_size <= 8 && "source value is too large");
+						store_value_int_type = IntegerType::get(*ctx, dst_size * 8u);
+						store_value = new BitCastInst(store_value, store_value_int_type, "store_value_bc", store);
+					} else {
+						store_value_int_type = store_value->getType();
+					}
+					
+					cleanup_instrs.emplace_back(store);
+					for (uint32_t split_idx = 0u; split_idx < split_count; ++split_idx) {
+						Value* shifted_value = nullptr;
+						GetElementPtrInst* store_gep = nullptr;
+						if (split_idx > 0) {
+							// right shift by bitness * split-index
+							shifted_value = BinaryOperator::CreateLShr(store_value,
+																	   ConstantInt::get(store_value_int_type, split_idx * src_bitness),
+																	   "st_split_shift", store);
+							
+							// advance GEP by one
+							auto adj_gep_indices = src_gep_indices;
+							auto last_gep_idx = adj_gep_indices.back();
+							auto adv_idx = BinaryOperator::CreateAdd(last_gep_idx,
+																	 ConstantInt::get(last_gep_idx->getType(), split_idx),
+																	 "st_src_gep_idx_adv", src_gep);
+							adj_gep_indices[adj_gep_indices.size() - 1] = adv_idx;
+							
+							store_gep = llvm::GetElementPtrInst::Create(src_gep->getSourceElementType(), src_gep->getPointerOperand(),
+																		adj_gep_indices, "st_src_gep_adv", src_gep);
+							if (src_gep->isInBounds()) {
+								store_gep->setIsInBounds();
+							}
+							store_gep->copyMetadata(*src_gep);
+							store_gep->setDebugLoc(src_gep->getDebugLoc());
+						} else {
+							// first iteration: use value and GEP as is
+							shifted_value = store_value;
+							store_gep = src_gep;
+						}
+						auto trunc_shifted_value = new TruncInst(shifted_value, src_type, "st_trunc_split_shift", store);
+						auto repl_st = new StoreInst(trunc_shifted_value, store_gep, store->isVolatile(),
+													 store->getAlign(), store->getOrdering(), store->getSyncScopeID(),
+													 store);
+						repl_st->copyMetadata(*store);
+						repl_st->setDebugLoc(store->getDebugLoc());
+					}
+				} else { // src_size == dst_size
+					// TODO: implement this?
+					// -> ignore for now, since sizes do match
+				}
+			}
+			
+			// cleanup
+			for (auto& cleanup_instr : cleanup_instrs) {
+				if (cleanup_instr && cleanup_instr->users().empty() && cleanup_instr->uses().empty()) {
+					cleanup_instr->eraseFromParent();
+				}
+			}
+			
+			return true;
+		}
+		
 		bool fix_pointer_bitcasts() {
 			bool did_modify = false;
 			for (auto& BC : ptr_bc_instrs) {
@@ -2744,7 +2943,7 @@ namespace {
 					ctx->emitError(BC, "invalid pointer bitcast: failed to run bitcast fixup (can't handle both loads and stores)");
 					return false;
 				}
-				if (loads.empty()) {
+				if (loads.empty() && stores.empty()) {
 					// ignore this bitcast
 					continue;
 				}
@@ -2756,9 +2955,15 @@ namespace {
 					}
 					did_modify |= *result;
 				}
-				
-				// TODO: handle stores (don't have a test case for this yet)
-				assert(stores.empty() && "unhandled bitcast stores");
+
+				// NOTE: this is still very much a WIP and may fail catastrophically
+				if (!stores.empty()) {
+					auto result = fix_pointer_bitcast_with_stores(*BC, *func, stores);
+					if (!result) {
+						return false;
+					}
+					did_modify |= *result;
+				}
 			}
 			return did_modify;
 		}
