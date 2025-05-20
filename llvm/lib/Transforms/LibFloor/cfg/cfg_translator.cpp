@@ -62,9 +62,9 @@ static inline Terminator::Type get_terminator_type(Instruction &instr) {
   if (auto br = dyn_cast_or_null<BranchInst>(&instr)) {
     return (br->isConditional() ? Terminator::Type::Condition
                                 : Terminator::Type::Branch);
-  } else if (auto ret = dyn_cast_or_null<ReturnInst>(&instr)) {
+  } else if (auto ret = dyn_cast_or_null<ReturnInst>(&instr); ret) {
     return Terminator::Type::Return;
-  } else if (auto unreachable = dyn_cast_or_null<UnreachableInst>(&instr)) {
+  } else if (auto unreachable = dyn_cast_or_null<UnreachableInst>(&instr); unreachable) {
     if (auto CI = dyn_cast_or_null<CallInst>(instr.getPrevNode()); CI) {
       auto func_name = CI->getCalledFunction()->getName();
       if (func_name == "floor.discard_fragment") {
@@ -74,7 +74,7 @@ static inline Terminator::Type get_terminator_type(Instruction &instr) {
       }
     }
     return Terminator::Type::Unreachable;
-  } else if (auto sw = dyn_cast_or_null<SwitchInst>(&instr)) {
+  } else if (auto sw = dyn_cast_or_null<SwitchInst>(&instr); sw) {
     return Terminator::Type::Switch;
   }
   assert(false && "unsupported terminator instruction");
@@ -411,9 +411,9 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
                succ_idx < succ_count; ++succ_idx) {
             compute_simple_reachability(*sw->getSuccessor(succ_idx));
           }
-        } else if (auto ret = dyn_cast_or_null<ReturnInst>(term)) {
+		} else if (auto ret = dyn_cast_or_null<ReturnInst>(term); ret) {
           // nop
-        } else if (auto ur = dyn_cast_or_null<UnreachableInst>(term)) {
+		} else if (auto ur = dyn_cast_or_null<UnreachableInst>(term); ur) {
           // nop
         } else {
           assert(false && "unknown/unhandled terminator type");

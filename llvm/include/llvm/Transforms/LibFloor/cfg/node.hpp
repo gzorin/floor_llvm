@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ d6cff9039956d6f461625b01981c541eb724088c
+// @ ed18ccec1f8c87417af68252a0931121806798a0
 //
 //===----------------------------------------------------------------------===//
 
@@ -86,6 +86,7 @@ public:
 
   void add_branch(CFGNode *to);
   void add_fake_branch(CFGNode *to);
+  void clear_branches();
 
   explicit CFGNode(CFGNodePool &pool, BasicBlock &BB, std::string name);
 

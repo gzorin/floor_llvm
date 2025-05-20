@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ d6cff9039956d6f461625b01981c541eb724088c
+// @ ed18ccec1f8c87417af68252a0931121806798a0
 //
 //===----------------------------------------------------------------------===//
 
@@ -36,6 +36,7 @@
 #include <stdint.h>
 #include <vector>
 #include <optional>
+#include <type_traits>
 #include "llvm/IR/CFG.h"
 
 // A simple IR representation which allows the CFGStructurizer to do some simple
@@ -76,6 +77,35 @@ enum class SpvSelectionControlMask : uint32_t {
   Flatten = 0x00000001,
   DontFlatten = 0x00000002,
 };
+
+enum class SpvInstructionFlags : uint8_t {
+	None = 0,
+	SinkableBit = 1 << 0,
+	DependencySinkableBit = 1 << 1,
+	AutoGroupSharedBarrier = 1 << 2,
+	// Inserted after analysis passes are done.
+	SubgroupSyncPre = 1 << 3,
+	SubgroupSyncPost = 1 << 4
+};
+static inline constexpr SpvInstructionFlags operator|(const SpvInstructionFlags& e0, const SpvInstructionFlags& e1) {
+	return (SpvInstructionFlags)((std::underlying_type_t<SpvInstructionFlags>)e0 |
+								 (std::underlying_type_t<SpvInstructionFlags>)e1);
+}
+static inline constexpr SpvInstructionFlags& operator|=(SpvInstructionFlags& e0, const SpvInstructionFlags& e1) {
+	e0 = e0 | e1;
+	return e0;
+}
+static inline constexpr SpvInstructionFlags operator&(const SpvInstructionFlags& e0, const SpvInstructionFlags& e1) {
+	return (SpvInstructionFlags)((std::underlying_type_t<SpvInstructionFlags>)e0 &
+								 (std::underlying_type_t<SpvInstructionFlags>)e1);
+}
+static inline constexpr SpvInstructionFlags& operator&=(SpvInstructionFlags& e0, const SpvInstructionFlags& e1) {
+	e0 = e0 & e1;
+	return e0;
+}
+static inline constexpr SpvInstructionFlags operator~(const SpvInstructionFlags& e0) {
+	return (SpvInstructionFlags)(~((std::underlying_type_t<SpvInstructionFlags>)e0));
+}
 
 struct MergeInfo {
   MergeType merge_type = MergeType::None;

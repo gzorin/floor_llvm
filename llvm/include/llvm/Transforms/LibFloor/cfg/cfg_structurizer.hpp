@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ d6cff9039956d6f461625b01981c541eb724088c
+// @ ed18ccec1f8c87417af68252a0931121806798a0
 //
 //===----------------------------------------------------------------------===//
 
@@ -62,6 +62,8 @@ public:
   CFGNode *get_entry_block() const;
 
   bool rewrite_rov_lock_region();
+  void rewrite_auto_group_shared_barrier();
+  void flatten_subgroup_shuffles();
 
   // For esoteric CFG workarounds.
   void set_driver_version(uint32_t driver_id, uint32_t driver_version);
@@ -141,6 +143,10 @@ private:
   header_and_merge_block_have_entry_exit_relationship(CFGNode *header,
                                                       CFGNode *merge) const;
   void fixup_broken_selection_merges(unsigned pass);
+
+  enum class SwitchProgressMode { Done, SimpleModify, IterativeModify };
+  SwitchProgressMode process_switch_blocks(unsigned pass);
+
   bool find_switch_blocks(unsigned pass);
   void hoist_switch_branches_to_frontier(CFGNode *node, CFGNode *merge,
                                          CFGNode *frontier);
@@ -301,5 +307,16 @@ private:
   collect_and_dispatch_control_flow(CFGNode *common_idom, CFGNode *common_pdom,
                                     const std::vector<CFGNode *> &constructs,
                                     bool collect_all_code_paths_to_pdom);
+
+  void collect_and_dispatch_control_flow_from_anchor(
+      CFGNode *anchor, CFGNode *common_pdom,
+      const std::vector<CFGNode *> &constructs);
+
+  void sink_ssa_constructs();
+  void sink_ssa_constructs_run(bool dry_run);
+
+  SpvInstructionFlags get_instruction_flags(const Instruction *instr);
+  void set_instruction_flags(Instruction *instr,
+                             const SpvInstructionFlags new_flags);
 };
 } // namespace llvm

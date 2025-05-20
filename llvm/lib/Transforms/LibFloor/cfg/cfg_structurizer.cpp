@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ d6cff9039956d6f461625b01981c541eb724088c
+// @ ed18ccec1f8c87417af68252a0931121806798a0
 //
 //===----------------------------------------------------------------------===//
 
@@ -56,6 +56,11 @@
 #endif
 
 namespace llvm {
+static bool instruction_has_side_effect_and_result(const Instruction &instr);
+static bool instruction_is_barrier(const Instruction &instr);
+static bool instruction_is_control_dependent(const Instruction &instr);
+static bool block_is_control_dependent(const CFGNode *node);
+
 static std::string unique_phi_suffix() {
   static uint32_t phi_name_counter = 0;
   std::string suffix = "." + std::to_string(phi_name_counter);
@@ -661,6 +666,248 @@ static void scrub_rov_lock_regions(CFGNode *node, bool preserve_first_begin,
 }
 #endif
 
+#if 0 // we don't need this
+void CFGStructurizer::flatten_subgroup_shuffles() {
+  recompute_cfg();
+
+  // Look for cases where shuffles happen inside small branches.
+  // This comes up due to HLSL's short-cicruit rules.
+  for (auto *n : forward_post_visit_order) {
+    // Only care about blocks which don't dominate anything.
+    if (n->succ.size() != 1 || n->dominance_frontier.size() != 1 ||
+        n->dominance_frontier.front() != n->succ.front()) {
+      continue;
+    }
+    if (n->pred.size() != 1) {
+      continue;
+    }
+    if (!n->pred.front()->dominates(n->succ.front())) {
+      continue;
+    }
+    if (n->pred.front()->succ.size() != 2) {
+      continue;
+    }
+
+    // There's a limit to how much we want to peephole.
+    if (n->ir.operations.size() > 4) {
+      continue;
+    }
+
+    // We don't want to hoist if both sides of the branch have meaningful work
+    // associated with them.
+    auto *succ = n->succ.front();
+    auto *pred = n->pred.front();
+    auto *sibling0 = pred->succ[0];
+    auto *sibling1 = pred->succ[1];
+
+    if (sibling0 != succ && sibling0 != n && !sibling0->ir.operations.empty()) {
+      continue;
+    }
+    if (sibling1 != succ && sibling1 != n && !sibling1->ir.operations.empty()) {
+      continue;
+    }
+
+    // Now we've detected:
+    // if (blah) { a = shuffle(); } phi(a);
+
+    bool has_dubious_shuffle = false;
+
+    for (auto *op : n->ir.operations) {
+      if (op->op == spv::OpGroupNonUniformShuffle ||
+          op->op == spv::OpGroupNonUniformBroadcast) {
+        for (auto &phi : n->succ.front()->ir.phi) {
+          for (auto &incoming : phi.incoming) {
+            if (incoming.id == op->id) {
+              has_dubious_shuffle = true;
+              goto out;
+            }
+          }
+        }
+      }
+    }
+  out:
+
+    if (has_dubious_shuffle) {
+      // Now the question is if it's safe to do this. There can be nothing
+      // control dependent (except for shuffles).
+      for (auto *op : n->ir.operations) {
+        if (op->op == spv::OpGroupNonUniformShuffle ||
+            op->op == spv::OpGroupNonUniformBroadcast) {
+          continue;
+        }
+
+        if (op->op == spv::OpLoad) {
+          // Only allow loads if it's loading from plain OpVariables.
+          // Hoisting a buffer read is not acceptable.
+          if (!module.get_builder().hasDecoration(op->arguments[0],
+                                                  spv::DecorationBuiltIn)) {
+            has_dubious_shuffle = false;
+            break;
+          }
+        }
+
+        if (SPIRVModule::opcode_is_control_dependent(op->op) || op->id == 0 ||
+            SPIRVModule::opcode_has_side_effect_and_result(op->op)) {
+          has_dubious_shuffle = false;
+          break;
+        }
+      }
+    }
+
+    if (has_dubious_shuffle) {
+      for (auto *op : n->ir.operations) {
+        n->pred.front()->ir.operations.push_back(op);
+      }
+      n->ir.operations.clear();
+    }
+  }
+}
+#endif
+
+#if 0 // we don't need this
+void CFGStructurizer::rewrite_auto_group_shared_barrier() {
+  recompute_cfg();
+
+  enum class Kind { None, Load, Store, Atomic };
+
+  struct Block {
+    CFGNode *node;
+    const CFGNode *innermost_loop;
+    Kind pre_kind;
+    Kind post_kind;
+  };
+
+  // In linear traversal order, find all BBs that use group shared.
+  std::vector<Block> shared_blocks;
+
+  for (size_t i = forward_post_visit_order.size(); i; i--) {
+    auto *node = forward_post_visit_order[i - 1];
+    for (auto *op : node->ir.operations) {
+      if ((op->flags & Operation::AutoGroupSharedBarrier) != 0) {
+        shared_blocks.push_back({node, get_innermost_loop_header_for(node),
+                                 Kind::None, Kind::None});
+        break;
+      }
+    }
+  }
+
+  // Deal with intra-BB hazards.
+  for (auto &block : shared_blocks) {
+    Kind pending = Kind::None;
+
+    // If we're the first BB to access shared, no need for a post block.
+    // Similar for the last block.
+    // Loops can complicate this analysis, but ... eh.
+    // This is a workaround, not required by spec or anything.
+
+    for (auto *op : block.node->ir.operations) {
+      if ((op->flags & Operation::AutoGroupSharedBarrier) != 0) {
+        if (op->op == spv::OpLoad || op->op == spv::PseudoOpMaskedLoad) {
+          if (pending != Kind::Load && pending != Kind::None) {
+            op->flags |= Operation::SubgroupSyncPre;
+          }
+          pending = Kind::Load;
+        } else if (op->op == spv::OpStore ||
+                   op->op == spv::PseudoOpMaskedStore) {
+          if (pending != Kind::Store && pending != Kind::None) {
+            op->flags |= Operation::SubgroupSyncPre;
+          }
+          pending = Kind::Store;
+        } else {
+          if (pending != Kind::Atomic && pending != Kind::None) {
+            op->flags |= Operation::SubgroupSyncPre;
+          }
+          pending = Kind::Atomic;
+        }
+
+        if (block.pre_kind == Kind::None) {
+          block.pre_kind = pending;
+        }
+      }
+    }
+
+    block.post_kind = pending;
+  }
+
+  for (size_t i = 0; i < shared_blocks.size(); i++) {
+    auto &first = shared_blocks[i];
+
+    for (size_t j = i + 1; j < shared_blocks.size(); j++) {
+      auto &second = shared_blocks[j];
+      if (!query_reachability(*first.node, *second.node)) {
+        continue;
+      }
+
+      if (first.post_kind != second.pre_kind) {
+        // Find an intermediate block which:
+        // - post dominates the first
+        // - dominates the second
+        // Has the maximal number of invocations.
+        // The subgroup barrier should be run with as many threads as possible.
+        if (second.node->post_dominates(first.node)) {
+          second.node->ir.operations.front()->flags |=
+              Operation::SubgroupSyncPre;
+        } else if (first.node->dominates(second.node)) {
+          first.node->ir.operations.back()->flags |=
+              Operation::SubgroupSyncPost;
+        } else {
+          // Try to find some intermediate node. If we cannot find it, just yolo
+          // in a barrier somewhere. This is just a workaround, so if it doesn't
+          // work 100%, it's not a big deal.
+          auto *pdom = first.node->immediate_post_dominator;
+          while (pdom && query_reachability(*pdom, *second.node) &&
+                 !pdom->dominates(second.node) &&
+                 pdom->immediate_post_dominator &&
+                 pdom->immediate_post_dominator != pdom) {
+            pdom = pdom->immediate_post_dominator;
+          }
+
+          if (pdom && pdom != second.node) {
+            if (pdom->ir.operations.empty()) {
+              auto *nop = module.allocate_op(spv::OpNop);
+              nop->flags |= Operation::SubgroupSyncPost;
+              pdom->ir.operations.push_back(nop);
+            } else {
+              pdom->ir.operations.back()->flags |= Operation::SubgroupSyncPost;
+            }
+          } else if (pdom == second.node) {
+            second.node->ir.operations.front()->flags |=
+                Operation::SubgroupSyncPre;
+          }
+        }
+
+        // We've added appropriate barriers for this node now.
+        second.pre_kind = Kind::None;
+      }
+
+      break;
+    }
+
+    // Analyze re-entrant code. We may depend on memory coming from an earlier
+    // loop iteration.
+    if (first.pre_kind != Kind::None && first.innermost_loop != entry_block &&
+        first.innermost_loop->pred_back_edge) {
+      bool has_complex_dependency = false;
+      // Other blocks within the loop may require a dependency.
+      for (size_t j = i + 1;
+           j < shared_blocks.size() && !has_complex_dependency; j++) {
+        if (query_reachability(*shared_blocks[j].node,
+                               *first.innermost_loop->pred_back_edge)) {
+          first.node->ir.operations.front()->flags |=
+              Operation::SubgroupSyncPre;
+          has_complex_dependency = true;
+        }
+      }
+
+      if (!has_complex_dependency && first.pre_kind != first.post_kind) {
+        // Self-dependency within the BB.
+        first.node->ir.operations.back()->flags |= Operation::SubgroupSyncPost;
+      }
+    }
+  }
+}
+#endif
+
 bool CFGStructurizer::rewrite_rov_lock_region() {
   recompute_cfg();
 
@@ -752,6 +999,231 @@ bool CFGStructurizer::rewrite_rov_lock_region() {
 void CFGStructurizer::rewrite_multiple_back_edges() {
   reset_traversal();
   visit_for_back_edge_analysis(*entry_block);
+}
+
+void CFGStructurizer::sink_ssa_constructs() {
+  sink_ssa_constructs_run(true);
+  sink_ssa_constructs_run(false);
+}
+
+SpvInstructionFlags
+CFGStructurizer::get_instruction_flags(const Instruction *instr) {
+  if (!instr) {
+    return {};
+  }
+  if (const auto md = instr->getMetadata("SpvInstructionFlags"); md) {
+    return (SpvInstructionFlags)mdconst::extract<ConstantInt>(md->getOperand(0))
+        ->getZExtValue();
+  }
+  return {};
+}
+
+void CFGStructurizer::set_instruction_flags(
+    Instruction *instr, const SpvInstructionFlags new_flags) {
+  if (!instr) {
+    return;
+  }
+  llvm::Metadata *md_args[]{
+      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+          llvm::IntegerType::get(ctx, 32), uint64_t(new_flags)))};
+  instr->setMetadata("SpvInstructionFlags", llvm::MDNode::get(ctx, md_args));
+}
+
+void CFGStructurizer::sink_ssa_constructs_run(bool dry_run) {
+  // First, propagate sinkability state to any operation that uses a sinkable
+  // SSA. If an SSA expression is used in a BB, but that use of the SSA can be
+  // sunk, we need to sink everything as a group.
+  std::vector<Instruction *> sinkable_ops;
+
+  struct RewriteState {
+    CFGNode *consumed_block;
+    Instruction *op;
+  };
+  std::unordered_map<Value *, RewriteState> sinks;
+
+  for (auto *n : forward_post_visit_order) {
+    sinkable_ops.clear();
+
+    auto &ops = n->ir.operations;
+    for (auto *op : ops) {
+      if ((get_instruction_flags(op) & SpvInstructionFlags::SinkableBit) !=
+          SpvInstructionFlags::None) {
+        sinkable_ops.push_back(op);
+        sinks[op] = {nullptr, op};
+      } else if (op && !instruction_is_control_dependent(*op) &&
+                 !instruction_has_side_effect_and_result(*op)) {
+        // We cannot sink any opcode which is control dependent, or has side
+        // effects.
+        for (uint32_t i = 0; i < op->getNumOperands(); i++) {
+          auto consumed_id = op->getOperand(i);
+          if (!isa<Instruction>(consumed_id)) {
+            continue;
+          }
+
+          if (std::find(sinkable_ops.begin(), sinkable_ops.end(),
+                        consumed_id) != sinkable_ops.end()) {
+            sinkable_ops.push_back(op);
+            set_instruction_flags(
+                op, get_instruction_flags(op) |
+                        SpvInstructionFlags::DependencySinkableBit);
+            sinks[op] = {nullptr, op};
+            break;
+          }
+        }
+      } else if (op && instruction_is_barrier(*op)) {
+        // We cannot sink beyond this barrier. Invalidate every sinkable op we
+        // saw so far.
+        for (auto &id : sinkable_ops) {
+          auto *op_ptr = sinks[id].op;
+          assert(op_ptr);
+          set_instruction_flags(
+              op, get_instruction_flags(op) &
+                      ~(SpvInstructionFlags::SinkableBit |
+                        SpvInstructionFlags::DependencySinkableBit));
+        }
+        sinkable_ops.clear();
+      }
+    }
+  }
+
+  // If an expression is used as a PHI input assume we cannot sink.
+  // It gets a bit awkward to deal with this, and it's not required for this
+  // workaround pass.
+  for (auto *n : forward_post_visit_order) {
+    for (auto &phi : n->ir.phi) {
+      for (auto &incoming : phi.incoming) {
+        auto itr = sinks.find(incoming.value);
+        if (itr != sinks.end()) {
+          auto *op_ptr = itr->second.op;
+          assert(op_ptr);
+          set_instruction_flags(
+              op_ptr, get_instruction_flags(op_ptr) &
+                          ~(SpvInstructionFlags::SinkableBit |
+                            SpvInstructionFlags::DependencySinkableBit));
+        }
+      }
+    }
+  }
+
+  const auto consume_id = [&](Value *consumed_id, CFGNode *n) {
+    auto itr = sinks.find(consumed_id);
+    if (itr != sinks.end()) {
+      if (!itr->second.consumed_block) {
+        itr->second.consumed_block = n;
+      } else if (itr->second.consumed_block != n) {
+        set_instruction_flags(
+            itr->second.op, get_instruction_flags(itr->second.op) &
+                                ~(SpvInstructionFlags::SinkableBit |
+                                  SpvInstructionFlags::DependencySinkableBit));
+      }
+    }
+  };
+
+  const auto path_is_reorderable = [&](const CFGNode *src, const CFGNode *dst) {
+    // There cannot be any control or memory barriers along the way, or we have
+    // to be conservative.
+
+    // There is absolutely no point in sinking if dst ends up post-dominating
+    // src anyway. We cannot avoid any bug from happening.
+    if (dst->post_dominates(src)) {
+      return false;
+    }
+
+    // Never sink into a loop.
+    if (dst->pred_back_edge) {
+      return false;
+    }
+
+    // Could deal with multiple preds, but we mostly just care about trivial
+    // sinks.
+    if (dst->pred.size() > 1) {
+      return false;
+    }
+    dst = dst->immediate_dominator;
+
+    while (src != dst) {
+      if (dst->pred.size() > 1 || dst->pred_back_edge) {
+        return false;
+      }
+
+      for (auto *op : dst->ir.operations) {
+        if (op && instruction_is_barrier(*op)) {
+          return false;
+        }
+      }
+
+      dst = dst->pred.front();
+    }
+
+    // We reached src, and we validated that block already when deciding on what
+    // is sinkable or not, so we're good.
+    return true;
+  };
+
+  // Walk all instructions in reverse order.
+  // We can sink an instruction if:
+  // - An ID was only consumed in a BB != generating BB.
+  //   The consumed BB must be unique for us to consider it for simplicity.
+  for (auto *n : forward_post_visit_order) {
+    if (n->ir.terminator.type == Terminator::Type::Condition ||
+        n->ir.terminator.type == Terminator::Type::Switch) {
+      consume_id(n->ir.terminator.condition, n);
+    }
+
+    auto &ops = n->ir.operations;
+
+    for (size_t i = ops.size(); i; i--) {
+      auto *op = ops[i - 1];
+      auto *target_block = n;
+
+      if (op && (get_instruction_flags(op) &
+                 (SpvInstructionFlags::SinkableBit |
+                  SpvInstructionFlags::DependencySinkableBit)) !=
+                    SpvInstructionFlags::None) {
+        auto sink_itr = sinks.find(op);
+
+        if (sink_itr != sinks.end() && sink_itr->second.consumed_block &&
+            sink_itr->second.consumed_block != n &&
+            path_is_reorderable(n, sink_itr->second.consumed_block)) {
+          // Move the operation to the beginning of the consumed block instead.
+          target_block = sink_itr->second.consumed_block;
+
+          // Don't actually move the instruction until we have confirmed the
+          // entire chain can be sunk, otherwise this exercise is meaningless.
+          if (!dry_run) {
+            target_block->ir.operations.insert(
+                target_block->ir.operations.begin(), op);
+            ops.erase(ops.begin() + int(i - 1));
+          }
+        } else {
+          // This failed to sink. Remember this for the next run.
+          set_instruction_flags(op, get_instruction_flags(op) &
+                                        ~SpvInstructionFlags::SinkableBit);
+        }
+      }
+
+      // Mark uses after we have sunk the instruction. This allows us to sink a
+      // chain of SSA instructions.
+      for (uint32_t j = 0; j < op->getNumOperands(); j++) {
+        auto arg = op->getOperand(j);
+        if (isa<Instruction>(arg)) {
+          consume_id(arg, target_block);
+        }
+      }
+    }
+  }
+
+  if (dry_run) {
+    for (auto *n : forward_post_visit_order) {
+      for (auto *op : n->ir.operations) {
+        if (auto cur_flags = get_instruction_flags(op);
+            cur_flags != SpvInstructionFlags::None) {
+          set_instruction_flags(
+              op, cur_flags & ~SpvInstructionFlags::DependencySinkableBit);
+        }
+      }
+    }
+  }
 }
 
 void CFGStructurizer::propagate_branch_control_hints() {
@@ -877,6 +1349,7 @@ bool CFGStructurizer::run() {
   }
 
   recompute_cfg();
+  sink_ssa_constructs();
   propagate_branch_control_hints();
 
   cleanup_breaking_phi_constructs();
@@ -1011,13 +1484,67 @@ bool CFGStructurizer::run() {
 
 CFGNode *CFGStructurizer::get_entry_block() const { return entry_block; }
 
-static bool block_is_control_dependent(const CFGNode *node) {
+bool instruction_has_side_effect_and_result(const Instruction &instr) {
+  auto call = dyn_cast_or_null<CallBase>(&instr);
+  if (!call) {
+    return false;
+  }
+  auto func = call->getCalledFunction();
+  if (!func || !func->hasName()) {
+    return false;
+  }
+
+  const auto func_name_ref = func->getName();
+  if (func_name_ref.startswith("_Z8atom_add") ||
+      func_name_ref.startswith("_Z8atom_sub") ||
+      func_name_ref.startswith("_Z8atom_inc") ||
+      func_name_ref.startswith("_Z8atom_dec") ||
+      func_name_ref.startswith("_Z9atom_xchg") ||
+      func_name_ref.startswith("_Z12atom_cmpxchg") ||
+      func_name_ref.startswith("_Z8atom_min") ||
+      func_name_ref.startswith("_Z8atom_max") ||
+      func_name_ref.startswith("_Z8atom_and") ||
+      func_name_ref.startswith("_Z7atom_or") ||
+      func_name_ref.startswith("_Z8atom_xor")) {
+    return true;
+  }
+  return false;
+}
+
+bool instruction_is_barrier(const Instruction &instr) {
+  auto call = dyn_cast_or_null<CallBase>(&instr);
+  if (!call) {
+    return false;
+  }
+  auto func = call->getCalledFunction();
+  if (!func || !func->hasName()) {
+    return false;
+  }
+
+  const auto func_name_ref = func->getName();
+  if (func_name_ref.startswith("floor.barrier") ||
+      func_name_ref == "_Z7barrierj") {
+    return true;
+  }
+  return false;
+}
+
+bool instruction_is_control_dependent(const Instruction &instr) {
   // control dependent if:
   //  * barrier
   //  * derivative functions
   //  * implicit LOD image functions
   //  * query LOD functions
   //  * any sub-group operation
+
+  auto call = dyn_cast_or_null<CallBase>(&instr);
+  if (!call) {
+    return false;
+  }
+  auto func = call->getCalledFunction();
+  if (!func || !func->hasName()) {
+    return false;
+  }
 
   // direct matches
   static const std::unordered_set<std::string> control_dep_funcs{
@@ -1030,43 +1557,41 @@ static bool block_is_control_dependent(const CFGNode *node) {
       "floor.fwidth.f32",
   };
 
-  for (auto *op : node->ir.operations) {
-    auto call = dyn_cast_or_null<CallBase>(op);
-    if (!call) {
-      continue;
-    }
-    auto func = call->getCalledFunction();
-    if (!func || !func->hasName()) {
-      continue;
-    }
+  // check fixed function names
+  const auto func_name_ref = func->getName();
+  const auto func_name = func_name_ref.str();
+  if (control_dep_funcs.count(func_name) > 0) {
+    return true;
+  } else if (func_name_ref.startswith("floor.sub_group") ||
+             func_name_ref.startswith("floor.barrier") ||
+             func_name_ref.startswith("_Z18query_image_lodv2f")) {
+    return true;
+  }
 
-    // check fixed function names
-    const auto func_name_ref = func->getName();
-    const auto func_name = func_name_ref.str();
-    if (control_dep_funcs.count(func_name) > 0) {
-      return true;
-    } else if (func_name_ref.startswith("floor.sub_group") ||
-               func_name_ref.startswith("floor.barrier") ||
-               func_name_ref.startswith("_Z18query_image_lodv2f")) {
-      return true;
-    }
-
-    // check implicit LOD image function names
-    // NOTE/TODO: gather and sparse-gather not emitted yet
-    if (func_name_ref.startswith("_Z11read_image")) {
-      assert(call->arg_size() >= 4 && "invalid arg count");
-      // always: read(image, sampler_idx, coord_with_layer, lod_type, ...)
-      const auto lod_type_arg = call->getArgOperand(3);
-      if (const auto lod_type_const_int =
-              dyn_cast_or_null<ConstantInt>(lod_type_arg);
-          lod_type_const_int) {
-        const auto lod_type =
-            (vulkan_sampling::LOD_TYPE)lod_type_const_int->getZExtValue();
-        if (lod_type == vulkan_sampling::LOD_TYPE::IMPLICIT_LOD ||
-            lod_type == vulkan_sampling::LOD_TYPE::IMPLICIT_LOD_WITH_BIAS) {
-          return true;
-        }
+  // check implicit LOD image function names
+  // NOTE/TODO: gather and sparse-gather not emitted yet
+  if (func_name_ref.startswith("_Z11read_image")) {
+    assert(call->arg_size() >= 4 && "invalid arg count");
+    // always: read(image, sampler_idx, coord_with_layer, lod_type, ...)
+    const auto lod_type_arg = call->getArgOperand(3);
+    if (const auto lod_type_const_int =
+            dyn_cast_or_null<ConstantInt>(lod_type_arg);
+        lod_type_const_int) {
+      const auto lod_type =
+          (vulkan_sampling::LOD_TYPE)lod_type_const_int->getZExtValue();
+      if (lod_type == vulkan_sampling::LOD_TYPE::IMPLICIT_LOD ||
+          lod_type == vulkan_sampling::LOD_TYPE::IMPLICIT_LOD_WITH_BIAS) {
+        return true;
       }
+    }
+  }
+  return false;
+}
+
+bool block_is_control_dependent(const CFGNode *node) {
+  for (auto *op : node->ir.operations) {
+    if (op && instruction_is_control_dependent(*op)) {
+      return true;
     }
   }
   return false;
@@ -1540,6 +2065,7 @@ static void rewrite_consumed_ids(IRBlock &ir, Value *from, Value *to) {
 void CFGStructurizer::fixup_broken_value_dominance() {
   struct Origin {
     CFGNode *node;
+    const Instruction *rematerialize_op;
   };
 
   std::unordered_map<Value *, Origin> origin;
@@ -1547,11 +2073,19 @@ void CFGStructurizer::fixup_broken_value_dominance() {
 
   // First, scan through all blocks and figure out which block creates an ID.
   for (auto *node : forward_post_visit_order) {
-    for (auto *op : node->ir.operations)
-      if (op)
-        origin[op] = {node};
-    for (auto &phi : node->ir.phi)
-      origin[phi.phi] = {node};
+    for (auto *op : node->ir.operations) {
+      // OpVariable is always hoisted to function entry or above.
+      // It can never not have dominance relationship.
+      if (op && !isa<AllocaInst>(op)) {
+        // TODO: do we need this? OpSampledImage will only be emitted later on
+        // at each use in SPIRVWriter, i.e. already the correct location?
+        origin[op] = {
+            node, nullptr /* op->op == spv::OpSampledImage ? op : nullptr */};
+      }
+    }
+    for (auto &phi : node->ir.phi) {
+      origin[phi.phi] = {node, nullptr};
+    }
   }
 
   const auto sort_unique_node_vector = [](std::vector<CFGNode *> &nodes) {
@@ -1570,27 +2104,85 @@ void CFGStructurizer::fixup_broken_value_dominance() {
       return;
 
     auto *origin_node = origin_itr->second.node;
-    if (!origin_node->dominates(node)) {
+    if (!origin_node->dominates(node) ||
+        (origin_itr->second.rematerialize_op && node != origin_node)) {
       // We have a problem. Mark that we need to rewrite a certain variable.
       id_to_non_local_consumers[val].push_back(node);
     }
   };
 
+  // not for LLVM: -- Need value copy here since we might be updating
+  // node->ir.operations inline leading to iterator invalidation. --
+  std::vector<Instruction *> access_chain_operations;
+
   // Now, scan through all blocks and figure out which values are consumed in
   // different blocks.
   for (auto *node : forward_post_visit_order) {
     for (auto *op : node->ir.operations) {
-      for (auto &arg : op->operands())
+      for (auto &arg : op->operands()) {
         mark_node_value_access(node, arg);
+      }
+
+      // We're only interested in bindless-style access here.
+      if (isa<GetElementPtrInst>(op)) {
+        access_chain_operations.push_back(op);
+      }
     }
 
     // Incoming PHI values are handled elsewhere by modifying the incoming block
     // to the creating block. Ignore these kinds of usage here.
 
-    if (node->ir.terminator.condition != nullptr)
+    if (node->ir.terminator.condition != nullptr) {
       mark_node_value_access(node, node->ir.terminator.condition);
-    if (node->ir.terminator.return_value != nullptr)
+    }
+    if (node->ir.terminator.return_value != nullptr) {
       mark_node_value_access(node, node->ir.terminator.return_value);
+    }
+  }
+
+  for (auto &chain_op : access_chain_operations) {
+    auto itr = id_to_non_local_consumers.find(chain_op);
+    if (itr != id_to_non_local_consumers.end()) {
+      // We will need to sink the AccessChain.
+      // Make sure the resource index is also marked as used in potentially
+      // non-local block.
+
+      // Sort for deterministic output.
+      std::vector<CFGNode *> local_consumers_sorted;
+      for (auto *non_local_node : itr->second) {
+        local_consumers_sorted.push_back(non_local_node);
+      }
+
+      std::sort(local_consumers_sorted.begin(), local_consumers_sorted.end(),
+                [](const CFGNode *a, const CFGNode *b) {
+                  return a->forward_post_visit_order <
+                         b->forward_post_visit_order;
+                });
+
+      // The first access chain is always OpVariable, so don't bother checking
+      // that.
+      for (unsigned i = 1; i < chain_op->getNumOperands(); i++) {
+        auto arg = chain_op->getOperand(i);
+        if (isa<Instruction>(arg)) {
+          for (auto *non_local_node : local_consumers_sorted) {
+            mark_node_value_access(non_local_node, arg);
+          }
+        }
+      }
+
+      assert(false && "should not be here");
+#if 0 // TODO: unsure if this can ever be reached with proper LLVM IR input?
+      auto *sunk_chain = module.allocate_op();
+      *sunk_chain = chain_op;
+      sunk_chain->id = module.allocate_id();
+
+      for (auto *non_local_node : local_consumers_sorted) {
+        auto &ops = non_local_node->ir.operations;
+        rewrite_consumed_ids(non_local_node->ir, chain_op, sunk_chain->id);
+        ops.insert(ops.begin(), sunk_chain);
+      }
+#endif
+    }
   }
 
   // Resolve these broken PHIs by using OpVariable. It is the simplest solution,
@@ -1615,33 +2207,59 @@ void CFGStructurizer::fixup_broken_value_dominance() {
 
   for (auto &rewrite : rewrites) {
     auto &orig = origin[rewrite.val];
-    AllocaInst *alloca_var = nullptr;
-    if (entry_block->BB.empty()) {
-      alloca_var = new AllocaInst(rewrite.val->getType(), 0, "rewrite.alloca",
-                                  &entry_block->BB);
-    } else {
-      alloca_var = new AllocaInst(rewrite.val->getType(), 0, "rewrite.alloca",
-                                  &entry_block->BB.front());
-    }
 
-    auto store_op = new StoreInst(alloca_var, rewrite.val, &orig.node->BB);
-    orig.node->ir.operations.push_back(store_op);
+    // -- ignore this:
+    // We don't rely on VariablePointers, so if this comes up, we need to figure
+    // out something else.
+    // bool is_invalid_pointer =
+    // module.get_builder().isPointerType(orig.type_id);
 
-    // For every non-local node which consumes ID, we load from the alloca'd
-    // variable instead. Rewrite all ID references to point to the loaded value.
-    for (auto *consumer : *rewrite.consumers) {
-      LoadInst *load_op = nullptr;
-      if (consumer->BB.empty()) {
-        load_op = new LoadInst(rewrite.val->getType(), alloca_var, "rewrite.ld",
-                               &consumer->BB);
+    if (orig.rematerialize_op) {
+      assert(false && "should not be here");
+#if 0
+      auto *rematerialize_op = module.allocate_op();
+      *rematerialize_op = *orig.rematerialize_op;
+      rematerialize_op->id = module.allocate_id();
+
+      for (auto *consumer : *rewrite.consumers) {
+        rewrite_consumed_ids(consumer->ir, rewrite.id, rematerialize_op->id);
+        consumer->ir.operations.insert(consumer->ir.operations.begin(),
+                                       rematerialize_op);
+      }
+#endif
+    } else /*if (!is_invalid_pointer)*/ {
+      // Invalid access chains are resolved above. We end up rewriting any
+      // non-dominated values instead.
+      AllocaInst *alloca_var = nullptr;
+      if (entry_block->BB.empty()) {
+        alloca_var = new AllocaInst(rewrite.val->getType(), 0, "rewrite.alloca",
+                                    &entry_block->BB);
       } else {
-        load_op = new LoadInst(rewrite.val->getType(), alloca_var, "rewrite.ld",
-                               &consumer->BB.front());
+        alloca_var = new AllocaInst(rewrite.val->getType(), 0, "rewrite.alloca",
+                                    &entry_block->BB.front());
       }
 
-      rewrite_consumed_ids(consumer->ir, rewrite.val, load_op);
+      auto store_op = new StoreInst(alloca_var, rewrite.val, &orig.node->BB);
+      orig.node->ir.operations.push_back(store_op);
 
-      consumer->ir.operations.insert(consumer->ir.operations.begin(), load_op);
+      // For every non-local node which consumes ID, we load from the alloca'd
+      // variable instead. Rewrite all ID references to point to the loaded
+      // value.
+      for (auto *consumer : *rewrite.consumers) {
+        LoadInst *load_op = nullptr;
+        if (consumer->BB.empty()) {
+          load_op = new LoadInst(rewrite.val->getType(), alloca_var,
+                                 "rewrite.ld", &consumer->BB);
+        } else {
+          load_op = new LoadInst(rewrite.val->getType(), alloca_var,
+                                 "rewrite.ld", &consumer->BB.front());
+        }
+
+        rewrite_consumed_ids(consumer->ir, rewrite.val, load_op);
+
+        consumer->ir.operations.insert(consumer->ir.operations.begin(),
+                                       load_op);
+      }
     }
   }
 }
@@ -1767,7 +2385,8 @@ static void retarget_phi_incoming_block(PHI &phi, CFGNode *from, CFGNode *to) {
 void CFGStructurizer::fixup_phi(PHINode &node) {
   // We want to move any incoming block to where the ID was created.
   // This avoids some problematic cases of crossing edges when using ladders.
-  auto &incomings = node.block->ir.phi[node.phi_index].incoming;
+  auto &phi = node.block->ir.phi[node.phi_index];
+  auto &incomings = phi.incoming;
 
   for (auto &incoming : incomings) {
     auto itr = value_id_to_block.find(incoming.value);
@@ -1781,9 +2400,10 @@ void CFGStructurizer::fixup_phi(PHINode &node) {
     // Only hoist PHI inputs if there used to be a dominance relationship in the
     // original CFG, but there no longer is.
     if (!source_block->dominates(incoming.block)) {
+      bool hoist_incoming = true;
       if (phi_incoming_blocks_find_block(incomings, source_block) != nullptr) {
         // Sanity check. This would create ambiguity.
-        continue;
+        hoist_incoming = false;
       }
 
       // Don't hoist PHI inputs across the loop header boundary.
@@ -1794,15 +2414,37 @@ void CFGStructurizer::fixup_phi(PHINode &node) {
         // fake input to back-edge which can be resolved in a code path that
         // does dominate the loop ...
         LOGW("Incoming value to back edge does not dominate loop header.\n");
-        continue;
+        hoist_incoming = false;
       }
 
+      if (hoist_incoming) {
 #ifdef PHI_DEBUG
-      LOGI("For node %s, move incoming node %s to %s.\n",
-           node.block->name.c_str(), incoming.block->name.c_str(),
-           itr->second->name.c_str());
+        LOGI("For node %s, move incoming node %s to %s.\n",
+             node.block->name.c_str(), incoming.block->name.c_str(),
+             itr->second->name.c_str());
 #endif
-      incoming.block = itr->second;
+        incoming.block = itr->second;
+      } else {
+        // We cannot hoist, so need to use dummy OpVariable instead.
+        AllocaInst *alloca_var = nullptr;
+        if (entry_block->BB.empty()) {
+          alloca_var = new AllocaInst(phi.phi->getType(), 0, "phi_fixup",
+                                      &entry_block->BB);
+        } else {
+          alloca_var = new AllocaInst(phi.phi->getType(), 0, "phi_fixup",
+                                      &entry_block->BB.front());
+        }
+        auto store_op =
+            new StoreInst(alloca_var, incoming.value, &itr->second->BB);
+        itr->second->ir.operations.push_back(store_op);
+
+        auto load_op = new LoadInst(phi.phi->getType(), alloca_var,
+                                    "phi_fixup.ld", &incoming.block->BB);
+        incoming.block->ir.operations.push_back(load_op);
+
+        incoming.value = load_op;
+      }
+
       validate_phi(node.block->ir.phi[node.phi_index]);
     }
   }
@@ -1951,15 +2593,7 @@ void CFGStructurizer::insert_phi(PHINode &node) {
         placed_frontiers.insert(frontier);
     }
 
-#if 1
     assert(frontier);
-#else
-    if (!frontier) {
-      // TODO: don't skip this
-      // printf(">> skipping phi: %s\n", phi.phi->getName().str().c_str());
-      break;
-    }
-#endif
 
     if (frontier == node.block) {
       // NOTE: the "frontier->pred.size() == 1 && !frontier->pred_back_edge"
@@ -2538,6 +3172,17 @@ CFGStructurizer::isolate_structured_sorted(const CFGNode *header,
 
 bool CFGStructurizer::block_is_load_bearing(const CFGNode *node,
                                             const CFGNode *merge) const {
+  while (merge->succ.size() == 1) {
+    // If we're going to eliminate a block due to impossible merge,
+    // we should look ahead since we might get a false positive.
+    bool breaking = merge_candidate_is_on_breaking_path(merge);
+    if (breaking && !merge->ir.operations.empty() &&
+        !block_is_control_dependent(merge)) {
+      merge = merge->succ.front();
+    } else {
+      break;
+    }
+  }
   return node->pred.size() >= 2 &&
          !exists_path_in_cfg_without_intermediate_node(
              node->immediate_dominator, merge, node);
@@ -2606,6 +3251,20 @@ bool CFGStructurizer::control_flow_is_escaping(const CFGNode *node,
   // not change reachability.
   if (block_is_load_bearing(node, merge)) {
     return false;
+  }
+
+  // If we have two different switch blocks in our PDF frontier something
+  // ridiculous is happening where we effectively have one switch block falling
+  // through to another switch block (?!?!?!) Definitely needs to be split up.
+  unsigned switch_pdf_frontiers = 0;
+  for (auto *frontier : node->post_dominance_frontier) {
+    if (frontier->ir.terminator.type == Terminator::Type::Switch) {
+      switch_pdf_frontiers++;
+    }
+  }
+
+  if (switch_pdf_frontiers >= 2) {
+    return true;
   }
 
   // If we cannot prove the escape through loop analysis, we might be able to
@@ -2979,10 +3638,35 @@ void CFGStructurizer::fixup_broken_selection_merges(unsigned pass) {
             auto *a_frontier = node->succ[0]->dominance_frontier.front();
             auto *b_frontier = node->succ[1]->dominance_frontier.front();
             if (a_frontier != b_frontier) {
+              // Try to merge in the direction of early returns, since the other
+              // direction will likely result in a loop break or something like
+              // that. Inner constructs tend to use weaker selection merges,
+              // which means we need to merge in that direction to stay valid.
               if (query_reachability(*a_frontier, *b_frontier)) {
                 merge_to_succ(node, 0);
               } else if (query_reachability(*b_frontier, *a_frontier)) {
                 merge_to_succ(node, 1);
+              } else {
+                auto a_succ_count = a_frontier->succ.size();
+                auto b_succ_count = b_frontier->succ.size();
+
+                // First look at the idoms. This can give us an idea how the
+                // code is nested. Merge towards innermost idom. If that fails,
+                // merge against early returns as a last resort.
+
+                a_frontier = a_frontier->immediate_dominator;
+                b_frontier = b_frontier->immediate_dominator;
+                if (a_frontier != b_frontier &&
+                    query_reachability(*a_frontier, *b_frontier)) {
+                  merge_to_succ(node, 1);
+                } else if (a_frontier != b_frontier &&
+                           query_reachability(*b_frontier, *a_frontier)) {
+                  merge_to_succ(node, 0);
+                } else if (a_succ_count == 0 && b_succ_count != 0) {
+                  merge_to_succ(node, 0);
+                } else if (b_succ_count == 0 && a_succ_count != 0) {
+                  merge_to_succ(node, 1);
+                }
               }
             }
           } else if (node_is_degenerate_merge_block(node->succ[1]) &&
@@ -3425,6 +4109,8 @@ bool CFGStructurizer::serialize_interleaved_merge_scopes() {
 
     if (inner_constructs.size() == 1 && complex_inner_constructs.size() >= 2) {
       auto *candidate_inner = inner_constructs.front();
+      auto *common_idom = candidate_inner;
+
       inner_constructs.clear();
 
       // Try to detect a false positive where we should ignore inner_constructs.
@@ -3439,9 +4125,9 @@ bool CFGStructurizer::serialize_interleaved_merge_scopes() {
       }
 
       if (should_promote_complex) {
-        // The inner candidate should not post-dominate any other block.
-        // We're looking for unusual merge patterns here.
-        for (auto *pred : candidate_inner->pred) {
+        // The inner candidate should not post-dominate any other candidate
+        // block. We're looking for unusual merge patterns here.
+        for (auto *pred : complex_inner_constructs) {
           if (candidate_inner->post_dominates(pred)) {
             should_promote_complex = false;
             break;
@@ -3481,10 +4167,14 @@ bool CFGStructurizer::serialize_interleaved_merge_scopes() {
       }
 
       if (should_promote_complex && inner_constructs.size() >= 2) {
+        for (auto *inner : inner_constructs) {
+          common_idom = CFGNode::find_common_dominator(common_idom, inner);
+        }
+
         // Verify that all paths to node must go through the inner constructs.
         // We cannot handle more awkward merges.
-        should_promote_complex =
-            !node->can_backtrace_to_with_blockers(idom, inner_constructs);
+        should_promote_complex = !node->can_backtrace_to_with_blockers(
+            common_idom, inner_constructs);
       }
 
       if (!should_promote_complex) {
@@ -3501,6 +4191,40 @@ bool CFGStructurizer::serialize_interleaved_merge_scopes() {
 
     if (inner_constructs.size() < 2) {
       continue;
+    }
+
+    auto *common_idom = inner_constructs[0];
+    for (size_t i = 1, n = inner_constructs.size(); i < n; i++) {
+      common_idom =
+          CFGNode::find_common_dominator(common_idom, inner_constructs[i]);
+    }
+
+    // Filter out false positive inner constructs.
+    // If we're dominated by another inner construct, and we don't post-dominate
+    // that construct, we should yield.
+    for (auto itr = inner_constructs.begin(); itr != inner_constructs.end();) {
+      bool eliminated = false;
+      for (auto candidate_itr = itr + 1;
+           candidate_itr != inner_constructs.end() && !eliminated;
+           ++candidate_itr) {
+        // Don't let the common idom of constructs consume subsequent
+        // constructs.
+        if ((*candidate_itr) == common_idom ||
+            !(*candidate_itr)->dominates(*itr) ||
+            (*itr)->post_dominates(*candidate_itr)) {
+          continue;
+        }
+
+        // To accept a dominator, we don't want any common idom removing every
+        // node.
+        std::move(itr + 1, inner_constructs.end(), itr);
+        inner_constructs.pop_back();
+        eliminated = true;
+      }
+
+      if (!eliminated) {
+        ++itr;
+      }
     }
 
     // Prune any candidate that can reach another candidate. The sort ensures
@@ -3574,6 +4298,55 @@ bool CFGStructurizer::serialize_interleaved_merge_scopes() {
       }
     }
 
+    CFGNode *common_anchor = nullptr;
+
+    if (!need_deinterleave) {
+      // Detect a complicated pattern that comes up which looks a lot like
+      // interleaved merges, but isn't really. A       B
+      // |\     /|
+      // | \   / |
+      // |   E   |
+      // | /  \  |
+      // C      D
+      //  \    /
+      //   \  /
+      //    F
+      // Candidates: {C, D}
+      // Where {A, E} is pdf range of C
+      // and {B, E} is pdf range of D
+      // The last PDF can be considered a merge anchor that distributes code
+      // further. E must have {C, D} - and only those - in the dominance
+      // frontier.
+      common_anchor = pdf_ranges[0].second;
+
+      bool can_be_anchor = (common_anchor->pred.size() >= 2 ||
+                            (common_anchor->pred.size() == 1 &&
+                             common_anchor->pred.front()->succ_back_edge));
+
+      need_deinterleave =
+          (common_anchor->dominance_frontier.size() == count &&
+           common_anchor->succ.size() == count &&
+           common_anchor->ir.terminator.type == Terminator::Type::Condition &&
+           can_be_anchor);
+
+      for (size_t i = 0; i < count && need_deinterleave; i++) {
+        need_deinterleave =
+            (query_reachability(*pdf_ranges[i].first, *pdf_ranges[i].second) &&
+             pdf_ranges[0].second == pdf_ranges[i].second);
+
+        need_deinterleave =
+            (need_deinterleave &&
+             std::find(common_anchor->dominance_frontier.begin(),
+                       common_anchor->dominance_frontier.end(),
+                       valid_constructs[i]) !=
+                 common_anchor->dominance_frontier.end());
+      }
+
+      if (!need_deinterleave) {
+        common_anchor = nullptr;
+      }
+    }
+
     if (!need_deinterleave) {
       const CFGNode *interleaved_exit_loop = nullptr;
 
@@ -3633,8 +4406,13 @@ bool CFGStructurizer::serialize_interleaved_merge_scopes() {
     }
 
     if (need_deinterleave) {
-      collect_and_dispatch_control_flow(idom, node, valid_constructs,
-                                        collect_all_paths_to_pdom);
+      if (common_anchor) {
+        collect_and_dispatch_control_flow_from_anchor(common_anchor, node,
+                                                      valid_constructs);
+      } else {
+        collect_and_dispatch_control_flow(idom, node, valid_constructs,
+                                          collect_all_paths_to_pdom);
+      }
       // This completely transposes the CFG, so need to recompute CFG to keep
       // going.
       recompute_cfg();
@@ -4016,7 +4794,8 @@ CFGNode *CFGStructurizer::create_switch_merge_ladder(CFGNode *header,
   return create_ladder_block(header, merge, ".switch-merge");
 }
 
-bool CFGStructurizer::find_switch_blocks(unsigned pass) {
+CFGStructurizer::SwitchProgressMode
+CFGStructurizer::process_switch_blocks(unsigned pass) {
   bool modified_cfg = false;
   for (auto index = forward_post_visit_order.size(); index; index--) {
     auto *node = forward_post_visit_order[index - 1];
@@ -4085,6 +4864,25 @@ bool CFGStructurizer::find_switch_blocks(unsigned pass) {
               frontier_node->forward_post_visit_order >
                   inner_merge->forward_post_visit_order) {
             inner_merge = frontier_node;
+          }
+        }
+
+        if (merge != inner_merge && inner_merge != natural_merge &&
+            node->dominates(merge)) {
+          // If node dominates the merge, it's important that node remains a
+          // header block. If we have an inner merge, we need to transpose the
+          // control flow so that we avoid the inner merge altogether.
+          std::vector<CFGNode *> constructs = {natural_merge};
+          for (auto *pred : inner_merge->pred) {
+            if (!query_reachability(*pred, *natural_merge) &&
+                !query_reachability(*natural_merge, *pred)) {
+              constructs.push_back(pred);
+            }
+          }
+
+          if (constructs.size() >= 2) {
+            collect_and_dispatch_control_flow(node, merge, constructs, false);
+            return SwitchProgressMode::IterativeModify;
           }
         }
 
@@ -4282,7 +5080,8 @@ bool CFGStructurizer::find_switch_blocks(unsigned pass) {
     }
   }
 
-  return modified_cfg;
+  return modified_cfg ? SwitchProgressMode::SimpleModify
+                      : SwitchProgressMode::Done;
 }
 
 bool CFGStructurizer::merge_candidate_is_on_breaking_path(
@@ -4449,29 +5248,32 @@ void CFGStructurizer::find_selection_merges(unsigned pass) {
         // node->name.c_str());
       }
     } else if (idom->merge == MergeType::Loop) {
-      if (idom->loop_merge_block == node && idom->loop_ladder_block) {
-        // We need to create an outer shell for this header since we need to
-        // ladder break to this node.
-        auto *loop = create_helper_pred_block(idom);
-        loop->merge = MergeType::Loop;
-        loop->loop_merge_block = node;
-        loop->freeze_structured_analysis = true;
-        node->add_unique_header(loop);
-        // LOGI("Loop merge: %p (%s) -> %p (%s)\n", static_cast<const void
-        // *>(loop), loop->name.c_str(),
-        //     static_cast<const void *>(node), node->name.c_str());
-      } else if (idom->loop_merge_block != node &&
-                 idom->loop_ladder_block != node) {
-        auto *selection_idom = create_helper_succ_block(idom);
-        // If we split the loop header into the loop header -> selection merge
-        // header, then we can merge into a continue block for example.
-        selection_idom->merge = MergeType::Selection;
-        selection_idom->selection_merge_block = node;
-        node->add_unique_header(selection_idom);
-        // LOGI("Selection merge: %p (%s) -> %p (%s)\n", static_cast<const void
-        // *>(selection_idom),
-        //     selection_idom->name.c_str(), static_cast<const void *>(node),
-        //     node->name.c_str());
+      if (pass == 0) {
+        if (idom->loop_merge_block == node && idom->loop_ladder_block) {
+          // We need to create an outer shell for this header since we need to
+          // ladder break to this node.
+          auto *loop = create_helper_pred_block(idom);
+          loop->merge = MergeType::Loop;
+          loop->loop_merge_block = node;
+          loop->freeze_structured_analysis = true;
+          node->add_unique_header(loop);
+          // LOGI("Loop merge: %p (%s) -> %p (%s)\n", static_cast<const void
+          // *>(loop), loop->name.c_str(),
+          //     static_cast<const void *>(node), node->name.c_str());
+        } else if (idom->loop_merge_block != node &&
+                   idom->loop_ladder_block != node) {
+          auto *selection_idom = create_helper_succ_block(idom);
+          // If we split the loop header into the loop header -> selection merge
+          // header, then we can merge into a continue block for example.
+          selection_idom->merge = MergeType::Selection;
+          selection_idom->selection_merge_block = node;
+          node->add_unique_header(selection_idom);
+          // LOGI("Selection merge: %p (%s) -> %p (%s)\n", static_cast<const
+          // void
+          // *>(selection_idom),
+          //     selection_idom->name.c_str(), static_cast<const void *>(node),
+          //     node->name.c_str());
+        }
       }
     } else {
       // We are hosed. There is no obvious way to merge execution here.
@@ -5310,6 +6112,135 @@ CFGStructurizer::analyze_loop_merge(CFGNode *node,
   return merge_result;
 }
 
+void CFGStructurizer::collect_and_dispatch_control_flow_from_anchor(
+    CFGNode *anchor, CFGNode *common_pdom,
+    const std::vector<CFGNode *> &constructs) {
+  // If we have an anchor, it should collect all control flow, maybe dispatch
+  // itself, then dispatch to the constructs. It must be a conditional branch,
+  // since it's too much of a mess to deal with switch.
+  assert(anchor->ir.terminator.type == Terminator::Type::Condition);
+  assert(constructs.size() == 2);
+  assert(constructs[0]->post_dominates(anchor->ir.terminator.true_block) ||
+         constructs[0]->post_dominates(anchor->ir.terminator.false_block));
+  assert(constructs[1]->post_dominates(anchor->ir.terminator.true_block) ||
+         constructs[1]->post_dominates(anchor->ir.terminator.false_block));
+
+  auto *anchor_pred = create_helper_pred_block(anchor);
+
+  auto *anchor_to_construct0 = pool.create_node("anchor_to_construct0");
+  auto *anchor_to_construct1 = pool.create_node("anchor_to_construct1");
+  auto *anchor_terminator = pool.create_node("anchor_terminator");
+  auto *anchor_dispatcher = pool.create_node("anchor_dispatcher");
+
+  anchor_to_construct0->name = anchor->name + ".anchor0";
+  anchor_to_construct1->name = anchor->name + ".anchor1";
+
+  anchor_to_construct0->immediate_dominator = anchor;
+  anchor_to_construct1->immediate_dominator = anchor;
+  anchor_to_construct0->immediate_post_dominator = constructs[0];
+  anchor_to_construct1->immediate_post_dominator = constructs[1];
+  anchor_to_construct0->forward_post_visit_order =
+      constructs[0]->forward_post_visit_order;
+  anchor_to_construct1->forward_post_visit_order =
+      constructs[1]->forward_post_visit_order;
+  anchor_to_construct0->backward_post_visit_order =
+      constructs[0]->backward_post_visit_order;
+  anchor_to_construct1->backward_post_visit_order =
+      constructs[1]->backward_post_visit_order;
+
+  anchor_to_construct0->add_branch(anchor_terminator);
+  anchor_to_construct1->add_branch(anchor_terminator);
+  anchor_to_construct0->ir.terminator.type = Terminator::Type::Branch;
+  anchor_to_construct0->ir.terminator.direct_block = anchor_terminator;
+  anchor_to_construct1->ir.terminator.type = Terminator::Type::Branch;
+  anchor_to_construct1->ir.terminator.direct_block = anchor_terminator;
+  anchor_terminator->name = anchor->name + ".anchor-term";
+  anchor_terminator->add_branch(anchor_dispatcher);
+  anchor_terminator->ir.terminator.type = Terminator::Type::Branch;
+  anchor_terminator->ir.terminator.direct_block = anchor_dispatcher;
+  anchor_dispatcher->name = anchor->name + ".anchor-dispatch";
+
+  PHI terminator_selector;
+  terminator_selector.phi =
+      create_phi_node(IntegerType::get(ctx, 1), 2, "terminator_selector",
+                      anchor_terminator->BB);
+  terminator_selector.incoming.push_back(
+      {anchor_to_construct0, ConstantInt::getBool(ctx, true)});
+  terminator_selector.incoming.push_back(
+      {anchor_to_construct1, ConstantInt::getBool(ctx, false)});
+
+  traverse_dominated_blocks_and_rewrite_branch(anchor, constructs[0],
+                                               anchor_to_construct0);
+  traverse_dominated_blocks_and_rewrite_branch(anchor, constructs[1],
+                                               anchor_to_construct1);
+
+  size_t cutoff_normal_path = anchor_pred->pred.size();
+  traverse_dominated_blocks_and_rewrite_branch(
+      constructs[0]->immediate_dominator, constructs[0], anchor_pred);
+  size_t cutoff_path0 = anchor_pred->pred.size();
+  traverse_dominated_blocks_and_rewrite_branch(
+      constructs[1]->immediate_dominator, constructs[1], anchor_pred);
+
+  assert(constructs[0]->pred.empty());
+  assert(constructs[1]->pred.empty());
+
+  // Branch to anchor as normal if we have a pre-existing pred.
+  PHI take_anchor_phi;
+  take_anchor_phi.phi =
+      create_phi_node(IntegerType::get(ctx, 1),
+                      std::max(cutoff_normal_path, anchor_pred->pred.size()),
+                      "take_anchor_phi", anchor_pred->BB);
+  for (size_t i = 0; i < cutoff_normal_path; i++) {
+    take_anchor_phi.incoming.push_back(
+        {anchor_pred->pred[i], ConstantInt::getBool(ctx, true)});
+  }
+  for (size_t i = cutoff_normal_path; i < anchor_pred->pred.size(); i++) {
+    take_anchor_phi.incoming.push_back(
+        {anchor_pred->pred[i], ConstantInt::getBool(ctx, false)});
+  }
+
+  anchor_pred->add_branch(anchor);
+  anchor_pred->add_branch(anchor_dispatcher);
+  anchor_pred->ir.terminator.type = Terminator::Type::Condition;
+  anchor_pred->ir.terminator.true_block = anchor;
+  anchor_pred->ir.terminator.false_block = anchor_dispatcher;
+  anchor_pred->ir.terminator.direct_block = nullptr;
+  anchor_pred->ir.terminator.condition = take_anchor_phi.phi;
+
+  PHI outside_true_phi;
+  outside_true_phi.phi =
+      create_phi_node(IntegerType::get(ctx, 1),
+                      std::max(cutoff_path0, anchor_pred->pred.size()),
+                      "outside_true_phi", anchor_pred->BB);
+  for (size_t i = 0; i < cutoff_path0; i++) {
+    outside_true_phi.incoming.push_back(
+        {anchor_pred->pred[i], ConstantInt::getBool(ctx, true)});
+  }
+  for (size_t i = cutoff_path0; i < anchor_pred->pred.size(); i++) {
+    outside_true_phi.incoming.push_back(
+        {anchor_pred->pred[i], ConstantInt::getBool(ctx, false)});
+  }
+
+  PHI anchor_cond_phi;
+  anchor_cond_phi.phi = create_phi_node(
+      IntegerType::get(ctx, 1), 2, "anchor_cond_phi", anchor_dispatcher->BB);
+  // If we took the path through anchor, use that conditional. Otherwise, use
+  // the selector between path 0 or 1.
+  anchor_cond_phi.incoming.push_back({anchor, terminator_selector.phi});
+  anchor_cond_phi.incoming.push_back({anchor_pred, outside_true_phi.phi});
+
+  anchor_pred->ir.phi.push_back(std::move(take_anchor_phi));
+  anchor_pred->ir.phi.push_back(std::move(outside_true_phi));
+  anchor_terminator->ir.phi.push_back(std::move(terminator_selector));
+  anchor_dispatcher->ir.terminator.condition = anchor_cond_phi.phi;
+  anchor_dispatcher->ir.terminator.type = Terminator::Type::Condition;
+  anchor_dispatcher->ir.terminator.true_block = constructs[0];
+  anchor_dispatcher->ir.terminator.false_block = constructs[1];
+  anchor_dispatcher->add_branch(constructs[0]);
+  anchor_dispatcher->add_branch(constructs[1]);
+  anchor_dispatcher->ir.phi.push_back(std::move(anchor_cond_phi));
+}
+
 void CFGStructurizer::collect_and_dispatch_control_flow(
     CFGNode *common_idom, CFGNode *common_pdom,
     const std::vector<CFGNode *> &constructs,
@@ -5394,6 +6325,7 @@ void CFGStructurizer::collect_and_dispatch_control_flow(
   dispatcher->ir.phi.push_back(std::move(phi));
 
   dispatcher->ir.terminator.direct_block = nullptr;
+  dispatcher->clear_branches();
 
   if (plain_branch) {
     dispatcher->ir.terminator.type = Terminator::Type::Condition;
@@ -5407,10 +6339,11 @@ void CFGStructurizer::collect_and_dispatch_control_flow(
     default_case.node = need_default_case ? common_pdom : constructs[0];
     default_case.is_default = true;
     dispatcher->ir.terminator.cases.push_back(default_case);
+    dispatcher->add_branch(default_case.node);
 
     for (size_t i = 0, n = constructs.size(); i < n; i++) {
       auto *candidate = constructs[i];
-      assert(candidate->pred.empty());
+      assert(candidate->pred.empty() || candidate == default_case.node);
       dispatcher->add_branch(candidate);
 
       if (need_default_case || i) {
@@ -6307,9 +7240,19 @@ void CFGStructurizer::split_merge_blocks() {
 }
 
 bool CFGStructurizer::structurize(unsigned pass) {
-  if (find_switch_blocks(pass)) {
+  auto switch_mode = process_switch_blocks(pass);
+  while (switch_mode == SwitchProgressMode::IterativeModify) {
+    // For complex rewrites, we damage the CFG, so need to start over every
+    // iteration.
     recompute_cfg();
-    if (find_switch_blocks(pass)) {
+    switch_mode = process_switch_blocks(pass);
+  }
+
+  // After a trivial modify, we must be able to complete the process in one
+  // iteration.
+  if (switch_mode == SwitchProgressMode::SimpleModify) {
+    recompute_cfg();
+    if (process_switch_blocks(pass) != SwitchProgressMode::Done) {
       LOGE("Fatal, detected infinite loop.\n");
       abort();
     }
