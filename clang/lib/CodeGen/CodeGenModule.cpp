@@ -4185,8 +4185,12 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 	} else {
 		info << "0,0,0,";
 	}
-	// #7 required SIMD-width (TODO: implement this)
-	info << "0,";
+	// #7 required SIMD-width
+	if (const auto kernel_simd_width_attr = FD->getAttr<ComputeKernelSIMDWidthAttr>(); kernel_simd_width_attr) {
+		info << kernel_simd_width_attr->getWidth() << ",";
+	} else {
+		info << "0,";
+	}
 	
 	// iterate over clang function decl parameters
 	// NOTE: in case of struct expansion, this doesn't match the llvm parameters

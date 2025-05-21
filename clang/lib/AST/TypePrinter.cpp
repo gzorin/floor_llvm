@@ -1754,6 +1754,7 @@ void TypePrinter::printAttributedAfter(const AttributedType *T,
   case attr::FloorArgBuffer: OS << "floor_arg_buffer"; break;
   case attr::ComputeKernelDim: OS << "kernel_dim()"; break;
   case attr::ComputeKernelWorkGroupSize: OS << "kernel_work_group_size()"; break;
+  case attr::ComputeKernelSIMDWidth: OS << "kernel_simd_width()"; break;
   case attr::Pcs: {
     OS << "pcs(";
    QualType t = T->getEquivalentType();

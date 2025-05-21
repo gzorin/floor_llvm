@@ -118,6 +118,13 @@ namespace {
 		
 		struct per_function_state_t {
 			uint32_t kernel_dim { 1 };
+			uint32_t kernel_simd_width { 0 };
+			uint32_t kernel_local_size[3] { 0, 0, 0 };
+			bool has_fixed_local_size() const {
+				return (kernel_local_size[0] != 0 &&
+						kernel_local_size[1] != 0 &&
+						kernel_local_size[2] != 0);
+			}
 			
 			// added kernel function args
 			Argument* group_id { nullptr };
@@ -264,6 +271,23 @@ namespace {
 					state.kernel_dim = (uint32_t)mdconst::extract<ConstantInt>(op)->getZExtValue();
 					assert((is_kernel_func && state.kernel_dim >= 1 && state.kernel_dim <= 3) ||
 						   (is_tess_control_func && state.kernel_dim == 1));
+				}
+				
+				if (is_kernel_func) {
+					auto kernel_simd_width_node = F.getMetadata("kernel_simd_width");
+					if (kernel_simd_width_node && kernel_simd_width_node->getNumOperands() == 1) {
+						auto& op = kernel_simd_width_node->getOperand(0);
+						state.kernel_simd_width = (uint32_t)mdconst::extract<ConstantInt>(op)->getZExtValue();
+						assert(state.kernel_simd_width >= 1 && state.kernel_simd_width <= 128);
+					}
+					
+					MDNode* wg_size_node = func->getMetadata("reqd_work_group_size");
+					if (wg_size_node && wg_size_node->getNumOperands() == 3) {
+						state.kernel_local_size[0] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(0))->getZExtValue();
+						state.kernel_local_size[1] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(1))->getZExtValue();
+						state.kernel_local_size[2] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(2))->getZExtValue();
+						assert(state.kernel_local_size[0] > 0 && state.kernel_local_size[1] > 0 && state.kernel_local_size[2] > 0);
+					}
 				}
 				
 				if (F.arg_size() >= VULKAN_KERNEL_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
@@ -442,10 +466,27 @@ namespace {
 						id = state.sub_group_local_id;
 						break;
 					case id::sub_group_size:
+						// use fixed SIMD width if available
+						if (state.kernel_simd_width > 0) {
+							return ConstantInt::get(Type::getInt32Ty(*ctx), state.kernel_simd_width);
+						}
 						ld = &state.ld_sub_group_size;
 						id = state.sub_group_size;
 						break;
 					case id::num_sub_groups:
+						// if both the SIMD width and the local size are fixed, we also have a fixed #sub-groups,
+						// because the local size extent must be a multiple of the SIMD width
+						if (state.kernel_simd_width > 0 && state.has_fixed_local_size()) {
+							uint32_t local_size_extent = state.kernel_local_size[0];
+							if (state.kernel_dim > 1) {
+								local_size_extent *= state.kernel_local_size[1];
+							}
+							if (state.kernel_dim > 2) {
+								local_size_extent *= state.kernel_local_size[2];
+							}
+							assert((local_size_extent % state.kernel_simd_width) == 0u);
+							return ConstantInt::get(Type::getInt32Ty(*ctx), local_size_extent / state.kernel_simd_width);
+						}
 						ld = &state.ld_num_sub_groups;
 						id = state.num_sub_groups;
 						break;
@@ -459,9 +500,8 @@ namespace {
 				if (!state.ld_local_size[dim_idx]) {
 					// this doesn't have a direct built-in equivalent, but must be loaded from the WorkgroupSize run-time constant
 					// however: if a fixed work-group size is set, we can use a constant
-					if (MDNode* wg_size_node = func->getMetadata("reqd_work_group_size");
-						wg_size_node && wg_size_node->getNumOperands() == 3) {
-						state.ld_local_size[dim_idx] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(dim_idx));
+					if (state.has_fixed_local_size()) {
+						state.ld_local_size[dim_idx] = ConstantInt::get(Type::getInt32Ty(*ctx), state.kernel_local_size[dim_idx]);
 					} else {
 						assert(state.local_size);
 						state.ld_local_size[dim_idx] = builder->CreateExtractElement(builder->CreateLoad(state.local_size->getType()->getPointerElementType(), state.local_size), dim_idx,
@@ -480,7 +520,7 @@ namespace {
 				if (!state.ld_local_id[dim_idx]) {
 					// since sub-group functionality is always enabled, we can no longer make use of LocalInvocationId, because:
 					// Vulkan (1.3 spec): 15.9. Built-In Variables: "There is no direct relationship between SubgroupLocalInvocationId and LocalInvocationId"
-					// we do however need to guarantee a direct relationshop -> need to compute the local id from the sub-group IDs/sizes
+					// we do however need to guarantee a direct relationship -> need to compute the local id from the sub-group IDs/sizes
 					auto sglid = get_id<id::sub_group_local_id>(0);
 					auto sgid = get_id<id::sub_group_id>(0);
 					auto sgsize = get_id<id::sub_group_size>(0);

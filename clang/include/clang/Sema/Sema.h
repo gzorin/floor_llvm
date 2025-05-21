@@ -10444,6 +10444,10 @@ public:
                                          Expr *size_x_expr, Expr *size_y_expr, Expr *size_z_expr,
                                          const AttributeCommonInfo &CI);
 
+  /// Adds a kernel_simd_width(width) attribute to a particular declaration.
+  void AddComputeKernelSIMDWidthAttr(SourceRange AttrRange, Decl *D, Expr *E,
+                                     const AttributeCommonInfo &CI);
+
   /// The declarator \p D defines a function in the scope \p S which is nested
   /// in an `omp begin/end declare variant` scope. In this method we create a
   /// declaration for \p D and rename \p D according to the OpenMP context

@@ -721,6 +721,16 @@ static void instantiateDependentComputeKernelWorkGroupSizeAttr(
   S.AddComputeKernelWorkGroupSizeAttr(A->getLocation(), New, size_x, size_y, size_z, *A);
 }
 
+static void instantiateDependentComputeKernelSIMDWidthAttr(
+    Sema &S, const MultiLevelTemplateArgumentList &TemplateArgs,
+    const ComputeKernelSIMDWidthAttr *A, const Decl *Tmpl, Decl *New) {
+  // TODO: check Tmpl with isPotentialConstantExprUnevaluated?
+  EnterExpressionEvaluationContext Unevaluated(S, Sema::ExpressionEvaluationContext::ConstantEvaluated);
+  ExprResult Result = S.SubstExpr(A->getSIMDWidth(), TemplateArgs);
+  if (!Result.isInvalid())
+    S.AddComputeKernelSIMDWidthAttr(A->getLocation(), New, Result.getAs<Expr>(), *A);
+}
+
 void Sema::InstantiateAttrs(const MultiLevelTemplateArgumentList &TemplateArgs,
                             const Decl *Tmpl, Decl *New,
                             LateInstantiatedAttrVec *LateAttrs,
@@ -862,6 +872,11 @@ void Sema::InstantiateAttrs(const MultiLevelTemplateArgumentList &TemplateArgs,
 
     if (auto *KernelWorkGroupSize = dyn_cast<ComputeKernelWorkGroupSizeAttr>(TmplAttr)) {
       instantiateDependentComputeKernelWorkGroupSizeAttr(*this, TemplateArgs, KernelWorkGroupSize, Tmpl, New);
+      continue;
+    }
+
+    if (auto *KernelSIMDWidth = dyn_cast<ComputeKernelSIMDWidthAttr>(TmplAttr)) {
+      instantiateDependentComputeKernelSIMDWidthAttr(*this, TemplateArgs, KernelSIMDWidth, Tmpl, New);
       continue;
     }
 

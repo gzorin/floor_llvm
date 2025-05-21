@@ -674,6 +674,12 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
     Fn->setMetadata("kernel_dim", llvm::MDNode::get(Context, AttrMDArgs));
   }
 
+  if (const ComputeKernelSIMDWidthAttr *A = FD->getAttr<ComputeKernelSIMDWidthAttr>()) {
+    llvm::Metadata *AttrMDArgs[] = {
+        llvm::ConstantAsMetadata::get(Builder.getInt32(A->getWidth()))};
+    Fn->setMetadata("kernel_simd_width", llvm::MDNode::get(Context, AttrMDArgs));
+  }
+
   if (FD->getAttr<GraphicsEarlyFragmentTestsAttr>()) {
     Fn->setMetadata("early_fragment_tests", llvm::MDNode::get(Context,
         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::IntegerType::get(Context, 32), 1))));

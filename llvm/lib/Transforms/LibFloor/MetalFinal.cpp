@@ -158,6 +158,13 @@ namespace {
 		
 		struct per_function_state_t {
 			uint32_t kernel_dim { 1 };
+			uint32_t kernel_simd_width { 0 };
+			uint32_t kernel_local_size[3] { 0, 0, 0 };
+			bool has_fixed_local_size() const {
+				return (kernel_local_size[0] != 0 &&
+						kernel_local_size[1] != 0 &&
+						kernel_local_size[2] != 0);
+			}
 			
 			// added kernel function args
 			Argument* global_id { nullptr };
@@ -279,6 +286,24 @@ namespace {
 					assert((is_kernel_func && state.kernel_dim >= 1 && state.kernel_dim <= 3) ||
 						   (is_tess_control_func && state.kernel_dim == 1));
 				}
+				
+				if (is_kernel_func) {
+					auto kernel_simd_width_node = F.getMetadata("kernel_simd_width");
+					if (kernel_simd_width_node && kernel_simd_width_node->getNumOperands() == 1) {
+						auto& op = kernel_simd_width_node->getOperand(0);
+						state.kernel_simd_width = (uint32_t)mdconst::extract<ConstantInt>(op)->getZExtValue();
+						assert(state.kernel_simd_width >= 1 && state.kernel_simd_width <= 128);
+					}
+					
+					MDNode* wg_size_node = func->getMetadata("reqd_work_group_size");
+					if (wg_size_node && wg_size_node->getNumOperands() == 3) {
+						state.kernel_local_size[0] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(0))->getZExtValue();
+						state.kernel_local_size[1] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(1))->getZExtValue();
+						state.kernel_local_size[2] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(2))->getZExtValue();
+						assert(state.kernel_local_size[0] > 0 && state.kernel_local_size[1] > 0 && state.kernel_local_size[2] > 0);
+					}
+				}
+				
 				if (F.arg_size() >= METAL_KERNEL_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
 					int32_t rev_idx = -1;
 					state.num_sub_groups = get_arg_by_idx(rev_idx--);
@@ -677,17 +702,41 @@ namespace {
 			}
 			if (!func_name.startswith("floor.")) return;
 			
+			// helper function to retrieve a constant dim index for a id variable load
+			const auto get_dim_idx = [this](Value* dim_op, Instruction* originating_call_or_null) {
+				const auto const_dim_op = dyn_cast_or_null<ConstantInt>(dim_op);
+				if (!const_dim_op) {
+					llvm::errs() << "dim index in " << state.kernel_dim << "D kernel " << func->getName() << " is not constant:\n";
+					if (originating_call_or_null) {
+						llvm::errs() << *originating_call_or_null << "\n";
+					}
+					llvm::errs().flush();
+					return 0u;
+				}
+				
+				const auto dim_idx = const_dim_op->getZExtValue();
+				if ((dim_idx + 1) > state.kernel_dim) {
+					llvm::errs() << "out-of-bounds dim index " << dim_idx << " in " << state.kernel_dim << "D kernel " << func->getName() << ":\n";
+					if (originating_call_or_null) {
+						llvm::errs() << *originating_call_or_null << "\n";
+					}
+					llvm::errs().flush();
+					return 0u;
+				}
+				return uint32_t(dim_idx);
+			};
+			
 			builder->SetInsertPoint(&I);
 			
 			// figure out which one we need
-			Argument* id;
+			Value* id;
 			bool get_from_vector = false;
 			if(func_name == "floor.get_global_id.i32") {
 				id = state.global_id;
 				get_from_vector = true;
 			}
 			else if(func_name == "floor.get_global_size.i32") {
-				id =state. global_size;
+				id = state.global_size;
 				get_from_vector = true;
 			}
 			else if(func_name == "floor.get_local_id.i32") {
@@ -695,6 +744,13 @@ namespace {
 				get_from_vector = true;
 			}
 			else if(func_name == "floor.get_local_size.i32") {
+				if (state.has_fixed_local_size()) {
+					const auto dim_idx = get_dim_idx(I.getOperand(0), &I);
+					const auto const_local_size = ConstantInt::get(Type::getInt32Ty(*ctx), state.kernel_local_size[dim_idx]);
+					I.replaceAllUsesWith(const_local_size);
+					I.eraseFromParent();
+					return;
+				}
 				id = state.local_size;
 				get_from_vector = true;
 			}
@@ -713,10 +769,29 @@ namespace {
 				id = state.sub_group_local_id;
 			}
 			else if(func_name == "floor.get_sub_group_size.i32") {
-				id = state.sub_group_size;
+				// use fixed SIMD width if available
+				if (state.kernel_simd_width > 0) {
+					id = ConstantInt::get(Type::getInt32Ty(*ctx), state.kernel_simd_width);
+				} else {
+					id = state.sub_group_size;
+				}
 			}
 			else if(func_name == "floor.get_num_sub_groups.i32") {
-				id = state.num_sub_groups;
+				// if both the SIMD width and the local size are fixed, we also have a fixed #sub-groups,
+				// because the local size extent must be a multiple of the SIMD width
+				if (state.kernel_simd_width > 0 && state.has_fixed_local_size()) {
+					uint32_t local_size_extent = state.kernel_local_size[0];
+					if (state.kernel_dim > 1) {
+						local_size_extent *= state.kernel_local_size[1];
+					}
+					if (state.kernel_dim > 2) {
+						local_size_extent *= state.kernel_local_size[2];
+					}
+					assert((local_size_extent % state.kernel_simd_width) == 0u);
+					id = ConstantInt::get(Type::getInt32Ty(*ctx), local_size_extent / state.kernel_simd_width);
+				} else {
+					id = state.num_sub_groups;
+				}
 			}
 			else if(func_name == "floor.get_work_dim.i32") {
 				const auto const_kernel_dim = builder->getInt32(state.kernel_dim);
@@ -859,26 +934,20 @@ namespace {
 			// unknown -> ignore for now
 			else return;
 			
-			if(id == nullptr) {
+			if (id == nullptr) {
 				DBG(printf("failed to get id arg, probably not in a kernel function?\n"); fflush(stdout);)
 				return;
 			}
 			
-			if (get_from_vector) {
-				const auto dim_op = I.getOperand(0);
-				if (const auto const_dim_op = dyn_cast_or_null<ConstantInt>(dim_op); dim_op) {
-					const auto dim_idx = const_dim_op->getZExtValue();
-					if ((dim_idx + 1) > state.kernel_dim) {
-						llvm::errs() << "out-of-bounds dim index " << dim_idx << " in " << state.kernel_dim << "D kernel " << func->getName() << ":\n";
-						llvm::errs() << I << "\n";
-						llvm::errs().flush();
-						return;
-					}
-				}
-			}
-			
 			// replace call with vector load / elem extraction from the appropriate vector
-			I.replaceAllUsesWith(get_from_vector ? builder->CreateExtractElement(id, I.getOperand(0)) : id);
+			Value* repl = nullptr;
+			if (get_from_vector) {
+				const auto dim_idx = get_dim_idx(I.getOperand(0), &I);
+				repl = builder->CreateExtractElement(id, dim_idx);
+			} else {
+				repl = id;
+			}
+			I.replaceAllUsesWith(repl);
 			I.eraseFromParent();
 		}
 		
