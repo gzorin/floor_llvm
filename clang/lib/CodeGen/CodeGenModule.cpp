@@ -2840,7 +2840,12 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			if (cxx_rdecl->hasAttr<VectorCompatAttr>()) {
 				// floor vector type
 				const auto vec_size = type_name_str.substr(type_param_start - 1, 1);
-				return strip_cvr(template_param + vec_size);
+				auto type_name = strip_cvr(template_param + vec_size);
+				// turn "unsigned type" into "utype"
+				if (const auto pos = type_name.find("unsigned "); pos != std::string::npos) {
+					type_name.erase(pos + 1, 8);
+				}
+				return type_name;
 			} else if (type_name_str.starts_with("floor_image::image") ||
 					   type_name_str.starts_with("fl::floor_image::image")) {
 				// floor image type
@@ -2973,7 +2978,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 					break;
 				}
 				
-				return "array<" + make_type_name(arr_elem_type.getAsType()) + "," + std::to_string(arr_elem_count.getAsIntegral().getZExtValue()) + ">";
+				return "array<" + make_type_name(arr_elem_type.getAsType()) + ", " + std::to_string(arr_elem_count.getAsIntegral().getZExtValue()) + ">";
 			}
 		} while (false);
 		
@@ -2985,10 +2990,12 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		} else {
 			type_name = unqualified_type.getAsString(Policy);
 		}
-		// Turn "unsigned type" to "utype"
-		const auto pos = type_name.find("unsigned");
-		if (pos != std::string::npos) type_name.erase(pos + 1, 8);
-		return strip_cvr(type_name);
+		type_name = strip_cvr(type_name);
+		// turn "unsigned type" into "utype"
+		if (const auto pos = type_name.find("unsigned "); pos != std::string::npos) {
+			type_name.erase(pos + 1, 8);
+		}
+		return type_name;
 	};
 	
 	//
@@ -3135,7 +3142,12 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			
 			// #8/#9: arg name
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
-			arg_info.push_back(llvm::MDString::get(VMContext, StringRef(name)));
+			
+			auto name_ref = StringRef(name);
+			if (name_ref.endswith(".0")) {
+				name_ref = name_ref.substr(0, name.size() - 2u);
+			}
+			arg_info.push_back(llvm::MDString::get(VMContext, name_ref));
 			
 			return arg_info;
 		};
@@ -3219,30 +3231,28 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				
 				bool is_inline_struct = false;
 				const auto buffer_idx_offset = buffer_or_tex_idx_child;
-				if (indirect_buffer || is_indirect || indirect_struct_type_info) {
-					if (!field_type->isPointerType() &&
-						!field_type->isReferenceType() &&
-						!field_type->isImageType() &&
-						!field_type->isArrayImageType(true) &&
-						!field_type->isAggregateImageType() &&
-						!parent_decl.hasAttr<GraphicsStageInputAttr>() &&
-						field_type->isStructureOrClassType()) {
-						if (const auto inline_struct_rdecl = field_type->getAsCXXRecordDecl();
-							inline_struct_rdecl && !inline_struct_rdecl->hasAttr<VectorCompatAttr>()) {
-							is_inline_struct = true;
-							// #-2: inline struct type
-							struct_info.push_back(llvm::MDString::get(VMContext, "air.struct_type_info"));
-							// #-1: metadata of struct type
-							uint32_t struct_arg_idx_child = 0, struct_buf_idx_child = 0;
-							auto struct_type_info = add_struct_type_info(*inline_struct_rdecl, struct_rdecl, is_indirect, indirect_buffer, indirect_struct_type_info, struct_arg_idx_child, struct_buf_idx_child);
-							assert(!struct_type_info.empty());
-							struct_info.push_back(llvm::MDNode::get(VMContext, struct_type_info));
-							
-							// next param
-							++arg_idx_child;
-							// adjust buffer index at this level
-							buffer_or_tex_idx_child += std::max(array_size, 1u) * struct_buf_idx_child;
-						}
+				if (!field_type->isPointerType() &&
+					!field_type->isReferenceType() &&
+					!field_type->isImageType() &&
+					!field_type->isArrayImageType(true) &&
+					!field_type->isAggregateImageType() &&
+					!parent_decl.hasAttr<GraphicsStageInputAttr>() &&
+					field_type->isStructureOrClassType()) {
+					if (const auto inline_struct_rdecl = field_type->getAsCXXRecordDecl();
+						inline_struct_rdecl && !inline_struct_rdecl->hasAttr<VectorCompatAttr>()) {
+						is_inline_struct = true;
+						// #-2: inline struct type
+						struct_info.push_back(llvm::MDString::get(VMContext, "air.struct_type_info"));
+						// #-1: metadata of struct type
+						uint32_t struct_arg_idx_child = 0, struct_buf_idx_child = 0;
+						auto struct_type_info = add_struct_type_info(*inline_struct_rdecl, struct_rdecl, is_indirect, indirect_buffer, indirect_struct_type_info, struct_arg_idx_child, struct_buf_idx_child);
+						assert(!struct_type_info.empty());
+						struct_info.push_back(llvm::MDNode::get(VMContext, struct_type_info));
+						
+						// next param
+						++arg_idx_child;
+						// adjust buffer index at this level
+						buffer_or_tex_idx_child += std::max(array_size, 1u) * struct_buf_idx_child;
 					}
 				}
 				
@@ -3401,9 +3411,10 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(getDataLayout().getTypeStoreSize(llvm_pointee_type))));
 			// #12/#13: type alignment
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_align_size"));
-			// max out at 16, anything higher is unreasonable
-			// TODO: make sure this is POT
-			const auto align_size = std::min(getDataLayout().getTypeAllocSize(llvm_pointee_type).getFixedValue(), uint64_t(16));
+			// max out at 16 for normal types, anything higher is unreasonable
+			// for argument/indirect buffers, always assume an 8-byte alignment
+			const auto align_size = std::min(getDataLayout().getABITypeAlign(llvm_pointee_type).value(),
+											 indirect_buffer ? uint64_t(8u) : uint64_t(16u));
 			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(align_size)));
 			//getPrimitiveSizeInBits
 			// #14/#15: type name
@@ -4386,9 +4397,10 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 															   const CXXRecordDecl* parent,
 															   const FieldDecl* field_decl,
 															   const ARG_FLAG init_flags = ARG_FLAG::NONE) -> argument_info_t {
-			// for now: just use the direct type size + no address space
+			// for now: just use the direct type size + no address space + always mark as read-only
 			argument_info_t arg_info {
 				.flags = init_flags,
+				.access = ARG_ACCESS::READ,
 			};
 			// handle some llvm weirdness? why can this be a pointer still?
 			if (has_flag<ARG_FLAG::STAGE_INPUT>(arg_info.flags) && clang_type->isPatchControlPointT()) {
@@ -4441,6 +4453,14 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 			argument_info_t arg_info {
 				.size = arg_size,
 			};
+			
+			// mark definite read-only buffers (otherwise keep unspecified for now)
+			if (indirect_buffer ||
+				clang_pointee_type.isConstQualified() ||
+				(clang_pointee_type.getAddressSpace() == LangAS::opencl_constant)) {
+				arg_info.access = ARG_ACCESS::READ;
+			}
+			
 			if (CGM.getLangOpts().OpenCL) {
 				arg_info.address_space = to_fas(clang_pointee_type.getAddressSpace());
 			} else if (CGM.getLangOpts().CUDA || CGM.getLangOpts().FloorHostCompute) {
@@ -4523,6 +4543,11 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 									};
 									const auto field_pointee_type = field_type->getPointeeType();
 									field_arg_info.address_space = to_fas(field_pointee_type.getAddressSpace());
+									// mark definite read-only buffers (otherwise keep unspecified for now)
+									if (field_pointee_type.isConstQualified() ||
+										(field_pointee_type.getAddressSpace() == LangAS::opencl_constant)) {
+										field_arg_info.access = ARG_ACCESS::READ;
+									}
 									if (CGM.getLangOpts().Vulkan) {
 										// flag this as an SSBO for Vulkan
 										if (field_pointee_type.getAddressSpace() != LangAS::opencl_global) {
@@ -4558,11 +4583,16 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 								} else if ((CGM.getLangOpts().Vulkan || CGM.getLangOpts().Metal) && field_type->isArrayBufferType()) {
 									const auto array_buffer_info = get_array_buffer_info(field_type, field_type->getAsCXXRecordDecl(), getContext());
 									if (array_buffer_info) {
+										const auto elem_pointee_type = array_buffer_info->element_type->getPointeeType();
 										argument_info_t field_arg_info {
 											.array_extent = array_buffer_info->element_count,
-											.address_space = to_fas(array_buffer_info->element_type->getPointeeType().getAddressSpace()),
+											.address_space = to_fas(elem_pointee_type.getAddressSpace()),
 											.flags = ARG_FLAG::BUFFER_ARRAY,
 										};
+										if (elem_pointee_type.isConstQualified() ||
+											(elem_pointee_type.getAddressSpace() == LangAS::opencl_constant)) {
+											field_arg_info.access = ARG_ACCESS::READ;
+										}
 										this_arg_buf_info << field_arg_info << ",";
 									} else {
 										CGM.Error(field->getSourceRange().getBegin(), "invalid buffer array in indirect/argument buffer!");

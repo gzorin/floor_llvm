@@ -63,6 +63,7 @@
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/LibFloor.h"
 #include "llvm/Transforms/LibFloor/FloorUtils.h"
+#include "llvm/Transforms/LibFloor/MetalTypes.h"
 #include <algorithm>
 #include <cstdarg>
 #include <memory>
@@ -149,6 +150,7 @@ namespace {
 		LLVMContext* ctx { nullptr };
 		Function* func { nullptr };
 		Instruction* alloca_insert { nullptr };
+		uint32_t metal_version { 0u };
 		bool was_modified { false };
 		bool is_kernel_func { false };
 		bool is_vertex_func { false };
@@ -248,6 +250,7 @@ namespace {
 			func = &F;
 			builder = std::make_shared<llvm::IRBuilder<>>(*ctx);
 			state = {};
+			metal_version = metal::get_metal_version(*M);
 			
 			for(auto& instr : F.getEntryBlock().getInstList()) {
 				if(!isa<AllocaInst>(instr)) {
@@ -383,18 +386,30 @@ namespace {
 			}
 			
 			// update function signature / param list
-			if(is_kernel_func || is_vertex_func || is_fragment_func || is_tess_control_func || is_tess_eval_func) {
+			if (is_kernel_func || is_vertex_func || is_fragment_func || is_tess_control_func || is_tess_eval_func) {
 				std::vector<Type*> param_types;
-				for(auto& arg : F.args()) {
+				for (auto& arg : F.args()) {
+					// replace noalias LLVM attribute with "air-buffer-no-alias" string attribute on Metal 3.1+
+					if (metal_version >= 310 && arg.hasAttribute(Attribute::NoAlias)) {
+						arg.addAttr(llvm::Attribute::get(*ctx, "air-buffer-no-alias"));
+						arg.removeAttr(Attribute::NoAlias);
+					}
 					param_types.push_back(arg.getType());
 				}
 				auto new_func_type = FunctionType::get(F.getReturnType(), param_types, false);
 				F.mutateType(PointerType::get(new_func_type, 0));
 				F.mutateFunctionType(new_func_type);
 				
-				// always remove "norecurse" and "min-legal-vector-width"
-				F.removeFnAttr(Attribute::NoRecurse);
+				// always remove "norecurse" and "min-legal-vector-width" on Metal < 3.1
+				if (metal_version < 310) {
+					F.removeFnAttr(Attribute::NoRecurse);
+				}
 				F.removeFnAttr("min-legal-vector-width");
+				
+				// set our own "min-legal-vector-width" attribute on Metal 3.1+
+				if (metal_version >= 310) {
+					F.addFnAttr(llvm::Attribute::get(*ctx, "min-legal-vector-width", "64"));
+				}
 			}
 			
 			// visit everything in this function
