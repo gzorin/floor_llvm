@@ -2451,11 +2451,6 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 			// don't inc arg idx at the end
 			inc_arg_idx_at_end = false;
 		} else if (parm->hasAttr<FloorArgBufferAttr>()) {
-			if (!getCodeGenOpts().VulkanDescriptorBufferSupport) {
-				// argument buffers are not support without descriptor buffer support
-				Error(parm->getSourceRange().getBegin(), "argument buffers are not support without Vulkan descriptor buffer support");
-				return;
-			}
 			if (!cxx_rdecl) {
 				Error(parm->getSourceRange().getBegin(), "argument buffer element type must be a struct or class");
 				return;
@@ -4176,7 +4171,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 		(getLangOpts().Vulkan && CGM.getCodeGenOpts().VulkanSoftPrintf > 0)) {
 		func_flags |= (1u << 0u);
 	}
-	if (getLangOpts().Vulkan && CGM.getCodeGenOpts().VulkanDescriptorBufferSupport) {
+	if (getLangOpts().Vulkan) {
 		func_flags |= (1u << 1u);
 	}
 	if (is_kernel || is_tess_control) {

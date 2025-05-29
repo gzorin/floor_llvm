@@ -1846,7 +1846,6 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
       getLastArgUInt64Value(Args, OPT_vulkan_iub_count_EQ, 4)));
   Opts.VulkanLLVMPreStructurizationPass = Args.hasArg(OPT_vulkan_llvm_pre_structurization_pass);
   Opts.VulkanSoftPrintf = Args.hasArg(OPT_vulkan_soft_printf);
-  Opts.VulkanDescriptorBufferSupport = Args.hasArg(OPT_vulkan_descriptor_buffer_support);
   Opts.SPIRCompileOptions = Args.getLastArgValue(OPT_cl_spir_compile_options).trim("\t\n\v\f\r\" ");
   Opts.GraphicsPrimitiveID = Args.hasArg(OPT_graphics_primitive_id);
   Opts.GraphicsBarycentricCoord = Args.hasArg(OPT_graphics_barycentric_coord);
@@ -3800,9 +3799,6 @@ bool CompilerInvocation::ParseLangArgs(LangOptions &Opts, ArgList &Args,
   // Vulkan lang options
   if (Args.hasArg(OPT_vulkan_soft_printf)) {
     Opts.vulkan_soft_printf = true;
-  }
-  if (Args.hasArg(OPT_vulkan_descriptor_buffer_support)) {
-    Opts.VulkanDescriptorBufferSupport = true;
   }
 
   // These need to be parsed now. They are used to set OpenCL defaults.

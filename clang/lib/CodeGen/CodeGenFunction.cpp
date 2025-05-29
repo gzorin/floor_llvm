@@ -735,11 +735,6 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
     CGM.getModule().getOrInsertNamedMetadata("floor.barycentric_coord");
   }
 
-  // add Vulkan descriptor buffer info
-  if (CGM.getCodeGenOpts().VulkanDescriptorBufferSupport > 0) {
-    CGM.getModule().getOrInsertNamedMetadata("floor.vulkan_descriptor_buffer");
-  }
-
   // signal that we're generating SPIR-V in the end
   if (CGM.getCodeGenOpts().floor_generating_spirv > 0) {
     CGM.getModule().getOrInsertNamedMetadata("floor.generating_spirv");

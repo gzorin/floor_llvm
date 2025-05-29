@@ -854,6 +854,13 @@ namespace {
 			
 			return { version_major, version_minor };
 		}
+		
+		struct combined_st_entry_t {
+			llvm::Type* type;
+			llvm::Value* value;
+			size_t value_size;
+			size_t elemental_size;
+		};
 
 		bool runOnFunction(Function &F) override {
 			// exit if empty function
@@ -977,7 +984,8 @@ namespace {
 						// for IUBs/SSBO-Uniform: enclose in unique struct type, because we later need to add a "Block" decoration on it,
 						//                        for which we need to have a unique LLVM type to not run into nested Block/BufferBlock issues
 						if (is_iub || is_ssbo_uniform) {
-							arg_type = enclose_in_struct({ &arg }, { elem_type }, arg, nullptr, F, storage_class);
+							const auto value_size = M->getDataLayout().getTypeStoreSize(elem_type).getFixedValue();
+							arg_type = enclose_in_struct({ combined_st_entry_t { elem_type, &arg, value_size, value_size } }, { elem_type }, arg, nullptr, F, storage_class);
 						} else if (is_ssbo_array) {
 							// perform SSBO array transforms
 							arg_type = handle_ssbo_array_transforms(F, arg);
@@ -1007,137 +1015,157 @@ namespace {
 			
 			// ensure all work-group/local memory variables are enclosed inside a unique struct + code is updated accordingly
 			DBG(errs() << "> updating work-group/local memory variables ...\n";)
-			{
-				// find all GVs / local memory variables used in this function
-				std::vector<llvm::GlobalVariable*> lmem_vars;
-				for (auto& GV : M->globals()) {
-					if (GV.getType()->getAddressSpace() != SPIRAS_Local) {
-						continue;
-					}
-					
-					// check if GV is used in this function
-					bool is_used = false;
-					libfloor_utils::for_all_instruction_users(GV, [&is_used](const Instruction&) {
-						// always true with restriction below
-						is_used = true;
-					}, &F /* restrict to this function */);
-					if (!is_used) {
-						continue;
-					}
-					lmem_vars.emplace_back(&GV);
-				}
-				
-				// enclose
-				if (!lmem_vars.empty()) {
-					// move all local memory variables into a single combined struct
-					std::vector<llvm::Type*> combined_elem_types;
-					std::vector<llvm::Value*> combined_elems;
-					uint64_t total_size = 0u;
-					for (auto& GV : lmem_vars) {
-						const auto elemental_type_size = M->getDataLayout().getTypeStoreSize(libfloor_utils::get_elemental_type(GV->getValueType())).getFixedValue();
-						if (auto cur_alignment = total_size % elemental_type_size; cur_alignment != 0u) {
-							// need to add padding
-							auto padding = elemental_type_size - cur_alignment;
-							total_size += padding;
-							// if the padding is small enough, just add small types
-							if (padding < 4) {
-								if (padding == 3) {
-									combined_elem_types.emplace_back(llvm::Type::getInt8Ty(*ctx));
-									combined_elems.emplace_back(nullptr);
-									combined_elem_types.emplace_back(llvm::Type::getInt16Ty(*ctx));
-									combined_elems.emplace_back(nullptr);
-								} else if (padding == 2) {
-									combined_elem_types.emplace_back(llvm::Type::getInt16Ty(*ctx));
-									combined_elems.emplace_back(nullptr);
-								} else {
-									assert(padding == 1);
-									combined_elem_types.emplace_back(llvm::Type::getInt8Ty(*ctx));
-									combined_elems.emplace_back(nullptr);
-								}
-							} else {
-								// otherwise: add an array
-								combined_elem_types.emplace_back(llvm::ArrayType::get(llvm::Type::getInt8Ty(*ctx), padding));
-								combined_elems.emplace_back(nullptr);
-							}
-						}
-						
-						total_size += M->getDataLayout().getTypeStoreSize(GV->getValueType()).getFixedValue();
-						combined_elem_types.emplace_back(GV->getValueType());
-						combined_elems.emplace_back(GV);
-					}
-					assert(total_size > 0u);
-					
-					const auto combined_name = "wg.enclose." + F.getName().str();
-					auto combined_st_type = llvm::StructType::create(*ctx, combined_elem_types, combined_name + ".struct");
-					GlobalVariable* combined_st_gv = new GlobalVariable(*M, combined_st_type, false, GlobalValue::InternalLinkage,
-																		nullptr, combined_name, lmem_vars[0] /* insert before first original GV */,
-																		GlobalValue::NotThreadLocal, SPIRAS_Local, false);
-					
-					// adjust all instructions accordingly
-					enclose_in_struct(std::move(combined_elems), std::move(combined_elem_types), *combined_st_gv, combined_st_type, F,
-									  SPIRAS_Local /* no change */, false /* already prefixed */);
-					
-					// add dummy initializer
-					combined_st_gv->setInitializer(UndefValue::get(combined_st_gv->getValueType()));
-					
-					// add aliased types
-					const auto add_lmem_alias = [this, &F, &total_size, &lmem_vars](llvm::Type* base_type, const std::string& base_type_name) {
-						const auto arr_elem_size = M->getDataLayout().getTypeStoreSize(base_type).getFixedValue();
-						const auto arr_type = ArrayType::get(base_type, total_size / arr_elem_size);
-						const auto st_arr_name = "wg.alias." + F.getName().str() + "." + base_type_name;
-						const auto st_arr_type = llvm::StructType::create(*ctx, arr_type, st_arr_name + ".struct");
-						GlobalVariable* alias_arr_gv = new GlobalVariable(*M, st_arr_type, false, GlobalValue::InternalLinkage,
-																		  nullptr, st_arr_name, lmem_vars[0] /* insert before first original GV */,
-																		  GlobalValue::NotThreadLocal, SPIRAS_Local, false);
-						alias_arr_gv->setAlignment(MaybeAlign { arr_elem_size });
-						alias_arr_gv->setInitializer(UndefValue::get(alias_arr_gv->getValueType()));
-					};
-					add_lmem_alias(llvm::Type::getInt8Ty(*ctx), "i8");
-					if (total_size >= 2) {
-						add_lmem_alias(llvm::Type::getInt16Ty(*ctx), "i16");
-						// TODO: check float16 support?
-					}
-					if (total_size >= 4) {
-						add_lmem_alias(llvm::Type::getInt32Ty(*ctx), "i32");
-						add_lmem_alias(llvm::Type::getFloatTy(*ctx), "f32");
-					}
-					
-					// TODO: replace work-group/local pointer bitcasts with accesses into aliased memory (fix broken optimizations, maybe functional float atomic workaround?)
-				}
-			}
+			enclose_work_group_memory();
 			
 			// always modified
 			DBG(errs() << "> " << F.getName() << " done\n";)
 			return true;
 		}
 		
+		void enclose_work_group_memory() {
+			// find all GVs / local memory variables used in this function
+			std::vector<llvm::GlobalVariable*> lmem_vars;
+			for (auto& GV : M->globals()) {
+				if (GV.getType()->getAddressSpace() != SPIRAS_Local) {
+					continue;
+				}
+				
+				// check if GV is used in this function
+				bool is_used = false;
+				libfloor_utils::for_all_instruction_users(GV, [&is_used](const Instruction&) {
+					// always true with restriction below
+					is_used = true;
+				}, func /* restrict to this function */);
+				if (!is_used) {
+					continue;
+				}
+				lmem_vars.emplace_back(&GV);
+			}
+			
+			// enclose
+			if (!lmem_vars.empty()) {
+				// move all local memory variables into a single combined struct:
+				std::vector<combined_st_entry_t> combined_st;
+				uint64_t total_size = 0u;
+				// -> gather all
+				for (auto& GV : lmem_vars) {
+					const auto value_size = M->getDataLayout().getTypeStoreSize(GV->getValueType()).getFixedValue();
+					const auto elemental_type_size = M->getDataLayout().getTypeStoreSize(libfloor_utils::get_elemental_type(GV->getValueType())).getFixedValue();
+					combined_st.emplace_back(GV->getValueType(), GV, value_size, elemental_type_size);
+				}
+				// -> sort from largest to smallest
+				std::stable_sort(combined_st.begin(), combined_st.end(), [](const combined_st_entry_t& lhs, const combined_st_entry_t& rhs) {
+					return lhs.value_size > rhs.value_size;
+				});
+				// -> add padding
+				for (auto field_iter = combined_st.begin(); field_iter != combined_st.end(); ) {
+					const auto& field = *field_iter;
+					total_size += field.value_size;
+					++field_iter;
+					
+					if (auto cur_alignment = total_size % field.elemental_size; cur_alignment != 0u) {
+						// need to add padding
+						auto padding = field.elemental_size - cur_alignment;
+						total_size += padding;
+						// if the padding is small enough, just add small types
+						if (padding < 4) {
+							if (padding == 3) {
+								field_iter = combined_st.insert(field_iter, combined_st_entry_t { llvm::Type::getInt8Ty(*ctx), nullptr, 1u, 1u });
+								++field_iter;
+								field_iter = combined_st.insert(field_iter, combined_st_entry_t { llvm::Type::getInt16Ty(*ctx), nullptr, 2u, 2u });
+								++field_iter;
+							} else if (padding == 2) {
+								field_iter = combined_st.insert(field_iter, combined_st_entry_t { llvm::Type::getInt16Ty(*ctx), nullptr, 2u, 2u });
+								++field_iter;
+							} else {
+								assert(padding == 1);
+								field_iter = combined_st.insert(field_iter, combined_st_entry_t { llvm::Type::getInt8Ty(*ctx), nullptr, 1u, 1u });
+								++field_iter;
+							}
+						} else {
+							// otherwise: add an array
+							const auto pad_array_type = llvm::ArrayType::get(llvm::Type::getInt8Ty(*ctx), padding);
+							const auto value_size = M->getDataLayout().getTypeStoreSize(pad_array_type).getFixedValue();
+							assert(value_size == padding);
+							field_iter = combined_st.insert(field_iter, combined_st_entry_t { pad_array_type, nullptr, value_size, 1u });
+							++field_iter;
+						}
+					}
+				}
+				assert(total_size > 0u);
+				
+				std::vector<llvm::Type*> combined_elem_types;
+				combined_elem_types.reserve(combined_st.size());
+				for (const auto& field : combined_st) {
+					combined_elem_types.emplace_back(field.type);
+				}
+				
+				const auto combined_name = "wg.enclose." + func->getName().str();
+				auto combined_st_type = llvm::StructType::create(*ctx, combined_elem_types, combined_name + ".struct");
+				GlobalVariable* combined_st_gv = new GlobalVariable(*M, combined_st_type, false, GlobalValue::InternalLinkage,
+																	nullptr, combined_name, lmem_vars[0] /* insert before first original GV */,
+																	GlobalValue::NotThreadLocal, SPIRAS_Local, false);
+				
+				// adjust all instructions accordingly
+				enclose_in_struct(std::move(combined_st), std::move(combined_elem_types), *combined_st_gv, combined_st_type, *func,
+								  SPIRAS_Local /* no change */, false /* already prefixed */);
+				
+				// add dummy initializer
+				combined_st_gv->setInitializer(UndefValue::get(combined_st_gv->getValueType()));
+				
+				// add aliased types
+				const auto add_lmem_alias = [this, &total_size, &lmem_vars](llvm::Type* base_type, const std::string& base_type_name) {
+					const auto arr_elem_size = M->getDataLayout().getTypeStoreSize(base_type).getFixedValue();
+					const auto arr_type = ArrayType::get(base_type, total_size / arr_elem_size);
+					const auto st_arr_name = "wg.alias." + func->getName().str() + "." + base_type_name;
+					const auto st_arr_type = llvm::StructType::create(*ctx, arr_type, st_arr_name + ".struct");
+					GlobalVariable* alias_arr_gv = new GlobalVariable(*M, st_arr_type, false, GlobalValue::InternalLinkage,
+																	  nullptr, st_arr_name, lmem_vars[0] /* insert before first original GV */,
+																	  GlobalValue::NotThreadLocal, SPIRAS_Local, false);
+					alias_arr_gv->setAlignment(MaybeAlign { arr_elem_size });
+					alias_arr_gv->setInitializer(UndefValue::get(alias_arr_gv->getValueType()));
+				};
+				add_lmem_alias(llvm::Type::getInt8Ty(*ctx), "i8");
+				if (total_size >= 2) {
+					add_lmem_alias(llvm::Type::getInt16Ty(*ctx), "i16");
+					// TODO: check float16 support?
+				}
+				if (total_size >= 4) {
+					add_lmem_alias(llvm::Type::getInt32Ty(*ctx), "i32");
+					add_lmem_alias(llvm::Type::getFloatTy(*ctx), "f32");
+				}
+				
+				// TODO: replace work-group/local pointer bitcasts with accesses into aliased memory (fix broken optimizations, maybe functional float atomic workaround?)
+			}
+		}
+		
 		//! vals + elem_types: all values being enclosed in the struct + their resp. element types
 		//! root_st: new root variable (struct)
 		//! existing_enclosed_st_type: an enclosing struct type can also be created outside this function and used in here, rather than this function creating its own
-		llvm::Type* enclose_in_struct(std::vector<llvm::Value*> vals, std::vector<llvm::Type*> elem_types, llvm::Value& root_st,
+		llvm::Type* enclose_in_struct(std::vector<combined_st_entry_t> fields, std::vector<llvm::Type*> elem_types, llvm::Value& root_st,
 									  llvm::StructType* existing_enclosed_st_type,
 									  const llvm::Function& parent_function,
 									  const uint32_t storage_class,
 									  const bool add_enclose_name = true) {
-			assert(!vals.empty() && !elem_types.empty() && vals.size() == elem_types.size());
+			assert(!fields.empty() && !elem_types.empty() && fields.size() == elem_types.size());
 			auto enclosed_type = (existing_enclosed_st_type ? existing_enclosed_st_type->getPointerTo(storage_class) : nullptr);
 			if (!enclosed_type) {
-				assert(vals.size() == 1);
+				assert(fields.size() == 1);
 				std::string st_name = (add_enclose_name ? "enclose." : "");
-				if (!vals[0]->getName().empty()) {
-					st_name += vals[0]->getName().str() + ".";
+				if (!fields[0].value->getName().empty()) {
+					st_name += fields[0].value->getName().str() + ".";
 				} else {
 					st_name += (add_enclose_name ? "" : ".");
 				}
 				st_name += "st";
 				auto st_type = llvm::StructType::create(*ctx, elem_types, st_name);
 				enclosed_type = st_type->getPointerTo(storage_class);
-				vals[0]->mutateType(enclosed_type);
+				fields[0].value->mutateType(enclosed_type);
 			}
 			
 			// replace users
 			for (uint32_t st_elem_idx = 0, st_elem_count = uint32_t(elem_types.size()); st_elem_idx < st_elem_count; ++st_elem_idx) {
-				if (!vals[st_elem_idx]) {
+				if (!fields[st_elem_idx].value) {
 					// padding values are nullptr
 					continue;
 				}
@@ -1145,7 +1173,7 @@ namespace {
 					llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0),
 					llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), st_elem_idx),
 				};
-				auto& val = *vals[st_elem_idx];
+				auto& val = *fields[st_elem_idx].value;
 				libfloor_utils::for_all_users(val, [this, &root_st, &idx_list, &storage_class](User& user) {
 					if (auto instr = dyn_cast<Instruction>(&user); instr) {
 						if (auto load_instr = dyn_cast_or_null<LoadInst>(instr); load_instr) {

@@ -10175,7 +10175,7 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
       llvm::SmallPtrSet<const Type *, 16> ValidTypes;
       for (auto Param : NewFD->parameters())
         checkIsValidOpenCLKernelParameter(*this, D, Param, ValidTypes, getLangOpts().Metal,
-                                          getLangOpts().Vulkan && getLangOpts().VulkanDescriptorBufferSupport);
+                                          getLangOpts().Vulkan);
     }
 
     // arg_buffer<> must only be used directly
