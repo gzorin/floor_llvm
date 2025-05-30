@@ -781,6 +781,123 @@ namespace {
 			state.kill_list.emplace_back(&I);
 		}
 	};
+
+	struct vulkan_function_scope_type_replacement {
+		// we must reuse cloned types here
+		static std::unordered_map<Type*, Type*> clone_type_map;
+		
+		static StructType* clone_logical_type(StructType* st_type) {
+			SmallVector<Type*, 8> field_types;
+			for (uint32_t i = 0, count = st_type->getStructNumElements(); i < count; ++i) {
+				auto field_type = st_type->getStructElementType(i);
+				// recurse?
+				if (auto clone_type_iter = clone_type_map.find(field_type); clone_type_iter != clone_type_map.end()) {
+					field_type = clone_type_iter->second;
+				} else if (auto field_st_type = dyn_cast_or_null<StructType>(field_type); field_st_type) {
+					field_type = clone_logical_type(field_st_type);
+					clone_type_map.emplace(field_st_type, field_type);
+				} else if (auto field_arr_type = dyn_cast_or_null<ArrayType>(field_type); field_arr_type) {
+					field_type = clone_logical_type(field_arr_type);
+					clone_type_map.emplace(field_arr_type, field_type);
+				}
+				field_types.emplace_back(field_type);
+			}
+			return StructType::create(field_types, st_type->getName().str() + ".clone", st_type->isPacked());
+		}
+		
+		static ArrayType* clone_logical_type(ArrayType* arr_type) {
+			auto elem_type = arr_type->getElementType();
+			// recurse?
+			if (auto clone_type_iter = clone_type_map.find(elem_type); clone_type_iter != clone_type_map.end()) {
+				elem_type = clone_type_iter->second;
+			} else if (auto elem_st_type = dyn_cast_or_null<StructType>(elem_type); elem_st_type) {
+				elem_type = clone_logical_type(elem_st_type);
+				clone_type_map.emplace(elem_st_type, elem_type);
+			} else if (auto elem_arr_type = dyn_cast_or_null<ArrayType>(elem_type); elem_arr_type) {
+				elem_type = clone_logical_type(elem_arr_type);
+				clone_type_map.emplace(elem_arr_type, elem_type);
+			}
+			// else: nop
+			
+			return ArrayType::get(elem_type, arr_type->getNumElements());
+		}
+		
+		static void update_initializer(Constant* init, Type* new_type) {
+			init->mutateType(new_type);
+			
+			// recurse?
+			if (auto const_st = dyn_cast_or_null<ConstantStruct>(init); const_st) {
+				auto st_type = dyn_cast_or_null<StructType>(new_type);
+				assert(st_type);
+				for (auto field_idx = 0u, field_count = const_st->getNumOperands(); field_idx < field_count; ++field_idx) {
+					update_initializer(const_st->getOperand(field_idx), st_type->getStructElementType(field_idx));
+				}
+			} else if (auto const_arr = dyn_cast_or_null<ConstantArray>(init); const_arr) {
+				auto arr_type = dyn_cast_or_null<ArrayType>(new_type);
+				assert(arr_type);
+				auto arr_elem_type = arr_type->getElementType();
+				for (auto elem_idx = 0u, elem_count = const_arr->getNumOperands(); elem_idx < elem_count; ++elem_idx) {
+					update_initializer(const_arr->getOperand(elem_idx), arr_elem_type);
+				}
+			}
+		}
+		
+		static bool handle_function_scope_variable(Value* val, Function* restrict_function = nullptr) {
+			// Vulkan SPIR-V requires structs/arrays in Function/Private scope to have a logical layout (i.e. no decorations),
+			// which means we're very likely to run into this issue when we have an alloca or constant GV of a struct or array
+			// -> clone and replace the type and hope for the best (this may break things ...)
+			
+			auto val_type = val->getType();
+			auto val_ptr_type = dyn_cast_or_null<PointerType>(val_type);
+			if (!val_ptr_type) {
+				return false;
+			}
+			auto elem_type = val_ptr_type->getPointerElementType();
+			
+			Type* cloned_type = nullptr;
+			if (auto clone_type_iter = clone_type_map.find(elem_type); clone_type_iter != clone_type_map.end()) {
+				cloned_type = clone_type_iter->second;
+			} else if (auto st_type = dyn_cast_or_null<StructType>(elem_type); st_type) {
+				cloned_type = clone_logical_type(st_type);
+				clone_type_map.emplace(elem_type, cloned_type);
+			} else if (auto arr_type = dyn_cast_or_null<ArrayType>(elem_type); arr_type) {
+				cloned_type = clone_logical_type(arr_type);
+				clone_type_map.emplace(elem_type, cloned_type);
+			}
+			
+			// exit if we don't need to do anything
+			if (!cloned_type) {
+				return false;
+			}
+			
+			// mutate
+			if (auto alloca = dyn_cast_or_null<AllocaInst>(val); alloca) {
+				alloca->setAllocatedType(cloned_type);
+			} else if (auto GVar = dyn_cast_or_null<GlobalVariable>(val); GVar) {
+				GVar->mutateValueType(cloned_type);
+				if (GVar->hasInitializer()) {
+					update_initializer(GVar->getInitializer(), cloned_type);
+				}
+			} else if (auto GV = dyn_cast_or_null<GlobalValue>(val); GV) {
+				GV->mutateValueType(cloned_type);
+			}
+			val->mutateType(PointerType::get(cloned_type, val_ptr_type->getAddressSpace()));
+			
+			// update users
+			// NOTE: this only runs on direct users, it does not recurse deeper, which may be necessary ...
+			libfloor_utils::for_all_instruction_users(*val, [&cloned_type, &elem_type](Instruction& instr) {
+				if (auto GEP = dyn_cast_or_null<GetElementPtrInst>(&instr); GEP) {
+					assert(GEP->getSourceElementType() == elem_type);
+					GEP->setSourceElementType(cloned_type);
+				} else {
+					llvm::errs() << "unhandled function scope replacement instruction:\n\t" << instr << "\n";
+				}
+			}, restrict_function /* restrict to the specified function (or none if nullptr) */);
+			
+			return true;
+		}
+	};
+	std::unordered_map<Type*, Type*> vulkan_function_scope_type_replacement::clone_type_map;
 	
 	// VulkanFinal
 	struct VulkanFinal : public FunctionPass, InstVisitor<VulkanFinal> {
@@ -1041,102 +1158,104 @@ namespace {
 				}
 				lmem_vars.emplace_back(&GV);
 			}
+			if (lmem_vars.empty()) {
+				return;
+			}
 			
-			// enclose
-			if (!lmem_vars.empty()) {
-				// move all local memory variables into a single combined struct:
-				std::vector<combined_st_entry_t> combined_st;
-				uint64_t total_size = 0u;
-				// -> gather all
-				for (auto& GV : lmem_vars) {
-					const auto value_size = M->getDataLayout().getTypeStoreSize(GV->getValueType()).getFixedValue();
-					const auto elemental_type_size = M->getDataLayout().getTypeStoreSize(libfloor_utils::get_elemental_type(GV->getValueType())).getFixedValue();
-					combined_st.emplace_back(GV->getValueType(), GV, value_size, elemental_type_size);
-				}
-				// -> sort from largest to smallest
-				std::stable_sort(combined_st.begin(), combined_st.end(), [](const combined_st_entry_t& lhs, const combined_st_entry_t& rhs) {
-					return lhs.value_size > rhs.value_size;
-				});
-				// -> add padding
-				for (auto field_iter = combined_st.begin(); field_iter != combined_st.end(); ) {
-					const auto& field = *field_iter;
-					total_size += field.value_size;
-					++field_iter;
-					
-					if (auto cur_alignment = total_size % field.elemental_size; cur_alignment != 0u) {
-						// need to add padding
-						auto padding = field.elemental_size - cur_alignment;
-						total_size += padding;
-						// if the padding is small enough, just add small types
-						if (padding < 4) {
-							if (padding == 3) {
-								field_iter = combined_st.insert(field_iter, combined_st_entry_t { llvm::Type::getInt8Ty(*ctx), nullptr, 1u, 1u });
-								++field_iter;
-								field_iter = combined_st.insert(field_iter, combined_st_entry_t { llvm::Type::getInt16Ty(*ctx), nullptr, 2u, 2u });
-								++field_iter;
-							} else if (padding == 2) {
-								field_iter = combined_st.insert(field_iter, combined_st_entry_t { llvm::Type::getInt16Ty(*ctx), nullptr, 2u, 2u });
-								++field_iter;
-							} else {
-								assert(padding == 1);
-								field_iter = combined_st.insert(field_iter, combined_st_entry_t { llvm::Type::getInt8Ty(*ctx), nullptr, 1u, 1u });
-								++field_iter;
-							}
+			// -> enclose
+			
+			// move all local memory variables into a single combined struct:
+			std::vector<combined_st_entry_t> combined_st;
+			uint64_t total_size = 0u;
+			// -> gather all
+			for (auto& GV : lmem_vars) {
+				const auto value_size = M->getDataLayout().getTypeStoreSize(GV->getValueType()).getFixedValue();
+				const auto elemental_type_size = M->getDataLayout().getTypeStoreSize(libfloor_utils::get_elemental_type(GV->getValueType())).getFixedValue();
+				combined_st.emplace_back(GV->getValueType(), GV, value_size, elemental_type_size);
+			}
+			// -> sort from largest to smallest
+			std::stable_sort(combined_st.begin(), combined_st.end(), [](const combined_st_entry_t& lhs, const combined_st_entry_t& rhs) {
+				return lhs.value_size > rhs.value_size;
+			});
+			// -> add padding
+			for (auto field_iter = combined_st.begin(); field_iter != combined_st.end(); ) {
+				const auto& field = *field_iter;
+				total_size += field.value_size;
+				++field_iter;
+				
+				if (auto cur_alignment = total_size % field.elemental_size; cur_alignment != 0u) {
+					// need to add padding
+					auto padding = field.elemental_size - cur_alignment;
+					total_size += padding;
+					// if the padding is small enough, just add small types
+					if (padding < 4) {
+						if (padding == 3) {
+							field_iter = combined_st.insert(field_iter, combined_st_entry_t { llvm::Type::getInt8Ty(*ctx), nullptr, 1u, 1u });
+							++field_iter;
+							field_iter = combined_st.insert(field_iter, combined_st_entry_t { llvm::Type::getInt16Ty(*ctx), nullptr, 2u, 2u });
+							++field_iter;
+						} else if (padding == 2) {
+							field_iter = combined_st.insert(field_iter, combined_st_entry_t { llvm::Type::getInt16Ty(*ctx), nullptr, 2u, 2u });
+							++field_iter;
 						} else {
-							// otherwise: add an array
-							const auto pad_array_type = llvm::ArrayType::get(llvm::Type::getInt8Ty(*ctx), padding);
-							const auto value_size = M->getDataLayout().getTypeStoreSize(pad_array_type).getFixedValue();
-							assert(value_size == padding);
-							field_iter = combined_st.insert(field_iter, combined_st_entry_t { pad_array_type, nullptr, value_size, 1u });
+							assert(padding == 1);
+							field_iter = combined_st.insert(field_iter, combined_st_entry_t { llvm::Type::getInt8Ty(*ctx), nullptr, 1u, 1u });
 							++field_iter;
 						}
+					} else {
+						// otherwise: add an array
+						const auto pad_array_type = llvm::ArrayType::get(llvm::Type::getInt8Ty(*ctx), padding);
+						const auto value_size = M->getDataLayout().getTypeStoreSize(pad_array_type).getFixedValue();
+						assert(value_size == padding);
+						field_iter = combined_st.insert(field_iter, combined_st_entry_t { pad_array_type, nullptr, value_size, 1u });
+						++field_iter;
 					}
 				}
-				assert(total_size > 0u);
-				
-				std::vector<llvm::Type*> combined_elem_types;
-				combined_elem_types.reserve(combined_st.size());
-				for (const auto& field : combined_st) {
-					combined_elem_types.emplace_back(field.type);
-				}
-				
-				const auto combined_name = "wg.enclose." + func->getName().str();
-				auto combined_st_type = llvm::StructType::create(*ctx, combined_elem_types, combined_name + ".struct");
-				GlobalVariable* combined_st_gv = new GlobalVariable(*M, combined_st_type, false, GlobalValue::InternalLinkage,
-																	nullptr, combined_name, lmem_vars[0] /* insert before first original GV */,
-																	GlobalValue::NotThreadLocal, SPIRAS_Local, false);
-				
-				// adjust all instructions accordingly
-				enclose_in_struct(std::move(combined_st), std::move(combined_elem_types), *combined_st_gv, combined_st_type, *func,
-								  SPIRAS_Local /* no change */, false /* already prefixed */);
-				
-				// add dummy initializer
-				combined_st_gv->setInitializer(UndefValue::get(combined_st_gv->getValueType()));
-				
-				// add aliased types
-				const auto add_lmem_alias = [this, &total_size, &lmem_vars](llvm::Type* base_type, const std::string& base_type_name) {
-					const auto arr_elem_size = M->getDataLayout().getTypeStoreSize(base_type).getFixedValue();
-					const auto arr_type = ArrayType::get(base_type, total_size / arr_elem_size);
-					const auto st_arr_name = "wg.alias." + func->getName().str() + "." + base_type_name;
-					const auto st_arr_type = llvm::StructType::create(*ctx, arr_type, st_arr_name + ".struct");
-					GlobalVariable* alias_arr_gv = new GlobalVariable(*M, st_arr_type, false, GlobalValue::InternalLinkage,
-																	  nullptr, st_arr_name, lmem_vars[0] /* insert before first original GV */,
-																	  GlobalValue::NotThreadLocal, SPIRAS_Local, false);
-					alias_arr_gv->setAlignment(MaybeAlign { arr_elem_size });
-					alias_arr_gv->setInitializer(UndefValue::get(alias_arr_gv->getValueType()));
-				};
-				add_lmem_alias(llvm::Type::getInt8Ty(*ctx), "i8");
-				if (total_size >= 2) {
-					add_lmem_alias(llvm::Type::getInt16Ty(*ctx), "i16");
-					// TODO: check float16 support?
-				}
-				if (total_size >= 4) {
-					add_lmem_alias(llvm::Type::getInt32Ty(*ctx), "i32");
-					add_lmem_alias(llvm::Type::getFloatTy(*ctx), "f32");
-				}
-				
-				// TODO: replace work-group/local pointer bitcasts with accesses into aliased memory (fix broken optimizations, maybe functional float atomic workaround?)
 			}
+			assert(total_size > 0u);
+			
+			std::vector<llvm::Type*> combined_elem_types;
+			combined_elem_types.reserve(combined_st.size());
+			for (const auto& field : combined_st) {
+				combined_elem_types.emplace_back(field.type);
+			}
+			
+			const auto combined_name = "wg.enclose." + func->getName().str();
+			auto combined_st_type = llvm::StructType::create(*ctx, combined_elem_types, combined_name + ".struct");
+			GlobalVariable* combined_st_gv = new GlobalVariable(*M, combined_st_type, false, GlobalValue::InternalLinkage,
+																nullptr, combined_name, lmem_vars[0] /* insert before first original GV */,
+																GlobalValue::NotThreadLocal, SPIRAS_Local, false);
+			
+			// adjust all instructions accordingly
+			enclose_in_struct(std::move(combined_st), std::move(combined_elem_types), *combined_st_gv, combined_st_type, *func,
+							  SPIRAS_Local /* no change */, false /* already prefixed */);
+			
+			// add dummy initializer
+			combined_st_gv->setInitializer(UndefValue::get(combined_st_gv->getValueType()));
+			
+			// add aliased types
+			const auto add_lmem_alias = [this, &total_size, &lmem_vars](llvm::Type* base_type, const std::string& base_type_name) {
+				const auto arr_elem_size = M->getDataLayout().getTypeStoreSize(base_type).getFixedValue();
+				const auto arr_type = ArrayType::get(base_type, total_size / arr_elem_size);
+				const auto st_arr_name = "wg.alias." + func->getName().str() + "." + base_type_name;
+				const auto st_arr_type = llvm::StructType::create(*ctx, arr_type, st_arr_name + ".struct");
+				GlobalVariable* alias_arr_gv = new GlobalVariable(*M, st_arr_type, false, GlobalValue::InternalLinkage,
+																  nullptr, st_arr_name, lmem_vars[0] /* insert before first original GV */,
+																  GlobalValue::NotThreadLocal, SPIRAS_Local, false);
+				alias_arr_gv->setAlignment(MaybeAlign { arr_elem_size });
+				alias_arr_gv->setInitializer(UndefValue::get(alias_arr_gv->getValueType()));
+			};
+			add_lmem_alias(llvm::Type::getInt8Ty(*ctx), "i8");
+			if (total_size >= 2) {
+				add_lmem_alias(llvm::Type::getInt16Ty(*ctx), "i16");
+				// TODO: check float16 support?
+			}
+			if (total_size >= 4) {
+				add_lmem_alias(llvm::Type::getInt32Ty(*ctx), "i32");
+				add_lmem_alias(llvm::Type::getFloatTy(*ctx), "f32");
+			}
+			
+			// TODO: replace work-group/local pointer bitcasts with accesses into aliased memory (fix broken optimizations, maybe functional float atomic workaround?)
 		}
 		
 		//! vals + elem_types: all values being enclosed in the struct + their resp. element types
@@ -1485,7 +1604,7 @@ namespace {
 		}
 		
 		void visitAllocaInst(AllocaInst &AI) {
-			// TODO: no pointers to pointers in vulkan
+			vulkan_function_scope_type_replacement::handle_function_scope_variable(&AI, func);
 		}
 		
 		void visitReturnInst(ReturnInst &RI) {
@@ -3055,9 +3174,9 @@ namespace {
 			
 			// kill all functions named floor.builtin.* (we still need other floor.* functions)
 			bool module_modified = false;
-			for(auto func_iter = Mod.begin(); func_iter != Mod.end();) {
+			for (auto func_iter = Mod.begin(); func_iter != Mod.end();) {
 				auto& func = *func_iter;
-				if(func.getName().startswith("floor.builtin.")) {
+				if (func.getName().startswith("floor.builtin.")) {
 					if(func.getNumUses() != 0) {
 						errs() << func.getName() << " should not have any uses at this point!\n";
 					}
@@ -3068,6 +3187,15 @@ namespace {
 				}
 				++func_iter;
 			}
+			
+			// perform function scope type replacement for GVs with constant AS (later Function storage)
+			for (auto& GV : Mod.globals()) {
+				if (GV.getType()->getPointerAddressSpace() != SPIRAS_Constant) {
+					continue;
+				}
+				module_modified |= vulkan_function_scope_type_replacement::handle_function_scope_variable(&GV);
+			}
+			
 			return module_modified;
 		}
 		

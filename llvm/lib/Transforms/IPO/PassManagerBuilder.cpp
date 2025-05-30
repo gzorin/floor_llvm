@@ -133,7 +133,7 @@ cl::opt<int> PreInlineThreshold(
              "(default = 75)"));
 
 cl::opt<bool>
-    EnableGVNHoist("enable-gvn-hoist", cl::init(false), cl::ZeroOrMore,
+    EnableGVNHoist("enable-gvn-hoist", cl::init(true), cl::ZeroOrMore,
                    cl::desc("Enable the GVN hoisting pass (default = off)"));
 
 static cl::opt<bool>
