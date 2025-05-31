@@ -781,20 +781,22 @@ namespace {
 
 			// query/get function base
 			const auto query_image = [&](const std::string& query_name) {
+				const auto is_spatial = (query_name != "array_size");
+				
 				SmallVector<llvm::Type*, 2> func_arg_types;
 				SmallVector<llvm::Value*, 2> func_args;
 				func_arg_types.push_back(img_handle_arg->getType());
 				func_args.push_back(img_handle_arg);
-				if (is_tex) {
+				if (is_tex && is_spatial) {
 					func_arg_types.push_back(lod_arg->getType());
 					func_args.push_back(lod_arg);
 				}
 				
 				// -> build asm call
-				std::string asm_str = (is_tex ? "txq.level." : "suq.") + query_name + ".b32 ";
+				std::string asm_str = (is_tex ? (is_spatial ? "txq.level." : "txq.") : "suq.") + query_name + ".b32 ";
 				std::string constraints_str = "=r,l";
 				asm_str += "$0, [$1]";
-				if (is_tex) {
+				if (is_tex && is_spatial) {
 					asm_str += ", $2";
 					constraints_str += ",r";
 				}
