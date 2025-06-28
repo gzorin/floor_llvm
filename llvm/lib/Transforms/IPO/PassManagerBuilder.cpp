@@ -133,7 +133,7 @@ cl::opt<int> PreInlineThreshold(
              "(default = 75)"));
 
 cl::opt<bool>
-    EnableGVNHoist("enable-gvn-hoist", cl::init(false), cl::ZeroOrMore,
+    EnableGVNHoist("enable-gvn-hoist", cl::init(true), cl::ZeroOrMore,
                    cl::desc("Enable the GVN hoisting pass (default = off)"));
 
 static cl::opt<bool>
@@ -819,6 +819,12 @@ void PassManagerBuilder::populateModulePassManager(
   if (AttributorRun & AttributorRunOption::MODULE)
     MPM.add(createAttributorLegacyPass());
 
+  if (EnableVulkanPasses) {
+    // fix/clone functions that are called with Vulkan argument buffer arguments
+    // NOTE: this needs to be done prior to any function argument optimizations
+    MPM.add(createVulkanEarlyArgBufferFunctionClonePass());
+  }
+
   addExtensionsToPM(EP_ModuleOptimizerEarly, MPM);
 
   if (OptLevel > 2)
@@ -1109,7 +1115,20 @@ void PassManagerBuilder::populateModulePassManager(
     MPM.add(createVulkanBuiltinParamHandlingPass());
 
     // "pre-final" vulkanization (prior to cfg structurization)
+    // NOTE: we perform some loop+vector passes after this to clean up lowered memcpy's
     MPM.add(createVulkanPreFinalPass());
+    MPM.add(createSimpleLoopUnrollPass(OptLevel, DisableUnrollLoops, ForgetAllSCEVInLoopUnroll));
+    MPM.add(createLoopDistributePass());
+    addVectorPasses(MPM, /* IsFullLTO */ false);
+    addVectorPasses(MPM, true);
+    MPM.add(createVulkanPreFinalPass()); // yes, run again
+
+    // try to fix invalid pointer bitcasts (must be done after memcpy lowering)
+    MPM.add(createVulkanPreFinalPointerBCFixupPass());
+
+    // run attribute inference again so that we can safely assume which arguments are read-only/write-only/read-write
+    MPM.add(createInferFunctionAttrsLegacyPass());
+    MPM.add(createAttributorLegacyPass());
 
     // Vulkan requires structured control flow:
     // -> hit it with LLVM passes/fixes first
@@ -1129,6 +1148,7 @@ void PassManagerBuilder::populateModulePassManager(
     MPM.add(createVulkanFinalModuleCleanupPass());
   }
   if (EnableMetalPasses) {
+    MPM.add(createFMACombinerPass());
     MPM.add(createMetalFinalPass(EnableMetalIntelWorkarounds));
     MPM.add(createMetalFinalModuleCleanupPass());
   }

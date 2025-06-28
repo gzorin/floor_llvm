@@ -1,7 +1,7 @@
 //==- AddressSpaceFix.cpp - OpenCL/Metal/Vulkan and related addrspace fixes -=//
 //
 //  Flo's Open libRary (floor)
-//  Copyright (C) 2004 - 2024 Florian Ziesche
+//  Copyright (C) 2004 - 2025 Florian Ziesche
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -34,14 +34,25 @@
 #define LLVM_TRANSFORMS_LIBFLOOR_ADDRESSSPACEFIX_H
 
 namespace llvm {
-	//! fixes the address space of all users of the specified instruction
-	//! NOTE: call instructions will *not* be fixed by this (there should be no functions/calls when calling this)
-	void fix_instruction_users(LLVMContext &ctx,
-	                           Instruction &instr,
-	                           Value &parent,
-	                           const uint32_t address_space,
-	                           const bool fix_inner_ptr,
-	                           std::vector<ReturnInst *> &returns);
+//! fixes the address space of all users of the specified instruction
+//! NOTE: call instructions will *not* be fixed by this (there should be no functions/calls when calling this)
+void fix_instruction_users(LLVMContext &ctx,
+						   Instruction &instr,
+						   Value &parent,
+						   const uint32_t address_space,
+						   const bool fix_inner_ptr,
+						   std::vector<ReturnInst *> &returns);
+
+//! same as fix_instruction_users(), but also fixes functions/calls,
+//! returns true if any call instructions were modified
+//! NOTE: this requires that LegacyPMBasicAAResult + LegacyPMAAResults can be created from the pass!
+bool fix_instruction_users_with_calls(Pass& pass,
+									  LLVMContext &ctx,
+									  Instruction &instr,
+									  Value &parent,
+									  const uint32_t address_space,
+									  const bool fix_inner_ptr,
+									  std::vector<ReturnInst *> &returns);
 } // namespace llvm
 
 #endif // LLVM_TRANSFORMS_LIBFLOOR_ADDRESSSPACEFIX_H

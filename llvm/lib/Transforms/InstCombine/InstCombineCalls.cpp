@@ -71,6 +71,7 @@
 #include "llvm/Transforms/Utils/AssumeBundleBuilder.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/SimplifyLibCalls.h"
+#include "llvm/Transforms/LibFloor/FloorUtils.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -160,6 +161,28 @@ Instruction *InstCombinerImpl::SimplifyAnyMemTransfer(AnyMemTransferInst *MI) {
     cast<PointerType>(MI->getArgOperand(1)->getType())->getAddressSpace();
   unsigned DstAddrSp =
     cast<PointerType>(MI->getArgOperand(0)->getType())->getAddressSpace();
+
+  if (isVulkan) {
+    // Vulkan: outright do not perform any of these memcpy -> bitcast/load
+    // replacements when one pointer is in a non-zero address space,
+    // this would lead to bitcasts that are not supported by Vulkan/SPIR-V and
+    // various strange/unnecessary instruction sequences ...
+    // -> rather perform loads/stores using the actual underlying types
+    if (SrcAddrSp != 0 || DstAddrSp != 0) {
+      return nullptr;
+    }
+
+    // when both are in function memory, we still need to be careful here
+    // -> don't allow this, when either underlying type is a struct
+    auto src_op = libfloor_utils::get_underlying_bitcast_operand_or_null(MI->getArgOperand(1));
+    if (src_op && src_op->getType()->getPointerElementType()->isStructTy()) {
+      return nullptr;
+    }
+    auto dst_op = libfloor_utils::get_underlying_bitcast_operand_or_null(MI->getArgOperand(0));
+    if (dst_op && dst_op->getType()->getPointerElementType()->isStructTy()) {
+      return nullptr;
+    }
+  }
 
   IntegerType* IntType = IntegerType::get(MI->getContext(), Size<<3);
   Type *NewSrcPtrTy = PointerType::get(IntType, SrcAddrSp);

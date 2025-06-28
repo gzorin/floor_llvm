@@ -1,7 +1,7 @@
 //===- VulkanFinal.cpp - Vulkan final pass --------------------------------===//
 //
 //  Flo's Open libRary (floor)
-//  Copyright (C) 2004 - 2024 Florian Ziesche
+//  Copyright (C) 2004 - 2025 Florian Ziesche
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -78,6 +78,7 @@
 #include <unordered_set>
 #include <deque>
 #include <array>
+#include <optional>
 using namespace llvm;
 
 #define DEBUG_TYPE "VulkanFinal"
@@ -91,6 +92,7 @@ using namespace llvm;
 namespace {
 	// -> SPIRVInternal.h (can't include, b/c it's not in a proper path)
 	static const uint32_t SPIRAS_Constant = 2;
+	static const uint32_t SPIRAS_Local = 3;
 	static const uint32_t SPIRAS_Uniform = 5;
 	//static const uint32_t SPIRAS_Input = 6;
 	static const uint32_t SPIRAS_Output = 7;
@@ -116,6 +118,13 @@ namespace {
 		
 		struct per_function_state_t {
 			uint32_t kernel_dim { 1 };
+			uint32_t kernel_simd_width { 0 };
+			uint32_t kernel_local_size[3] { 0, 0, 0 };
+			bool has_fixed_local_size() const {
+				return (kernel_local_size[0] != 0 &&
+						kernel_local_size[1] != 0 &&
+						kernel_local_size[2] != 0);
+			}
 			
 			// added kernel function args
 			Argument* group_id { nullptr };
@@ -131,7 +140,9 @@ namespace {
 			
 			// added vertex function args
 			Argument* vertex_id { nullptr };
+			Argument* base_vertex_id { nullptr };
 			Argument* instance_id { nullptr };
+			Argument* base_instance_id { nullptr };
 			
 			// added fragment function args
 			Argument* point_coord { nullptr };
@@ -184,9 +195,11 @@ namespace {
 		};
 		
 		enum VULKAN_VERTEX_ARG_REV_IDX : int32_t {
-			VULKAN_VERTEX_ID = -3,
-			VULKAN_VERTEX_VIEW_INDEX = -2,
-			VULKAN_INSTANCE_ID = -1,
+			VULKAN_VERTEX_ID = -5,
+			VULKAN_BASE_VERTEX_ID = -4,
+			VULKAN_VERTEX_VIEW_INDEX = -3,
+			VULKAN_INSTANCE_ID = -2,
+			VULKAN_BASE_INSTANCE_ID = -1,
 			
 			VULKAN_VERTEX_ARG_COUNT = 3,
 		};
@@ -238,13 +251,13 @@ namespace {
 			
 			// check for optional features: soft-printf, primitive id, barycentric coord
 			bool has_soft_printf = false, has_primitive_id = false, has_barycentric_coord = false;
-			if (auto soft_printf_meta = M->getNamedMetadata("floor.soft_printf")) {
+			if (auto soft_printf_meta = M->getNamedMetadata("floor.soft_printf"); soft_printf_meta) {
 				has_soft_printf = true;
 			}
-			if (auto primitive_id_meta = M->getNamedMetadata("floor.primitive_id")) {
+			if (auto primitive_id_meta = M->getNamedMetadata("floor.primitive_id"); primitive_id_meta) {
 				has_primitive_id = true;
 			}
-			if (auto barycentric_coord_meta = M->getNamedMetadata("floor.barycentric_coord")) {
+			if (auto barycentric_coord_meta = M->getNamedMetadata("floor.barycentric_coord"); barycentric_coord_meta) {
 				has_barycentric_coord = true;
 			}
 			
@@ -258,6 +271,23 @@ namespace {
 					state.kernel_dim = (uint32_t)mdconst::extract<ConstantInt>(op)->getZExtValue();
 					assert((is_kernel_func && state.kernel_dim >= 1 && state.kernel_dim <= 3) ||
 						   (is_tess_control_func && state.kernel_dim == 1));
+				}
+				
+				if (is_kernel_func) {
+					auto kernel_simd_width_node = F.getMetadata("kernel_simd_width");
+					if (kernel_simd_width_node && kernel_simd_width_node->getNumOperands() == 1) {
+						auto& op = kernel_simd_width_node->getOperand(0);
+						state.kernel_simd_width = (uint32_t)mdconst::extract<ConstantInt>(op)->getZExtValue();
+						assert(state.kernel_simd_width >= 1 && state.kernel_simd_width <= 128);
+					}
+					
+					MDNode* wg_size_node = func->getMetadata("reqd_work_group_size");
+					if (wg_size_node && wg_size_node->getNumOperands() == 3) {
+						state.kernel_local_size[0] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(0))->getZExtValue();
+						state.kernel_local_size[1] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(1))->getZExtValue();
+						state.kernel_local_size[2] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(2))->getZExtValue();
+						assert(state.kernel_local_size[0] > 0 && state.kernel_local_size[1] > 0 && state.kernel_local_size[2] > 0);
+					}
 				}
 				
 				if (F.arg_size() >= VULKAN_KERNEL_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
@@ -280,8 +310,10 @@ namespace {
 				if (F.arg_size() >= VULKAN_VERTEX_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
 					// TODO: this should be optional / only happen on request
 					state.vertex_id = get_arg_by_idx(VULKAN_VERTEX_ID);
+					state.base_vertex_id = get_arg_by_idx(VULKAN_BASE_VERTEX_ID);
 					state.view_index = get_arg_by_idx(VULKAN_VERTEX_VIEW_INDEX);
 					state.instance_id = get_arg_by_idx(VULKAN_INSTANCE_ID);
+					state.base_instance_id = get_arg_by_idx(VULKAN_BASE_INSTANCE_ID);
 					if (has_soft_printf) {
 						state.soft_printf = get_arg_by_idx(-(VULKAN_VERTEX_ARG_COUNT + 1));
 					}
@@ -434,10 +466,27 @@ namespace {
 						id = state.sub_group_local_id;
 						break;
 					case id::sub_group_size:
+						// use fixed SIMD width if available
+						if (state.kernel_simd_width > 0) {
+							return ConstantInt::get(Type::getInt32Ty(*ctx), state.kernel_simd_width);
+						}
 						ld = &state.ld_sub_group_size;
 						id = state.sub_group_size;
 						break;
 					case id::num_sub_groups:
+						// if both the SIMD width and the local size are fixed, we also have a fixed #sub-groups,
+						// because the local size extent must be a multiple of the SIMD width
+						if (state.kernel_simd_width > 0 && state.has_fixed_local_size()) {
+							uint32_t local_size_extent = state.kernel_local_size[0];
+							if (state.kernel_dim > 1) {
+								local_size_extent *= state.kernel_local_size[1];
+							}
+							if (state.kernel_dim > 2) {
+								local_size_extent *= state.kernel_local_size[2];
+							}
+							assert((local_size_extent % state.kernel_simd_width) == 0u);
+							return ConstantInt::get(Type::getInt32Ty(*ctx), local_size_extent / state.kernel_simd_width);
+						}
 						ld = &state.ld_num_sub_groups;
 						id = state.num_sub_groups;
 						break;
@@ -451,9 +500,8 @@ namespace {
 				if (!state.ld_local_size[dim_idx]) {
 					// this doesn't have a direct built-in equivalent, but must be loaded from the WorkgroupSize run-time constant
 					// however: if a fixed work-group size is set, we can use a constant
-					if (MDNode* wg_size_node = func->getMetadata("reqd_work_group_size");
-						wg_size_node && wg_size_node->getNumOperands() == 3) {
-						state.ld_local_size[dim_idx] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(dim_idx));
+					if (state.has_fixed_local_size()) {
+						state.ld_local_size[dim_idx] = ConstantInt::get(Type::getInt32Ty(*ctx), state.kernel_local_size[dim_idx]);
 					} else {
 						assert(state.local_size);
 						state.ld_local_size[dim_idx] = builder->CreateExtractElement(builder->CreateLoad(state.local_size->getType()->getPointerElementType(), state.local_size), dim_idx,
@@ -472,7 +520,7 @@ namespace {
 				if (!state.ld_local_id[dim_idx]) {
 					// since sub-group functionality is always enabled, we can no longer make use of LocalInvocationId, because:
 					// Vulkan (1.3 spec): 15.9. Built-In Variables: "There is no direct relationship between SubgroupLocalInvocationId and LocalInvocationId"
-					// we do however need to guarantee a direct relationshop -> need to compute the local id from the sub-group IDs/sizes
+					// we do however need to guarantee a direct relationship -> need to compute the local id from the sub-group IDs/sizes
 					auto sglid = get_id<id::sub_group_local_id>(0);
 					auto sgid = get_id<id::sub_group_id>(0);
 					auto sgsize = get_id<id::sub_group_size>(0);
@@ -674,12 +722,24 @@ namespace {
 					return;
 				}
 				I.replaceAllUsesWith(builder->CreateLoad(state.vertex_id->getType()->getPointerElementType(), state.vertex_id, "vertex_index"));
+			} else if (func_name == "floor.builtin.base_vertex_id.i32") {
+				if(state.base_vertex_id == nullptr) {
+					DBG(printf("failed to get base_vertex_id arg, probably not in a vertex function?\n"); fflush(stdout);)
+					return;
+				}
+				I.replaceAllUsesWith(builder->CreateLoad(state.base_vertex_id->getType()->getPointerElementType(), state.vertex_id, "base_vertex_index"));
 			} else if (func_name == "floor.builtin.instance_id.i32") {
 				if(state.instance_id == nullptr) {
 					DBG(printf("failed to get instance_id arg, probably not in a vertex function?\n"); fflush(stdout);)
 					return;
 				}
 				I.replaceAllUsesWith(builder->CreateLoad(state.instance_id->getType()->getPointerElementType(), state.instance_id, "instance_index"));
+			} else if (func_name == "floor.builtin.base_instance_id.i32") {
+				if(state.base_instance_id == nullptr) {
+					DBG(printf("failed to get base_instance_id arg, probably not in a vertex function?\n"); fflush(stdout);)
+					return;
+				}
+				I.replaceAllUsesWith(builder->CreateLoad(state.base_instance_id->getType()->getPointerElementType(), state.base_instance_id, "base_instance_index"));
 			} else if (func_name == "floor.builtin.point_coord.float2") {
 				if(state.point_coord == nullptr) {
 					DBG(printf("failed to get point_coord arg, probably not in a fragment function?\n"); fflush(stdout);)
@@ -721,6 +781,123 @@ namespace {
 			state.kill_list.emplace_back(&I);
 		}
 	};
+
+	struct vulkan_function_scope_type_replacement {
+		// we must reuse cloned types here
+		static std::unordered_map<Type*, Type*> clone_type_map;
+		
+		static StructType* clone_logical_type(StructType* st_type) {
+			SmallVector<Type*, 8> field_types;
+			for (uint32_t i = 0, count = st_type->getStructNumElements(); i < count; ++i) {
+				auto field_type = st_type->getStructElementType(i);
+				// recurse?
+				if (auto clone_type_iter = clone_type_map.find(field_type); clone_type_iter != clone_type_map.end()) {
+					field_type = clone_type_iter->second;
+				} else if (auto field_st_type = dyn_cast_or_null<StructType>(field_type); field_st_type) {
+					field_type = clone_logical_type(field_st_type);
+					clone_type_map.emplace(field_st_type, field_type);
+				} else if (auto field_arr_type = dyn_cast_or_null<ArrayType>(field_type); field_arr_type) {
+					field_type = clone_logical_type(field_arr_type);
+					clone_type_map.emplace(field_arr_type, field_type);
+				}
+				field_types.emplace_back(field_type);
+			}
+			return StructType::create(field_types, st_type->getName().str() + ".clone", st_type->isPacked());
+		}
+		
+		static ArrayType* clone_logical_type(ArrayType* arr_type) {
+			auto elem_type = arr_type->getElementType();
+			// recurse?
+			if (auto clone_type_iter = clone_type_map.find(elem_type); clone_type_iter != clone_type_map.end()) {
+				elem_type = clone_type_iter->second;
+			} else if (auto elem_st_type = dyn_cast_or_null<StructType>(elem_type); elem_st_type) {
+				elem_type = clone_logical_type(elem_st_type);
+				clone_type_map.emplace(elem_st_type, elem_type);
+			} else if (auto elem_arr_type = dyn_cast_or_null<ArrayType>(elem_type); elem_arr_type) {
+				elem_type = clone_logical_type(elem_arr_type);
+				clone_type_map.emplace(elem_arr_type, elem_type);
+			}
+			// else: nop
+			
+			return ArrayType::get(elem_type, arr_type->getNumElements());
+		}
+		
+		static void update_initializer(Constant* init, Type* new_type) {
+			init->mutateType(new_type);
+			
+			// recurse?
+			if (auto const_st = dyn_cast_or_null<ConstantStruct>(init); const_st) {
+				auto st_type = dyn_cast_or_null<StructType>(new_type);
+				assert(st_type);
+				for (auto field_idx = 0u, field_count = const_st->getNumOperands(); field_idx < field_count; ++field_idx) {
+					update_initializer(const_st->getOperand(field_idx), st_type->getStructElementType(field_idx));
+				}
+			} else if (auto const_arr = dyn_cast_or_null<ConstantArray>(init); const_arr) {
+				auto arr_type = dyn_cast_or_null<ArrayType>(new_type);
+				assert(arr_type);
+				auto arr_elem_type = arr_type->getElementType();
+				for (auto elem_idx = 0u, elem_count = const_arr->getNumOperands(); elem_idx < elem_count; ++elem_idx) {
+					update_initializer(const_arr->getOperand(elem_idx), arr_elem_type);
+				}
+			}
+		}
+		
+		static bool handle_function_scope_variable(Value* val, Function* restrict_function = nullptr) {
+			// Vulkan SPIR-V requires structs/arrays in Function/Private scope to have a logical layout (i.e. no decorations),
+			// which means we're very likely to run into this issue when we have an alloca or constant GV of a struct or array
+			// -> clone and replace the type and hope for the best (this may break things ...)
+			
+			auto val_type = val->getType();
+			auto val_ptr_type = dyn_cast_or_null<PointerType>(val_type);
+			if (!val_ptr_type) {
+				return false;
+			}
+			auto elem_type = val_ptr_type->getPointerElementType();
+			
+			Type* cloned_type = nullptr;
+			if (auto clone_type_iter = clone_type_map.find(elem_type); clone_type_iter != clone_type_map.end()) {
+				cloned_type = clone_type_iter->second;
+			} else if (auto st_type = dyn_cast_or_null<StructType>(elem_type); st_type) {
+				cloned_type = clone_logical_type(st_type);
+				clone_type_map.emplace(elem_type, cloned_type);
+			} else if (auto arr_type = dyn_cast_or_null<ArrayType>(elem_type); arr_type) {
+				cloned_type = clone_logical_type(arr_type);
+				clone_type_map.emplace(elem_type, cloned_type);
+			}
+			
+			// exit if we don't need to do anything
+			if (!cloned_type) {
+				return false;
+			}
+			
+			// mutate
+			if (auto alloca = dyn_cast_or_null<AllocaInst>(val); alloca) {
+				alloca->setAllocatedType(cloned_type);
+			} else if (auto GVar = dyn_cast_or_null<GlobalVariable>(val); GVar) {
+				GVar->mutateValueType(cloned_type);
+				if (GVar->hasInitializer()) {
+					update_initializer(GVar->getInitializer(), cloned_type);
+				}
+			} else if (auto GV = dyn_cast_or_null<GlobalValue>(val); GV) {
+				GV->mutateValueType(cloned_type);
+			}
+			val->mutateType(PointerType::get(cloned_type, val_ptr_type->getAddressSpace()));
+			
+			// update users
+			// NOTE: this only runs on direct users, it does not recurse deeper, which may be necessary ...
+			libfloor_utils::for_all_instruction_users(*val, [&cloned_type, &elem_type](Instruction& instr) {
+				if (auto GEP = dyn_cast_or_null<GetElementPtrInst>(&instr); GEP) {
+					assert(GEP->getSourceElementType() == elem_type);
+					GEP->setSourceElementType(cloned_type);
+				} else {
+					llvm::errs() << "unhandled function scope replacement instruction:\n\t" << instr << "\n";
+				}
+			}, restrict_function /* restrict to the specified function (or none if nullptr) */);
+			
+			return true;
+		}
+	};
+	std::unordered_map<Type*, Type*> vulkan_function_scope_type_replacement::clone_type_map;
 	
 	// VulkanFinal
 	struct VulkanFinal : public FunctionPass, InstVisitor<VulkanFinal> {
@@ -794,6 +971,13 @@ namespace {
 			
 			return { version_major, version_minor };
 		}
+		
+		struct combined_st_entry_t {
+			llvm::Type* type;
+			llvm::Value* value;
+			size_t value_size;
+			size_t elemental_size;
+		};
 
 		bool runOnFunction(Function &F) override {
 			// exit if empty function
@@ -815,6 +999,10 @@ namespace {
 			builder = std::make_shared<llvm::IRBuilder<>>(*ctx);
 			
 			//const auto vulkan_version = get_vulkan_version(*M);
+			
+			// transform all ConstantExpr GEPs to normal GEPs,
+			// since we don't have this in Vulkan + require this to perform valid transforms later on
+			transform_constexpr_geps(F);
 			
 			// handle return value / output
 			DBG(errs() << "> handling return values ...\n";)
@@ -865,7 +1053,7 @@ namespace {
 				//  * change the return type to void (vs/fs returns have already been modified)
 				//  * transform constant AS pointers to either Uniform or StorageBuffer AS
 				//  * transform StorageBuffer AS image pointers to Uniform AS
-				//  * enclose non-struct Uniform parameters in a struct (note that enclosing SSBOs happens later)
+				//  * enclose Uniform parameters in a struct (note that enclosing SSBOs happens later)
 				//  * handle SSBO array transforms
 				// NOTE: must be called after visiting rets and other ret type/val users
 				std::vector<Type*> param_types;
@@ -884,23 +1072,24 @@ namespace {
 						// handle IUBs
 						const auto iub_attr = F.getAttributeAtIndex(llvm::AttributeList::FirstArgIndex + arg_idx, "vulkan_iub");
 						const auto is_iub = (iub_attr.getRawPointer() != nullptr);
+						assert((!is_iub || (is_iub && arg.onlyReadsMemory())) && "IUB must be read-only");
 						DBG(
 							if (is_iub) {
 								errs() << " (IUB)";
 							}
 						)
 						
-						// since there is a limit on how many IUBs we can have and how large they can be, some arguments might fall back to using SSBOs
-						const auto is_ssbo_uniform = (!is_iub && arg.onlyReadsMemory() &&
-													  (arg.hasAttribute(Attribute::Dereferenceable) ||
-													   arg.hasAttribute(Attribute::DereferenceableOrNull)));
-						
 						// handle SSBO arrays
 						const auto ssbo_array_attr = F.getAttributeAtIndex(llvm::AttributeList::FirstArgIndex + arg_idx, "vulkan_ssbo_array");
 						const auto is_ssbo_array = (ssbo_array_attr.getRawPointer() != nullptr);
 						assert(!(is_ssbo_array && is_iub) && "can't be both IUB and SSBO array");
-						assert(!(is_ssbo_array && is_ssbo_uniform) && "can't be both SSBO uniform and SSBO array");
 						assert((!is_ssbo_array || (is_ssbo_array && ptr_as == SPIRAS_StorageBuffer)) && "wrong SSBO array address space");
+						
+						// since there is a limit on how many IUBs we can have and how large they can be, some arguments might fall back to using SSBOs
+						// NOTE: DereferenceableOrNull is not considered as SSBO-uniform, because it likely (always?) means that the argument is a
+						//       "runtime array" of some sort, which must not be enclosed in a struct here, but will be dealt with in the SPIR-V backend
+						const auto is_ssbo_uniform = (!is_iub && !is_ssbo_array && arg.onlyReadsMemory() &&
+													  arg.hasAttribute(Attribute::Dereferenceable));
 						
 						// any image/opaque type is unsized
 						const auto is_sized = elem_type->isSized();
@@ -909,52 +1098,11 @@ namespace {
 						const auto storage_class = (is_iub || !is_sized ? SPIRAS_Uniform : SPIRAS_StorageBuffer);
 						
 						// transform storage class if necessary +
-						// for IUBs/SSBO-Uniform: enclose in struct if the element type is not a struct
-						if ((is_iub || is_ssbo_uniform) && !elem_type->isStructTy()) {
-							llvm::Type* st_elems[] { elem_type };
-							elem_type = llvm::StructType::create(*ctx, st_elems, "enclose." + arg.getName().str());
-							arg_type = elem_type->getPointerTo(storage_class);
-							arg.mutateType(arg_type);
-							
-							// replace users, should usually only have one load
-							llvm::Value* idx_list[] {
-								llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0),
-								llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0),
-							};
-							libfloor_utils::for_all_users(arg, [&arg, &idx_list](User& user) {
-								if (auto instr = dyn_cast<Instruction>(&user)) {
-									if (isa<LoadInst>(instr)) {
-										auto elem_gep = llvm::GetElementPtrInst::CreateInBounds(arg.getType()->getScalarType()->getPointerElementType(),
-																								&arg, idx_list, "", instr);
-										auto repl_instr = new LoadInst(elem_gep->getType()->getPointerElementType(), elem_gep, instr->getName(), false, instr);
-										repl_instr->setDebugLoc(instr->getDebugLoc());
-										instr->replaceAllUsesWith(repl_instr);
-										instr->eraseFromParent();
-									} else if (auto GEP = dyn_cast_or_null<GetElementPtrInst>(instr); GEP) {
-										// copy/create new GEP with "0" index at the front
-										SmallVector<Value*, 8> indices { idx_list[0] };
-										for (auto& idx : GEP->indices()) {
-											indices.emplace_back(idx);
-										}
-										auto pointee_type = GEP->getOperand(0)->getType()->getPointerElementType();
-										auto repl_instr = llvm::GetElementPtrInst::Create(pointee_type, &arg, indices, "", instr);
-										if (GEP->isInBounds()) {
-											repl_instr->setIsInBounds();
-										}
-										repl_instr->setDebugLoc(instr->getDebugLoc());
-										instr->replaceAllUsesWith(repl_instr, true /* allow address space change */);
-										instr->eraseFromParent();
-									} else {
-										DBG(errs() << "\nunhandled arg user: " << *instr << "\n";)
-										DBG(errs().flush();)
-										assert(false && "unhandled arg user");
-									}
-								} else {
-									DBG(errs() << "\narg user is not an instruction\n";)
-									DBG(errs().flush();)
-									assert(false && "arg user is not an instruction");
-								}
-							});
+						// for IUBs/SSBO-Uniform: enclose in unique struct type, because we later need to add a "Block" decoration on it,
+						//                        for which we need to have a unique LLVM type to not run into nested Block/BufferBlock issues
+						if (is_iub || is_ssbo_uniform) {
+							const auto value_size = M->getDataLayout().getTypeStoreSize(elem_type).getFixedValue();
+							arg_type = enclose_in_struct({ combined_st_entry_t { elem_type, &arg, value_size, value_size } }, { elem_type }, arg, nullptr, F, storage_class);
 						} else if (is_ssbo_array) {
 							// perform SSBO array transforms
 							arg_type = handle_ssbo_array_transforms(F, arg);
@@ -979,11 +1127,275 @@ namespace {
 				auto new_func_type = FunctionType::get(llvm::Type::getVoidTy(*ctx), param_types, false);
 				F.mutateType(PointerType::get(new_func_type, 0));
 				F.mutateFunctionType(new_func_type);
+				F.removeRetAttr(Attribute::NoUndef);
 			}
+			
+			// ensure all work-group/local memory variables are enclosed inside a unique struct + code is updated accordingly
+			DBG(errs() << "> updating work-group/local memory variables ...\n";)
+			enclose_work_group_memory();
 			
 			// always modified
 			DBG(errs() << "> " << F.getName() << " done\n";)
 			return true;
+		}
+		
+		void enclose_work_group_memory() {
+			// find all GVs / local memory variables used in this function
+			std::vector<llvm::GlobalVariable*> lmem_vars;
+			for (auto& GV : M->globals()) {
+				if (GV.getType()->getAddressSpace() != SPIRAS_Local) {
+					continue;
+				}
+				
+				// check if GV is used in this function
+				bool is_used = false;
+				libfloor_utils::for_all_instruction_users(GV, [&is_used](const Instruction&) {
+					// always true with restriction below
+					is_used = true;
+				}, func /* restrict to this function */);
+				if (!is_used) {
+					continue;
+				}
+				lmem_vars.emplace_back(&GV);
+			}
+			if (lmem_vars.empty()) {
+				return;
+			}
+			
+			// -> enclose
+			
+			// move all local memory variables into a single combined struct:
+			std::vector<combined_st_entry_t> combined_st;
+			uint64_t total_size = 0u;
+			// -> gather all
+			for (auto& GV : lmem_vars) {
+				const auto value_size = M->getDataLayout().getTypeStoreSize(GV->getValueType()).getFixedValue();
+				const auto elemental_type_size = M->getDataLayout().getTypeStoreSize(libfloor_utils::get_elemental_type(GV->getValueType())).getFixedValue();
+				combined_st.emplace_back(GV->getValueType(), GV, value_size, elemental_type_size);
+			}
+			// -> sort from largest to smallest
+			std::stable_sort(combined_st.begin(), combined_st.end(), [](const combined_st_entry_t& lhs, const combined_st_entry_t& rhs) {
+				return lhs.value_size > rhs.value_size;
+			});
+			// -> add padding
+			for (auto field_iter = combined_st.begin(); field_iter != combined_st.end(); ) {
+				const auto& field = *field_iter;
+				total_size += field.value_size;
+				++field_iter;
+				
+				if (auto cur_alignment = total_size % field.elemental_size; cur_alignment != 0u) {
+					// need to add padding
+					auto padding = field.elemental_size - cur_alignment;
+					total_size += padding;
+					// if the padding is small enough, just add small types
+					if (padding < 4) {
+						if (padding == 3) {
+							field_iter = combined_st.insert(field_iter, combined_st_entry_t { llvm::Type::getInt8Ty(*ctx), nullptr, 1u, 1u });
+							++field_iter;
+							field_iter = combined_st.insert(field_iter, combined_st_entry_t { llvm::Type::getInt16Ty(*ctx), nullptr, 2u, 2u });
+							++field_iter;
+						} else if (padding == 2) {
+							field_iter = combined_st.insert(field_iter, combined_st_entry_t { llvm::Type::getInt16Ty(*ctx), nullptr, 2u, 2u });
+							++field_iter;
+						} else {
+							assert(padding == 1);
+							field_iter = combined_st.insert(field_iter, combined_st_entry_t { llvm::Type::getInt8Ty(*ctx), nullptr, 1u, 1u });
+							++field_iter;
+						}
+					} else {
+						// otherwise: add an array
+						const auto pad_array_type = llvm::ArrayType::get(llvm::Type::getInt8Ty(*ctx), padding);
+						const auto value_size = M->getDataLayout().getTypeStoreSize(pad_array_type).getFixedValue();
+						assert(value_size == padding);
+						field_iter = combined_st.insert(field_iter, combined_st_entry_t { pad_array_type, nullptr, value_size, 1u });
+						++field_iter;
+					}
+				}
+			}
+			assert(total_size > 0u);
+			
+			std::vector<llvm::Type*> combined_elem_types;
+			combined_elem_types.reserve(combined_st.size());
+			for (const auto& field : combined_st) {
+				combined_elem_types.emplace_back(field.type);
+			}
+			
+			const auto combined_name = "wg.enclose." + func->getName().str();
+			auto combined_st_type = llvm::StructType::create(*ctx, combined_elem_types, combined_name + ".struct");
+			GlobalVariable* combined_st_gv = new GlobalVariable(*M, combined_st_type, false, GlobalValue::InternalLinkage,
+																nullptr, combined_name, lmem_vars[0] /* insert before first original GV */,
+																GlobalValue::NotThreadLocal, SPIRAS_Local, false);
+			
+			// adjust all instructions accordingly
+			enclose_in_struct(std::move(combined_st), std::move(combined_elem_types), *combined_st_gv, combined_st_type, *func,
+							  SPIRAS_Local /* no change */, false /* already prefixed */);
+			
+			// add dummy initializer
+			combined_st_gv->setInitializer(UndefValue::get(combined_st_gv->getValueType()));
+			
+			// add aliased types
+			const auto add_lmem_alias = [this, &total_size, &lmem_vars](llvm::Type* base_type, const std::string& base_type_name) {
+				const auto arr_elem_size = M->getDataLayout().getTypeStoreSize(base_type).getFixedValue();
+				const auto arr_type = ArrayType::get(base_type, total_size / arr_elem_size);
+				const auto st_arr_name = "wg.alias." + func->getName().str() + "." + base_type_name;
+				const auto st_arr_type = llvm::StructType::create(*ctx, arr_type, st_arr_name + ".struct");
+				GlobalVariable* alias_arr_gv = new GlobalVariable(*M, st_arr_type, false, GlobalValue::InternalLinkage,
+																  nullptr, st_arr_name, lmem_vars[0] /* insert before first original GV */,
+																  GlobalValue::NotThreadLocal, SPIRAS_Local, false);
+				alias_arr_gv->setAlignment(MaybeAlign { arr_elem_size });
+				alias_arr_gv->setInitializer(UndefValue::get(alias_arr_gv->getValueType()));
+			};
+			add_lmem_alias(llvm::Type::getInt8Ty(*ctx), "i8");
+			if (total_size >= 2) {
+				add_lmem_alias(llvm::Type::getInt16Ty(*ctx), "i16");
+				// TODO: check float16 support?
+			}
+			if (total_size >= 4) {
+				add_lmem_alias(llvm::Type::getInt32Ty(*ctx), "i32");
+				add_lmem_alias(llvm::Type::getFloatTy(*ctx), "f32");
+			}
+			
+			// TODO: replace work-group/local pointer bitcasts with accesses into aliased memory (fix broken optimizations, maybe functional float atomic workaround?)
+		}
+		
+		//! vals + elem_types: all values being enclosed in the struct + their resp. element types
+		//! root_st: new root variable (struct)
+		//! existing_enclosed_st_type: an enclosing struct type can also be created outside this function and used in here, rather than this function creating its own
+		llvm::Type* enclose_in_struct(std::vector<combined_st_entry_t> fields, std::vector<llvm::Type*> elem_types, llvm::Value& root_st,
+									  llvm::StructType* existing_enclosed_st_type,
+									  const llvm::Function& parent_function,
+									  const uint32_t storage_class,
+									  const bool add_enclose_name = true) {
+			assert(!fields.empty() && !elem_types.empty() && fields.size() == elem_types.size());
+			auto enclosed_type = (existing_enclosed_st_type ? existing_enclosed_st_type->getPointerTo(storage_class) : nullptr);
+			if (!enclosed_type) {
+				assert(fields.size() == 1);
+				std::string st_name = (add_enclose_name ? "enclose." : "");
+				if (!fields[0].value->getName().empty()) {
+					st_name += fields[0].value->getName().str() + ".";
+				} else {
+					st_name += (add_enclose_name ? "" : ".");
+				}
+				st_name += "st";
+				auto st_type = llvm::StructType::create(*ctx, elem_types, st_name);
+				enclosed_type = st_type->getPointerTo(storage_class);
+				fields[0].value->mutateType(enclosed_type);
+			}
+			
+			// replace users
+			for (uint32_t st_elem_idx = 0, st_elem_count = uint32_t(elem_types.size()); st_elem_idx < st_elem_count; ++st_elem_idx) {
+				if (!fields[st_elem_idx].value) {
+					// padding values are nullptr
+					continue;
+				}
+				llvm::Value* idx_list[] {
+					llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0),
+					llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), st_elem_idx),
+				};
+				auto& val = *fields[st_elem_idx].value;
+				libfloor_utils::for_all_users(val, [this, &root_st, &idx_list, &storage_class](User& user) {
+					if (auto instr = dyn_cast<Instruction>(&user); instr) {
+						if (auto load_instr = dyn_cast_or_null<LoadInst>(instr); load_instr) {
+							const auto cexpr_gep = dyn_cast_or_null<ConstantExpr>(load_instr->getOperand(0));
+							if (!cexpr_gep || cexpr_gep->getOpcode() != Instruction::GetElementPtr) {
+								auto elem_gep = llvm::GetElementPtrInst::CreateInBounds(root_st.getType()->getScalarType()->getPointerElementType(),
+																						&root_st, idx_list, "", instr);
+								auto repl_instr = new LoadInst(elem_gep->getType()->getPointerElementType(), elem_gep, instr->getName(),
+															   false, instr);
+								repl_instr->setDebugLoc(instr->getDebugLoc());
+								instr->replaceAllUsesWith(repl_instr);
+								instr->eraseFromParent();
+							}
+							// else: assume the constexpr GEP was already replaced
+						} else if (auto store_instr = dyn_cast_or_null<StoreInst>(instr); store_instr) {
+							const auto cexpr_gep = dyn_cast_or_null<ConstantExpr>(store_instr->getOperand(1));
+							if (!cexpr_gep || cexpr_gep->getOpcode() != Instruction::GetElementPtr) {
+								auto elem_gep = llvm::GetElementPtrInst::CreateInBounds(root_st.getType()->getScalarType()->getPointerElementType(),
+																						&root_st, idx_list, "", instr);
+								auto repl_instr = new StoreInst(store_instr->getOperand(0), elem_gep, store_instr->isVolatile(),
+																store_instr->getAlign(), store_instr->getOrdering(), store_instr->getSyncScopeID(),
+																instr);
+								repl_instr->setDebugLoc(instr->getDebugLoc());
+								instr->replaceAllUsesWith(repl_instr);
+								instr->eraseFromParent();
+							}
+							// else: assume the constexpr GEP was already replaced
+						} else if (auto GEP = dyn_cast_or_null<GetElementPtrInst>(instr); GEP) {
+							// copy/create new GEP with "0" index at the front
+							SmallVector<Value*, 8> indices;
+							if (storage_class == SPIRAS_Local) {
+								// for work-group/local memory: drop the first index of the GEP (which must be 0) and prefix GEP with two 0's
+								indices = { idx_list[0], idx_list[1] };
+								assert(isa<ConstantInt>(GEP->idx_begin()->get()));
+								assert(dyn_cast<ConstantInt>(GEP->idx_begin()->get())->isZero());
+								auto gep_idx_range = make_range(GEP->idx_begin() + 1, GEP->idx_end());
+								for (auto& idx : gep_idx_range) {
+									indices.emplace_back(idx);
+								}
+							} else {
+								indices = { idx_list[1] };
+								for (auto& idx : GEP->indices()) {
+									indices.emplace_back(idx);
+								}
+							}
+							auto pointee_type = root_st.getType()->getPointerElementType();
+							auto repl_instr = llvm::GetElementPtrInst::Create(pointee_type, &root_st, indices, "", instr);
+							if (GEP->isInBounds()) {
+								repl_instr->setIsInBounds();
+							}
+							repl_instr->setDebugLoc(instr->getDebugLoc());
+							instr->replaceAllUsesWith(repl_instr, true /* allow address space change */);
+							instr->eraseFromParent();
+							
+							// recursively fix address space in all instruction users
+							std::vector<ReturnInst*> returns; // returns to fix -> there shouldn't be any here
+							libfloor_utils::for_all_instruction_users(*repl_instr,
+																	  [this, &repl_instr, &storage_class, &returns](Instruction& instr) {
+								fix_instruction_users(*ctx, instr, *repl_instr, storage_class, false, returns);
+							});
+							assert(returns.empty() && "unexpected return type change");
+						} else if (auto BC = dyn_cast_or_null<BitCastInst>(instr); BC) {
+							auto dst_type = BC->getDestTy();
+							assert(dst_type->isPointerTy());
+							assert(dst_type->getPointerAddressSpace() != storage_class);
+							auto dst_elem_type = dst_type->getPointerElementType();
+							dst_type = dst_elem_type->getPointerTo(storage_class);
+							auto src = BC->User::getOperand(0);
+							auto repl_instr = new BitCastInst(src, dst_type, "", instr);
+							repl_instr->setDebugLoc(instr->getDebugLoc());
+							instr->replaceAllUsesWith(repl_instr, true /* allow address space change */);
+							instr->eraseFromParent();
+						} else {
+							DBG(errs() << "\nunhandled val user: " << *instr << "\n";)
+							DBG(errs().flush();)
+							assert(false && "unhandled val user");
+						}
+					} else if (auto cnst = dyn_cast_or_null<Constant>(&user); cnst) {
+						assert(false && "unhandled constant val user"); // should not be here ...
+					} else {
+						DBG(errs() << "\nval user is not an instruction\n";)
+						DBG(errs().flush();)
+						assert(false && "val user is not an instruction");
+					}
+				}, &parent_function);
+			}
+			
+			return enclosed_type;
+		}
+		
+		void transform_constexpr_geps(Function& F) {
+			for (auto& BB : F) {
+				for (auto& I : BB) {
+					for (uint32_t op_idx = 0, op_count = I.getNumOperands(); op_idx < op_count; ++op_idx) {
+						auto op = I.getOperand(op_idx);
+						if (auto cexpr = dyn_cast_or_null<ConstantExpr>(op);
+							cexpr && cexpr->getOpcode() == Instruction::GetElementPtr) {
+							auto new_gep_instr = cexpr->getAsInstruction(&I);
+							I.setOperand(op_idx, new_gep_instr);
+						}
+					}
+				}
+			}
 		}
 		
 		llvm::Type* handle_ssbo_array_transforms(Function& F, Argument& arg) {
@@ -1192,7 +1604,7 @@ namespace {
 		}
 		
 		void visitAllocaInst(AllocaInst &AI) {
-			// TODO: no pointers to pointers in vulkan
+			vulkan_function_scope_type_replacement::handle_function_scope_variable(&AI, func);
 		}
 		
 		void visitReturnInst(ReturnInst &RI) {
@@ -1320,11 +1732,9 @@ namespace {
 				if (!GV.getType()->isPointerTy()) {
 					continue;
 				}
-				libfloor_utils::for_all_instruction_users(GV, [this, &GV, &F](Instruction& instr) {
-					if (instr.getParent()->getParent() == &F) {
-						input_ptrs.emplace(&GV);
-					}
-				});
+				libfloor_utils::for_all_instruction_users(GV, [this, &GV](Instruction& instr) {
+					input_ptrs.emplace(&GV);
+				}, &F /* restrict to this function */);
 			}
 			
 			// gather all stuff
@@ -1503,22 +1913,6 @@ namespace {
 				return;
 			}
 			phi_ptrs.emplace_back(&PHI);
-		}
-		
-		CallInst* insert_keep_block_marker(BasicBlock* keep_block) {
-			Function* keep_block_func = M->getFunction("floor.keep_block");
-			if(keep_block_func == nullptr) {
-				FunctionType* keep_block_type = FunctionType::get(llvm::Type::getVoidTy(*ctx), false);
-				keep_block_func = (Function*)M->getOrInsertFunction("floor.keep_block", keep_block_type).getCallee();
-				keep_block_func->setCallingConv(CallingConv::FLOOR_FUNC);
-				keep_block_func->setCannotDuplicate();
-				keep_block_func->setDoesNotThrow();
-				keep_block_func->setNotConvergent();
-				keep_block_func->setDoesNotRecurse();
-			}
-			CallInst* keep_block_call = CallInst::Create(keep_block_func, "", keep_block->getTerminator());
-			keep_block_call->setCallingConv(CallingConv::FLOOR_FUNC);
-			return keep_block_call;
 		}
 		
 		void handle_pointers() {
@@ -2090,47 +2484,675 @@ namespace {
 		void lower_mem_instructions() {
 			for (auto& mem_instr : mem_instrs) {
 				if (auto memcpy_instr = dyn_cast_or_null<MemCpyInst>(mem_instr)) {
-					lower_memcpy(*memcpy_instr);
+					was_modified |= lower_memcpy(*memcpy_instr);
 				} else if (auto memmove_instr = dyn_cast_or_null<MemMoveInst>(mem_instr)) {
-					llvm::errs() << "can't lower memmove yet: " << *mem_instr << "\n";
+					llvm::errs() << "can't lower memmove yet: " << *memmove_instr << "\n";
 				} else if (auto memset_instr = dyn_cast_or_null<MemSetInst>(mem_instr)) {
-					llvm::errs() << "can't lower memset yet: " << *mem_instr << "\n";
+					llvm::errs() << "can't lower memset yet: " << *memset_instr << "\n";
 				} else {
 					llvm::errs() << "unknown/unhandled memory instruction: " << *mem_instr << "\n";
 				}
 			}
 		}
-		
-		void lower_memcpy(MemCpyInst& memcpy_instr) {
-			auto len_op = memcpy_instr.getOperand(2);
+		//! tries to lower "memcpy_instr" to LLVM instructions,
+		//! returns true if the lowering happened
+		bool lower_memcpy(MemCpyInst& memcpy_instr) {
+			auto len_op = memcpy_instr.getLength();
 			auto const_len_op = dyn_cast_or_null<ConstantInt>(len_op);
+#if 0
 			if (const_len_op && const_len_op->getZExtValue() <= 1 /* not sure if 0 is possible */) {
 				// -> only copying one value, can be handled by OpCopyMemory
-				return;
+				return false;
 			}
+#endif
 			
-			const TargetTransformInfo& TTI = getAnalysis<TargetTransformInfoWrapperPass>().getTTI(*func);
-			
-			// -> length is either constant > 1 or a dynamic length
+			// optimize length operand
 			if (const_len_op) {
 				if (auto simplified_len = libfloor_utils::simplify_const_integer_to_32bit(*const_len_op); simplified_len) {
 					const_len_op = simplified_len;
 				}
-				createMemCpyLoopKnownSize(&memcpy_instr,
-										  memcpy_instr.getRawSource(), memcpy_instr.getRawDest(), const_len_op,
-										  memcpy_instr.getSourceAlign().valueOrOne(), memcpy_instr.getDestAlign().valueOrOne(),
-										  memcpy_instr.isVolatile(), memcpy_instr.isVolatile(), TTI);
 			} else {
-				auto len_op = memcpy_instr.getLength();
 				if (auto simplified_len = libfloor_utils::simplify_integer_to_32bit(*len_op); simplified_len) {
 					len_op = simplified_len;
 				}
-				createMemCpyLoopUnknownSize(&memcpy_instr,
-											memcpy_instr.getRawSource(), memcpy_instr.getRawDest(), len_op,
+			}
+			
+			// try to use the original type for the memcpy
+			auto src = memcpy_instr.getRawSource();
+			auto dst = memcpy_instr.getRawDest();
+			auto src_orig_type = src->getType();
+			auto dst_orig_type = dst->getType();
+			auto src_bitcast_op = libfloor_utils::get_underlying_bitcast_operand_or_null(src);
+			auto dst_bitcast_op = libfloor_utils::get_underlying_bitcast_operand_or_null(dst);
+			if (src_bitcast_op) {
+				src_orig_type = src_bitcast_op->getType();
+			}
+			if (dst_bitcast_op) {
+				dst_orig_type = dst_bitcast_op->getType();
+			}
+			auto elem_type = src_orig_type->getPointerElementType();
+			llvm::Type* override_loop_op_type = nullptr;
+			if (elem_type == dst_orig_type->getPointerElementType() && elem_type->isSized()) {
+				auto elem_size = M->getDataLayout().getTypeStoreSize(elem_type).getFixedValue();
+				if (elem_size > 1) {
+					// original source and destination types are compatible -> copy based on this type instead
+					src = (src_bitcast_op ? src_bitcast_op : src);
+					dst = (dst_bitcast_op ? dst_bitcast_op : dst);
+					override_loop_op_type = elem_type;
+					assert(!const_len_op || (const_len_op->getZExtValue() % elem_size == 0u));
+				}
+			}
+			
+			// -> length is either constant > 1 or a dynamic length
+			const TargetTransformInfo& TTI = getAnalysis<TargetTransformInfoWrapperPass>().getTTI(*func);
+			if (const_len_op) {
+				createMemCpyLoopKnownSize(&memcpy_instr, src, dst, const_len_op,
+										  memcpy_instr.getSourceAlign().valueOrOne(), memcpy_instr.getDestAlign().valueOrOne(),
+										  memcpy_instr.isVolatile(), memcpy_instr.isVolatile(), TTI, override_loop_op_type);
+			} else {
+				createMemCpyLoopUnknownSize(&memcpy_instr, src, dst, len_op,
 											memcpy_instr.getSourceAlign().valueOrOne(), memcpy_instr.getDestAlign().valueOrOne(),
-											memcpy_instr.isVolatile(), memcpy_instr.isVolatile(), TTI);
+											memcpy_instr.isVolatile(), memcpy_instr.isVolatile(), TTI, override_loop_op_type);
 			}
 			memcpy_instr.eraseFromParent();
+			return true;
+		}
+	};
+
+	// VulkanPreFinalPointerBCFixup
+	struct VulkanPreFinalPointerBCFixup : public FunctionPass, InstVisitor<VulkanPreFinalPointerBCFixup> {
+		friend class InstVisitor<VulkanPreFinalPointerBCFixup>;
+		
+		static char ID; // Pass identification, replacement for typeid
+		
+		Module* M { nullptr };
+		const DataLayout* DL { nullptr };
+		LLVMContext* ctx { nullptr };
+		Function* func { nullptr };
+		bool is_kernel_func { false };
+		bool is_vertex_func { false };
+		bool is_fragment_func { false };
+		bool is_tess_control_func { false };
+		bool is_tess_eval_func { false };
+		bool was_modified { false };
+		ConstantFolder folder;
+		
+		// gather pointer bitcast instructions
+		std::vector<BitCastInst*> ptr_bc_instrs;
+		
+		VulkanPreFinalPointerBCFixup() :
+		FunctionPass(ID) {
+			initializeVulkanPreFinalPass(*PassRegistry::getPassRegistry());
+		}
+		
+		void getAnalysisUsage(AnalysisUsage &AU) const override {
+			AU.addRequired<AAResultsWrapperPass>();
+			AU.addRequired<GlobalsAAWrapperPass>();
+			AU.addRequired<AssumptionCacheTracker>();
+			AU.addRequired<TargetLibraryInfoWrapperPass>();
+			AU.addRequired<AssumptionCacheTracker>();
+			AU.addRequired<DominatorTreeWrapperPass>();
+			AU.addRequired<TargetTransformInfoWrapperPass>();
+		}
+		
+		bool runOnFunction(Function &F) override {
+			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
+			is_vertex_func = F.getCallingConv() == CallingConv::FLOOR_VERTEX;
+			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
+			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
+			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
+			if (!is_kernel_func &&
+				!is_vertex_func &&
+				!is_fragment_func &&
+				!is_tess_control_func &&
+				!is_tess_eval_func) {
+				return false;
+			}
+			
+			//
+			M = F.getParent();
+			DL = &M->getDataLayout();
+			ctx = &M->getContext();
+			func = &F;
+			ptr_bc_instrs.clear();
+			
+			// gather all stuff
+			was_modified = false;
+			visit(F);
+			
+			// fix invalid pointer bitcasts
+			if (!ptr_bc_instrs.empty()) {
+				was_modified |= fix_pointer_bitcasts();
+			}
+			
+			return was_modified;
+		}
+		
+		// InstVisitor overrides...
+		using InstVisitor<VulkanPreFinalPointerBCFixup>::visit;
+		void visit(Instruction& I) {
+			InstVisitor<VulkanPreFinalPointerBCFixup>::visit(I);
+		}
+		
+		void visitBitCastInst(BitCastInst& BC) {
+			if (BC.getSrcTy()->isPointerTy() && BC.getDestTy()->isPointerTy()) {
+				ptr_bc_instrs.emplace_back(&BC);
+				return;
+			}
+			assert(!BC.getSrcTy()->isPointerTy() && !BC.getDestTy()->isPointerTy()); // just in case ...
+		}
+		
+		struct struct_element_t {
+			std::vector<llvm::Value*> indices;
+			std::vector<uint32_t> const_indices;
+			llvm::Type* type { nullptr };
+		};
+		static std::vector<struct_element_t> get_struct_elements(BitCastInst& BC, llvm::Type* in_st_type, LLVMContext& ctx) {
+			assert(in_st_type->isStructTy());
+			auto st_type = cast<StructType>(in_st_type);
+			
+			std::vector<struct_element_t> elems;
+			std::vector<llvm::Value*> indices;
+			std::vector<uint32_t> const_indices;
+			for (;;) {
+				const auto elem_count = st_type->getNumElements();
+				assert(elem_count > 0);
+				if (elem_count == 1 && st_type->getElementType(0)->isStructTy()) {
+					// recurse
+					const_indices.emplace_back(0u);
+					indices.emplace_back(ConstantInt::get(llvm::Type::getInt32Ty(ctx), const_indices.back()));
+					st_type = cast<StructType>(st_type->getElementType(0));
+					continue;
+				}
+				
+				for (uint32_t i = 0; i < elem_count; ++i) {
+					auto elem_type = st_type->getElementType(i);
+					if (elem_type->isStructTy()) {
+						ctx.emitError(&BC, "invalid pointer bitcast: can't handle nested structs");
+						return {};
+					}
+					auto elem_indices = indices;
+					const_indices.emplace_back(i);
+					elem_indices.emplace_back(ConstantInt::get(llvm::Type::getInt32Ty(ctx), const_indices.back()));
+					elems.emplace_back(struct_element_t {
+						.indices = std::move(elem_indices),
+						.const_indices = std::move(const_indices),
+						.type = elem_type,
+					});
+				}
+				break;
+			}
+			return elems;
+		}
+		
+		std::optional<bool> fix_pointer_bitcast_with_loads(BitCastInst& BC, Function& F, const std::vector<LoadInst*>& loads) {
+			const auto dst_type = cast<PointerType>(BC.getDestTy())->getPointerElementType();
+			const auto dst_size = DL->getTypeStoreSize(dst_type).getFixedSize();
+			
+			auto src_ptr_type = cast<PointerType>(BC.getSrcTy());
+			auto src_type = cast<PointerType>(BC.getSrcTy())->getPointerElementType();
+			auto src_size = DL->getTypeStoreSize(src_type).getFixedSize();
+			auto src = cast<Instruction>(BC.getOperand(0));
+			GetElementPtrInst* src_gep = nullptr;
+			
+			std::vector<Instruction*> cleanup_instrs { &BC };
+			
+			// direct struct<->vector bitcast+load?
+			bool is_vec_struct_load = ((src_type->isVectorTy() && dst_type->isStructTy()) ||
+									   (src_type->isStructTy() && dst_type->isVectorTy()));
+			
+			// indirect struct->vector bitcast+load?
+			// src might already point to the lowest element of a struct -> need to go up
+			if (!is_vec_struct_load && src_size < dst_size && dst_type->isVectorTy()) {
+				if (auto gep = dyn_cast_or_null<GetElementPtrInst>(src); gep && gep->getSourceElementType()->isStructTy()) {
+					const auto src_elem_type = gep->getSourceElementType();
+					SmallVector<Value*> indices;
+					for (auto& idx : gep->indices()) {
+						indices.emplace_back(idx);
+					}
+					
+					for (size_t i = 1, count = indices.size(); i < count; ++i) {
+						// last index must be 0 for this to work
+						const auto last_idx = dyn_cast_or_null<ConstantInt>(indices.back());
+						if (!last_idx || last_idx->getZExtValue() != 0) {
+							break;
+						}
+						indices.pop_back();
+						
+						auto higher_src_type = GetElementPtrInst::getIndexedType(src_elem_type, indices);
+						if (higher_src_type) {
+							if (auto new_src_size = DL->getTypeStoreSize(higher_src_type).getFixedSize(); new_src_size >= dst_size) {
+								// found it, create a new GEP with the current indices
+								src_gep = GetElementPtrInst::Create(gep->getSourceElementType(), gep->getOperand(0),
+																	indices, src->getName() + ".adj", src);
+								src_gep->setIsInBounds(gep->isInBounds());
+								src_gep->setDebugLoc(gep->getDebugLoc());
+								
+								// set new src
+								auto new_src_ptr_type = PointerType::get(higher_src_type, src_ptr_type->getPointerAddressSpace());
+								src_ptr_type = new_src_ptr_type;
+								src_size = new_src_size;
+								src_type = higher_src_type;
+								src = src_gep;
+								cleanup_instrs.emplace_back(src);
+								
+								is_vec_struct_load = true;
+								break;
+							}
+						}
+					}
+				}
+			}
+			
+			if (is_vec_struct_load) {
+				if (loads.size() > 1) {
+					ctx->emitError(&BC, "invalid pointer bitcast: can't replace more than one load");
+					return {};
+				}
+				if (!src_gep) {
+					src_gep = dyn_cast_or_null<GetElementPtrInst>(src);
+					cleanup_instrs.emplace_back(src_gep);
+				}
+				
+				// if either side is a struct and the other is a vector type,
+				// we need to do a (full) extraction and insertion of elements
+				const auto src_st_elements = (src_type->isStructTy() ? get_struct_elements(BC, src_type, *ctx) : std::vector<struct_element_t> {});
+				const auto dst_st_elements = (dst_type->isStructTy() ? get_struct_elements(BC, dst_type, *ctx) : std::vector<struct_element_t> {});
+				const auto src_elem_count = (src_type->isStructTy() ? src_st_elements.size() : size_t(cast<VectorType>(src_type)->getElementCount().getFixedValue()));
+				const auto dst_elem_count = (dst_type->isStructTy() ? dst_st_elements.size() : size_t(cast<VectorType>(dst_type)->getElementCount().getFixedValue()));
+				if (src_elem_count == 0 || dst_elem_count == 0) {
+					ctx->emitError(&BC, "invalid pointer bitcast: invalid destination or source vector type (no or invalid elements)");
+					return {};
+				}
+				if (dst_elem_count > src_elem_count) {
+					ctx->emitError(&BC, "invalid pointer bitcast: destination vector type has more elements than the source vector type");
+					return {};
+				}
+				
+				//
+				auto& ld = loads[0];
+				auto insertion_point = ld;
+				
+				// only do this for as many dst elements that we have
+				llvm::Value* new_dst = UndefValue::get(dst_type);
+				for (uint32_t i = 0, count = uint32_t(dst_elem_count); i < count; ++i) {
+					// extract
+					llvm::Value* src_elem = nullptr;
+					if (!src_st_elements.empty()) {
+						// extract struct elem
+						const auto& elem = src_st_elements[i];
+						GetElementPtrInst* elem_gep = nullptr;
+						if (src_gep) {
+							SmallVector<Value*> indices;
+							for (auto& idx : src_gep->indices()) {
+								indices.emplace_back(idx);
+							}
+							for (auto& idx : elem.indices) {
+								indices.emplace_back(idx);
+							}
+							elem_gep = GetElementPtrInst::Create(src_gep->getSourceElementType(), src_gep->getOperand(0), indices, "", insertion_point);
+						} else {
+							// NOTE/TODO: untested path!
+							elem_gep = GetElementPtrInst::Create(src_type, src, elem.indices, "", insertion_point);
+						}
+						elem_gep->setIsInBounds(true);
+						elem_gep->setDebugLoc(ld->getDebugLoc());
+						auto elem_ld = new LoadInst(elem.type, elem_gep, "", false, insertion_point);
+						src_elem = elem_ld;
+					} else {
+						// extract vector elem
+						auto extract_elem = ExtractElementInst::Create(src, ConstantInt::get(llvm::Type::getInt32Ty(*ctx), i), "", insertion_point);
+						extract_elem->setDebugLoc(ld->getDebugLoc());
+						src_elem = extract_elem;
+					}
+					
+					// insert
+					if (!dst_st_elements.empty()) {
+						// NOTE/TODO: untested path!
+						// insert struct elem
+						const auto& elem = dst_st_elements[i];
+						auto insert_val = InsertValueInst::Create(new_dst, src_elem, elem.const_indices, "", insertion_point);
+						insert_val->setDebugLoc(ld->getDebugLoc());
+						new_dst = insert_val;
+					} else {
+						// insert vector elem
+						auto insert_elem = InsertElementInst::Create(new_dst, src_elem, ConstantInt::get(llvm::Type::getInt32Ty(*ctx), i), "", insertion_point);
+						insert_elem->setDebugLoc(ld->getDebugLoc());
+						new_dst = insert_elem;
+					}
+				}
+				
+				// finally: replace load with newly created/loaded construct
+				ld->replaceAllUsesWith(new_dst);
+				ld->eraseFromParent();
+			} else {
+				// -> non vector<->struct BC+load
+				
+				// if the source size is larger, the source pointer likely orignates from a struct GEP at a higher level
+				// -> drill down
+				assert(src_size >= dst_size && "source must always be >= destination");
+				if (src_size > dst_size) {
+					src_gep = dyn_cast_or_null<GetElementPtrInst>(src);
+					if (!src_gep) {
+						ctx->emitError(&BC, "invalid pointer bitcast: invalid src -> dst cast (can't replace non-GEP src)");
+						return {};
+					}
+					cleanup_instrs.emplace_back(src_gep);
+					
+					SmallVector<llvm::Value*> indices;
+					for (auto& idx : src_gep->indices()) {
+						indices.emplace_back(idx);
+					}
+					
+					for (;;) {
+						auto src_st_type = dyn_cast_or_null<StructType>(src_type);
+						if (!src_st_type) {
+							ctx->emitError(&BC, "invalid pointer bitcast: invalid src -> dst cast (src is not a struct type)");
+							return {};
+						}
+						indices.emplace_back(ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0u));
+						src_type = src_st_type->getStructElementType(0);
+						src_size = DL->getTypeStoreSize(src_type).getFixedSize();
+						if (src_size == dst_size) {
+							// if this is still a struct type, do another round (struct containing a single element)
+							// also: if this matches the dst type (for some reason, which shouldn't occur ...), use it straight away
+							if (src_type->isStructTy() && src_type != dst_type) {
+								assert(cast<StructType>(src_type)->getStructNumElements() == 1);
+								continue;
+							}
+							
+							src = GetElementPtrInst::Create(src_gep->getSourceElementType(), src_gep->getOperand(0), indices,
+															src_gep->getName(), src_gep);
+							((GetElementPtrInst*)src)->setIsInBounds(src_gep->isInBounds());
+							src->setDebugLoc(src_gep->getDebugLoc());
+							break;
+						}
+					}
+				}
+				
+				// fix up by emitting a load of the original (src) pointer, then bitcast to the dst type
+				// NOTE: I would expect there to only be one load, but handle all just in case
+				for (auto& ld : loads) {
+					auto src_ld = new LoadInst(src_type, src, ld->getName(), ld->isVolatile(), ld->getAlign(), ld);
+					src_ld->copyMetadata(*ld);
+					src_ld->setDebugLoc(ld->getDebugLoc());
+					
+					auto src_bc = new BitCastInst(src_ld, dst_type, ld->getName() + ".bc", ld);
+					src_bc->setDebugLoc(ld->getDebugLoc());
+					
+					// cleanup
+					ld->replaceAllUsesWith(src_bc);
+					ld->eraseFromParent();
+				}
+			}
+			
+			// cleanup
+			for (auto& cleanup_instr : cleanup_instrs) {
+				if (cleanup_instr && cleanup_instr->users().empty() && cleanup_instr->uses().empty()) {
+					cleanup_instr->eraseFromParent();
+				}
+			}
+			
+			return true;
+		}
+		
+		std::optional<bool> fix_pointer_bitcast_with_stores(BitCastInst& BC, Function& F, const std::vector<StoreInst*>& stores) {
+			const auto dst_type = cast<PointerType>(BC.getDestTy())->getPointerElementType();
+			const auto dst_size = DL->getTypeStoreSize(dst_type).getFixedSize();
+			
+			auto src_ptr_type = cast<PointerType>(BC.getSrcTy());
+			auto src_type = cast<PointerType>(BC.getSrcTy())->getPointerElementType();
+			auto src_size = DL->getTypeStoreSize(src_type).getFixedSize();
+			auto src = cast<Instruction>(BC.getOperand(0));
+			GetElementPtrInst* src_gep = nullptr;
+			
+			std::vector<Instruction*> cleanup_instrs { &BC };
+			
+			// direct struct<->vector bitcast+store?
+			bool is_vec_struct_store = ((src_type->isVectorTy() && dst_type->isStructTy()) ||
+										(src_type->isStructTy() && dst_type->isVectorTy()));
+			
+			// indirect struct->vector bitcast+store?
+			// src might already point to the lowest element of a struct -> need to go up
+			if (!is_vec_struct_store && src_size < dst_size && dst_type->isVectorTy()) { // TODO: is this correct?
+				if (auto gep = dyn_cast_or_null<GetElementPtrInst>(src); gep && gep->getSourceElementType()->isStructTy()) {
+					const auto src_elem_type = gep->getSourceElementType();
+					SmallVector<Value*> indices;
+					for (auto& idx : gep->indices()) {
+						indices.emplace_back(idx);
+					}
+					
+					for (size_t i = 1, count = indices.size(); i < count; ++i) {
+						// last index must be 0 for this to work
+						const auto last_idx = dyn_cast_or_null<ConstantInt>(indices.back());
+						if (!last_idx || last_idx->getZExtValue() != 0) {
+							break;
+						}
+						indices.pop_back();
+						
+						auto higher_src_type = GetElementPtrInst::getIndexedType(src_elem_type, indices);
+						if (higher_src_type) {
+							if (auto new_src_size = DL->getTypeStoreSize(higher_src_type).getFixedSize(); new_src_size >= dst_size) {
+								// found it, create a new GEP with the current indices
+								src_gep = GetElementPtrInst::Create(gep->getSourceElementType(), gep->getOperand(0),
+																	indices, src->getName() + ".adj", src);
+								src_gep->setIsInBounds(gep->isInBounds());
+								src_gep->setDebugLoc(gep->getDebugLoc());
+								
+								// set new src
+								auto new_src_ptr_type = PointerType::get(higher_src_type, src_ptr_type->getPointerAddressSpace());
+								src_ptr_type = new_src_ptr_type;
+								src_size = new_src_size;
+								src_type = higher_src_type;
+								src = src_gep;
+								cleanup_instrs.emplace_back(src);
+								
+								is_vec_struct_store = true;
+								break;
+							}
+						}
+					}
+				}
+			}
+			
+			if (is_vec_struct_store) {
+				if (stores.size() > 1) {
+					ctx->emitError(&BC, "invalid pointer bitcast: can't replace more than one store");
+					return {};
+				}
+				// TODO: implement this
+				assert(false && "unhandled bitcast store replacement");
+			} else {
+				// -> non vector<->struct BC+store
+				
+				// if the source size is larger, the source pointer likely orignates from a struct GEP at a higher level
+				// -> drill down
+				if (src_size > dst_size) { // TODO: is this correct?
+					src_gep = dyn_cast_or_null<GetElementPtrInst>(src);
+					if (!src_gep) {
+						ctx->emitError(&BC, "invalid pointer bitcast: invalid src -> dst cast (can't replace non-GEP src)");
+						return {};
+					}
+					cleanup_instrs.emplace_back(src_gep);
+					
+					SmallVector<llvm::Value*> indices;
+					for (auto& idx : src_gep->indices()) {
+						indices.emplace_back(idx);
+					}
+					
+					for (;;) {
+						auto src_st_type = dyn_cast_or_null<StructType>(src_type);
+						if (!src_st_type) {
+							ctx->emitError(&BC, "invalid pointer bitcast: invalid src -> dst cast (src is not a struct type)");
+							return {};
+						}
+						indices.emplace_back(ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0u));
+						src_type = src_st_type->getStructElementType(0);
+						src_size = DL->getTypeStoreSize(src_type).getFixedSize();
+						if (src_size == dst_size) {
+							// if this is still a struct type, do another round (struct containing a single element)
+							// also: if this matches the dst type (for some reason, which shouldn't occur ...), use it straight away
+							if (src_type->isStructTy() && src_type != dst_type) {
+								assert(cast<StructType>(src_type)->getStructNumElements() == 1);
+								continue;
+							}
+							
+							src = GetElementPtrInst::Create(src_gep->getSourceElementType(), src_gep->getOperand(0), indices,
+															src_gep->getName(), src_gep);
+							((GetElementPtrInst*)src)->setIsInBounds(src_gep->isInBounds());
+							src->setDebugLoc(src_gep->getDebugLoc());
+							break;
+						}
+					}
+					// TODO: implement this
+					assert(false && "unhandled bitcast store replacement");
+				} else if (src_size < dst_size) {
+					if (stores.size() > 1) {
+						ctx->emitError(&BC, "invalid pointer bitcast: can't replace more than one store");
+						return {};
+					}
+					
+					src_gep = dyn_cast_or_null<GetElementPtrInst>(src);
+					if (!src_gep) {
+						ctx->emitError(&BC, "invalid pointer bitcast: invalid src -> dst cast (can't replace non-GEP src)");
+						return {};
+					}
+					
+					// if this happens, a larger value/type is stored to a pointer of lower bit depth (e.g. i64 into i8*)
+					// -> split up value into parts that fit into the used pointer element type
+					assert((dst_size % src_size) == 0u && "uneven store using a larger value type into a smaller pointer type");
+					const auto split_count = (dst_size / src_size);
+					const auto src_bitness = src_size * 8u;
+					
+					SmallVector<Value*, 8> src_gep_indices;
+					for (auto& idx : src_gep->indices()) {
+						src_gep_indices.emplace_back(idx);
+					}
+					
+					const auto store = stores[0];
+					auto store_value = store->getValueOperand();
+					Type* store_value_int_type = nullptr;
+					if (!store_value->getType()->isIntegerTy()) {
+						// if the source value is not an integer, we need to bitcast it to an integer
+						// NOTE/TODO: this probably won't work in all cases ...
+						assert(dst_size <= 8 && "source value is too large");
+						store_value_int_type = IntegerType::get(*ctx, dst_size * 8u);
+						store_value = new BitCastInst(store_value, store_value_int_type, "store_value_bc", store);
+					} else {
+						store_value_int_type = store_value->getType();
+					}
+					
+					cleanup_instrs.emplace_back(store);
+					for (uint32_t split_idx = 0u; split_idx < split_count; ++split_idx) {
+						Value* shifted_value = nullptr;
+						GetElementPtrInst* store_gep = nullptr;
+						if (split_idx > 0) {
+							// right shift by bitness * split-index
+							shifted_value = BinaryOperator::CreateLShr(store_value,
+																	   ConstantInt::get(store_value_int_type, split_idx * src_bitness),
+																	   "st_split_shift", store);
+							
+							// advance GEP by one
+							auto adj_gep_indices = src_gep_indices;
+							auto last_gep_idx = adj_gep_indices.back();
+							auto adv_idx = BinaryOperator::CreateAdd(last_gep_idx,
+																	 ConstantInt::get(last_gep_idx->getType(), split_idx),
+																	 "st_src_gep_idx_adv", src_gep);
+							adj_gep_indices[adj_gep_indices.size() - 1] = adv_idx;
+							
+							store_gep = llvm::GetElementPtrInst::Create(src_gep->getSourceElementType(), src_gep->getPointerOperand(),
+																		adj_gep_indices, "st_src_gep_adv", src_gep);
+							if (src_gep->isInBounds()) {
+								store_gep->setIsInBounds();
+							}
+							store_gep->copyMetadata(*src_gep);
+							store_gep->setDebugLoc(src_gep->getDebugLoc());
+						} else {
+							// first iteration: use value and GEP as is
+							shifted_value = store_value;
+							store_gep = src_gep;
+						}
+						auto trunc_shifted_value = new TruncInst(shifted_value, src_type, "st_trunc_split_shift", store);
+						auto repl_st = new StoreInst(trunc_shifted_value, store_gep, store->isVolatile(),
+													 store->getAlign(), store->getOrdering(), store->getSyncScopeID(),
+													 store);
+						repl_st->copyMetadata(*store);
+						repl_st->setDebugLoc(store->getDebugLoc());
+					}
+				} else { // src_size == dst_size
+					// TODO: implement this?
+					// -> ignore for now, since sizes do match
+				}
+			}
+			
+			// cleanup
+			for (auto& cleanup_instr : cleanup_instrs) {
+				if (cleanup_instr && cleanup_instr->users().empty() && cleanup_instr->uses().empty()) {
+					cleanup_instr->eraseFromParent();
+				}
+			}
+			
+			return true;
+		}
+		
+		bool fix_pointer_bitcasts() {
+			bool did_modify = false;
+			for (auto& BC : ptr_bc_instrs) {
+				const auto src_ptr_type = cast<PointerType>(BC->getSrcTy());
+				const auto dst_ptr_type = cast<PointerType>(BC->getDestTy());
+				
+				// bitcasts aren't technically allowed to bitcast address spaces, but still check this
+				if (src_ptr_type->getAddressSpace() != dst_ptr_type->getAddressSpace()) {
+					ctx->emitError(BC, "invalid pointer bitcast: address space cast is not allowed");
+					return false;
+				}
+				
+				// we will only replace the pointer bitcast if all users are simple loads or stores
+				bool all_users_are_loads_or_stores = true;
+				std::vector<LoadInst*> loads;
+				std::vector<StoreInst*> stores;
+				libfloor_utils::for_all_instruction_users(*BC, [&all_users_are_loads_or_stores, &loads, &stores](Instruction& instr) {
+					if (auto ld = dyn_cast_or_null<LoadInst>(&instr); ld) {
+						loads.emplace_back(ld);
+					} else if (auto st = dyn_cast_or_null<StoreInst>(&instr); st) {
+						stores.emplace_back(st);
+					} else if (dyn_cast_or_null<CallInst>(&instr)) {
+						// ignore external function calls (may e.g. be used for atomic functions)
+					} else {
+						all_users_are_loads_or_stores = false;
+					}
+				});
+				if (!all_users_are_loads_or_stores) {
+					ctx->emitError(BC, "invalid pointer bitcast: failed to run bitcast fixup (unhandled instructions)");
+					return false;
+				}
+				if (!stores.empty() && !loads.empty()) {
+					ctx->emitError(BC, "invalid pointer bitcast: failed to run bitcast fixup (can't handle both loads and stores)");
+					return false;
+				}
+				if (loads.empty() && stores.empty()) {
+					// ignore this bitcast
+					continue;
+				}
+				
+				if (!loads.empty()) {
+					auto result = fix_pointer_bitcast_with_loads(*BC, *func, loads);
+					if (!result) {
+						return false;
+					}
+					did_modify |= *result;
+				}
+
+				// NOTE: this is still very much a WIP and may fail catastrophically
+				if (!stores.empty()) {
+					auto result = fix_pointer_bitcast_with_stores(*BC, *func, stores);
+					if (!result) {
+						return false;
+					}
+					did_modify |= *result;
+				}
+			}
+			return did_modify;
 		}
 	};
 	
@@ -2152,9 +3174,9 @@ namespace {
 			
 			// kill all functions named floor.builtin.* (we still need other floor.* functions)
 			bool module_modified = false;
-			for(auto func_iter = Mod.begin(); func_iter != Mod.end();) {
+			for (auto func_iter = Mod.begin(); func_iter != Mod.end();) {
 				auto& func = *func_iter;
-				if(func.getName().startswith("floor.builtin.")) {
+				if (func.getName().startswith("floor.builtin.")) {
 					if(func.getNumUses() != 0) {
 						errs() << func.getName() << " should not have any uses at this point!\n";
 					}
@@ -2165,6 +3187,15 @@ namespace {
 				}
 				++func_iter;
 			}
+			
+			// perform function scope type replacement for GVs with constant AS (later Function storage)
+			for (auto& GV : Mod.globals()) {
+				if (GV.getType()->getPointerAddressSpace() != SPIRAS_Constant) {
+					continue;
+				}
+				module_modified |= vulkan_function_scope_type_replacement::handle_function_scope_variable(&GV);
+			}
+			
 			return module_modified;
 		}
 		
@@ -2200,6 +3231,19 @@ INITIALIZE_PASS_DEPENDENCY(CallGraphWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_END(VulkanPreFinal, "VulkanPreFinal", "VulkanPreFinal Pass", false, false)
+
+char VulkanPreFinalPointerBCFixup::ID = 0;
+FunctionPass *llvm::createVulkanPreFinalPointerBCFixupPass() {
+	return new VulkanPreFinalPointerBCFixup();
+}
+INITIALIZE_PASS_BEGIN(VulkanPreFinalPointerBCFixup, "VulkanPreFinalPointerBCFixup", "VulkanPreFinalPointerBCFixup Pass", false, false)
+INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(GlobalsAAWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
+INITIALIZE_PASS_DEPENDENCY(CallGraphWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
+INITIALIZE_PASS_END(VulkanPreFinalPointerBCFixup, "VulkanPreFinalPointerBCFixup", "VulkanPreFinalPointerBCFixup Pass", false, false)
 
 char VulkanFinalModuleCleanup::ID = 0;
 ModulePass *llvm::createVulkanFinalModuleCleanupPass() {

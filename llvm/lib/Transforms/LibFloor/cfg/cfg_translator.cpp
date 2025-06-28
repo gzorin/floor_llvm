@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 - 2024 Florian Ziesche
+ * Copyright 2021 - 2025 Florian Ziesche
  *
  * SPDX-License-Identifier: MIT
  *
@@ -62,15 +62,19 @@ static inline Terminator::Type get_terminator_type(Instruction &instr) {
   if (auto br = dyn_cast_or_null<BranchInst>(&instr)) {
     return (br->isConditional() ? Terminator::Type::Condition
                                 : Terminator::Type::Branch);
-  } else if (auto ret = dyn_cast_or_null<ReturnInst>(&instr)) {
+  } else if (auto ret = dyn_cast_or_null<ReturnInst>(&instr); ret) {
     return Terminator::Type::Return;
-  } else if (auto unreachable = dyn_cast_or_null<UnreachableInst>(&instr)) {
-    if (auto CI = dyn_cast_or_null<CallInst>(instr.getPrevNode());
-        CI && CI->getCalledFunction()->getName() == "floor.discard_fragment") {
-      return Terminator::Type::Kill;
+  } else if (auto unreachable = dyn_cast_or_null<UnreachableInst>(&instr); unreachable) {
+    if (auto CI = dyn_cast_or_null<CallInst>(instr.getPrevNode()); CI) {
+      auto func_name = CI->getCalledFunction()->getName();
+      if (func_name == "floor.discard_fragment") {
+        return Terminator::Type::Kill;
+      } else if (func_name == "floor.exit") {
+        return Terminator::Type::Exit;
+      }
     }
     return Terminator::Type::Unreachable;
-  } else if (auto sw = dyn_cast_or_null<SwitchInst>(&instr)) {
+  } else if (auto sw = dyn_cast_or_null<SwitchInst>(&instr); sw) {
     return Terminator::Type::Switch;
   }
   assert(false && "unsupported terminator instruction");
@@ -125,7 +129,8 @@ void cfg_translator::translate_bb(CFGNode &node) {
       }
       case Terminator::Type::Unreachable:
       case Terminator::Type::Kill:
-        // NOTE: we don't have a specific terminator for Kill instructions
+      case Terminator::Type::Exit:
+        // NOTE: we don't have a specific terminator for Kill/Exit instructions
         // (reuses Unreachable)
         break;
       case Terminator::Type::Switch: {
@@ -238,9 +243,35 @@ void cfg_translator::add_or_update_terminator(CFGNode &node) {
       CallInst *discard_call = CallInst::Create(discard_func, "", &node.BB);
       discard_call->setCallingConv(CallingConv::FLOOR_FUNC);
       discard_call->setCannotDuplicate();
+      discard_call->setDoesNotReturn();
     }
+    new UnreachableInst(ctx, &node.BB);
+    break;
   }
-    LLVM_FALLTHROUGH;
+  case Terminator::Type::Exit: {
+    bool create_floor_exit = false;
+    if (node.BB.empty()) {
+      create_floor_exit = true;
+    } else {
+      if (auto CI = dyn_cast_or_null<CallInst>(&node.BB.back());
+          CI && CI->getCalledFunction()->getName() == "floor.exit") {
+        // -> already exists
+      } else {
+        create_floor_exit = true;
+      }
+    }
+    if (create_floor_exit) {
+      Function *exit_func = M.getFunction("floor.exit");
+      assert(exit_func &&
+             "exit function must have already existed if we get here");
+      CallInst *exit_call = CallInst::Create(exit_func, "", &node.BB);
+      exit_call->setCallingConv(CallingConv::FLOOR_FUNC);
+      exit_call->setCannotDuplicate();
+      exit_call->setDoesNotReturn();
+    }
+    new UnreachableInst(ctx, &node.BB);
+    break;
+  }
   case Terminator::Type::Unreachable:
     new UnreachableInst(ctx, &node.BB);
     break;
@@ -321,6 +352,7 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
         }
         case Terminator::Type::Unreachable:
         case Terminator::Type::Kill:
+        case Terminator::Type::Exit:
           // no operands to check
           break;
         case Terminator::Type::Switch: {
@@ -379,9 +411,9 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
                succ_idx < succ_count; ++succ_idx) {
             compute_simple_reachability(*sw->getSuccessor(succ_idx));
           }
-        } else if (auto ret = dyn_cast_or_null<ReturnInst>(term)) {
+		} else if (auto ret = dyn_cast_or_null<ReturnInst>(term); ret) {
           // nop
-        } else if (auto ur = dyn_cast_or_null<UnreachableInst>(term)) {
+		} else if (auto ur = dyn_cast_or_null<UnreachableInst>(term); ur) {
           // nop
         } else {
           assert(false && "unknown/unhandled terminator type");
@@ -493,6 +525,24 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
   for (auto &rem_node : rem_nodes) {
     pool.remove_node(*rem_node);
   }
+  // cleanup merge/continue blocks that were unreachable and are now invalid
+  pool.for_each_node([&reachable_blocks](CFGNode &node) {
+    if (node.ir.merge_info.merge_type == MergeType::Loop) {
+      if (node.ir.merge_info.merge_block &&
+          !reachable_blocks.contains(&node.ir.merge_info.merge_block->BB)) {
+        node.ir.merge_info.merge_block = nullptr;
+      }
+      if (node.ir.merge_info.continue_block &&
+          !reachable_blocks.contains(&node.ir.merge_info.continue_block->BB)) {
+        node.ir.merge_info.continue_block = nullptr;
+      }
+    } else if (node.ir.merge_info.merge_type == MergeType::Selection) {
+      if (node.selection_merge_block &&
+          !reachable_blocks.contains(&node.selection_merge_block->BB)) {
+        node.selection_merge_block = nullptr;
+      }
+    }
+  });
 
   // add merge annotations
   if (add_merge_annotations) {
@@ -575,39 +625,15 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
                               continue_bb,
                               node.ir.merge_info.loop_control_mask);
           } else {
-            if (&node == entry) {
-              // if this is the entry node, we can't simply place a fake
-              // continue block before it, because it wouldn't be counted as a
-              // back-edge
-              // -> solve this by creating a second fake block that will act as
-              // the new entry block (this is incredibly stupid, but so are
-              // structured control flow requirements)
-              auto new_entry_block = BasicBlock::Create(
-                  ctx, node.name + ".new_entry.fake_continue", &F, &node.BB);
-              BranchInst::Create(&node.BB, new_entry_block);
-            }
-
-            // continue block does not exist
-            // -> need to create a fake incoming block
-            auto continue_block = BasicBlock::Create(
-                ctx, node.name + ".fake_continue", &F, &node.BB);
-            BranchInst::Create(&node.BB, continue_block);
+            auto continue_block = create_fake_loop_continue(node);
             create_loop_merge(term, &node.ir.merge_info.merge_block->BB,
                               continue_block,
                               node.ir.merge_info.loop_control_mask);
-
-            // update phis: need to insert incoming undef value for the new
-            // continue block
-            for (auto &phi : node.BB.phis()) {
-              phi.addIncoming(UndefValue::get(phi.getType()), continue_block);
-            }
           }
         } else if (node.ir.merge_info.continue_block != nullptr) {
           // merge block does not exist
           // -> need to create a fake one
-          auto merge_block = BasicBlock::Create(ctx, node.name + ".fake_merge",
-                                                &F, node.BB.getNextNode());
-          new UnreachableInst(ctx, merge_block);
+          auto merge_block = create_fake_loop_merge(node);
           auto continue_bb =
               (&node.ir.merge_info.continue_block->BB == &node.BB &&
                        node.phi_override
@@ -616,11 +642,54 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
           create_loop_merge(term, merge_block, continue_bb,
                             node.ir.merge_info.loop_control_mask);
         } else {
-          llvm_unreachable("invalid loop merge");
+          // TODO: not entirely sure if this is right or a good idea ...
+          auto continue_block = create_fake_loop_continue(node);
+          auto merge_block = create_fake_loop_merge(node);
+          create_loop_merge(term, merge_block, continue_block,
+                            node.ir.merge_info.loop_control_mask);
         }
       }
     });
   }
+}
+
+BasicBlock *cfg_translator::create_fake_loop_continue(CFGNode &node) {
+  if (&node == entry) {
+    // if this is the entry node, we can't simply place a fake
+    // continue block before it, because it wouldn't be counted as a
+    // back-edge
+    // -> solve this by creating a second fake block that will act as
+    // the new entry block (this is incredibly stupid, but so are
+    // structured control flow requirements)
+    auto new_entry_block = BasicBlock::Create(
+        ctx, node.name + ".new_entry.fake_continue", &F, &node.BB);
+    new_entry_block->markVulkanFakeContinue();
+    BranchInst::Create(&node.BB, new_entry_block);
+  }
+
+  // continue block does not exist
+  // -> need to create a fake incoming block
+  auto continue_block =
+      BasicBlock::Create(ctx, node.name + ".fake_continue", &F, &node.BB);
+  continue_block->markVulkanFakeContinue();
+  BranchInst::Create(&node.BB, continue_block);
+
+  // update phis: need to insert incoming undef value for the new
+  // continue block
+  for (auto &phi : node.BB.phis()) {
+    phi.addIncoming(UndefValue::get(phi.getType()), continue_block);
+  }
+
+  return continue_block;
+}
+
+BasicBlock *cfg_translator::create_fake_loop_merge(CFGNode &node) {
+  // merge block does not exist
+  // -> need to create a fake one
+  auto merge_block = BasicBlock::Create(ctx, node.name + ".fake_merge", &F,
+                                        node.BB.getNextNode());
+  new UnreachableInst(ctx, merge_block);
+  return merge_block;
 }
 
 CallInst *cfg_translator::insert_merge_block_marker(BasicBlock *merge_block) {

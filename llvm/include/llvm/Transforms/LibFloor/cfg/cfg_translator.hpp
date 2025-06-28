@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 - 2024 Florian Ziesche
+ * Copyright 2021 - 2025 Florian Ziesche
  *
  * SPDX-License-Identifier: MIT
  *
@@ -78,6 +78,9 @@ protected:
   void create_selection_merge(Instruction *insert_before,
                               BasicBlock *merge_block,
                               SpvSelectionControlMask sel_control);
+
+  BasicBlock *create_fake_loop_continue(CFGNode &node);
+  BasicBlock *create_fake_loop_merge(CFGNode &node);
 };
 
 } // namespace llvm

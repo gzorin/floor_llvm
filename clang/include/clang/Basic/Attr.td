@@ -1264,6 +1264,24 @@ def ComputeKernelWorkGroupSize : DeclOrTypeAttr {
   let Documentation = [Undocumented];
 }
 
+// compute kernel SIMD width
+def ComputeKernelSIMDWidth : DeclOrTypeAttr {
+  let Spellings = [GNU<"kernel_simd_width">, CXX11<"","kernel_simd_width", 200809>];
+  let Args = [ExprArgument<"SIMDWidth">];
+  let TemplateDependent = 1;
+  let AdditionalMembers = [{
+  unsigned int simd_width { 0 };
+  auto getWidth() const {
+    return simd_width;
+  }
+  void setWidth(unsigned int simd_width_) {
+    simd_width = simd_width_;
+  }
+  }];
+  let Subjects = SubjectList<[Function], ErrorDiag>;
+  let Documentation = [Undocumented];
+}
+
 def GraphicsTessellationPatch : InheritableAttr {
   let Spellings = [CXX11<"","patch", 200809>];
   let Args = [EnumArgument<"PatchPrimitive", "PatchPrimitiveType",
@@ -1399,6 +1417,15 @@ def GraphicsFBODepthType : InheritableAttr {
   let Args = [EnumArgument<"DepthQualifier", "DepthQualifierType",
                            ["any", "greater", "less"],
                            ["FBODepthTypeAny", "FBODepthTypeGreater", "FBODepthTypeLess"]>];
+  let Documentation = [Undocumented];
+}
+
+// fragment shader attribute: enable early fragment tests/culling regardless
+// of shader side effects (discard, r/w resource access, dynamic depth write)
+def GraphicsEarlyFragmentTests : InheritableAttr {
+  let Spellings = [GNU<"early_fragment_tests">,
+                   CXX11<"","early_fragment_tests", 200809>];
+  let Subjects = SubjectList<[Function], ErrorDiag>;
   let Documentation = [Undocumented];
 }
 

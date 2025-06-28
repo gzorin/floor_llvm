@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ d6cff9039956d6f461625b01981c541eb724088c
+// @ ed18ccec1f8c87417af68252a0931121806798a0
 //
 //===----------------------------------------------------------------------===//
 
@@ -59,6 +59,18 @@ void CFGNode::add_unique_header(CFGNode *node) {
 void CFGNode::add_branch(CFGNode *to) {
   add_unique_succ(to);
   to->add_unique_pred(this);
+}
+
+void CFGNode::clear_branches() {
+  for (auto *s : succ) {
+    auto itr = std::find(s->pred.begin(), s->pred.end(), this);
+    // We might have become stale during rewrites. In this case we might have a
+    // succ with no corresponding pred. Ignore that.
+    if (itr != s->pred.end()) {
+      s->pred.erase(itr);
+    }
+  }
+  succ.clear();
 }
 
 void CFGNode::add_fake_branch(CFGNode *to) {
@@ -132,6 +144,29 @@ bool CFGNode::can_loop_merge_to(const CFGNode *other) const {
   return true;
 }
 
+bool CFGNode::can_backtrace_to_with_blockers(
+    const CFGNode *parent, const std::vector<CFGNode *> &block_nodes,
+    std::unordered_set<const CFGNode *> &node_cache) const {
+  if (node_cache.count(this)) {
+    return false;
+  }
+  node_cache.insert(this);
+
+  if (std::find(block_nodes.begin(), block_nodes.end(), this) !=
+      block_nodes.end()) {
+    return false;
+  }
+
+  for (auto *p : pred) {
+    if (p == parent ||
+        p->can_backtrace_to_with_blockers(parent, block_nodes, node_cache)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 bool CFGNode::can_backtrace_to(
     const CFGNode *parent,
     std::unordered_set<const CFGNode *> &node_cache) const {
@@ -154,6 +189,18 @@ bool CFGNode::can_backtrace_to(const CFGNode *parent) const {
 
   std::unordered_set<const CFGNode *> node_cache;
   return can_backtrace_to(parent, node_cache);
+}
+
+bool CFGNode::can_backtrace_to_with_blockers(
+    const CFGNode *parent, const std::vector<CFGNode *> &block_nodes) const {
+  // If parent can branch to this, then post_order(parent) must be greater than
+  // post_order(this).
+  if (parent->forward_post_visit_order < forward_post_visit_order) {
+    return false;
+  }
+
+  std::unordered_set<const CFGNode *> node_cache;
+  return can_backtrace_to_with_blockers(parent, block_nodes, node_cache);
 }
 
 bool CFGNode::post_dominates_any_work(
@@ -459,20 +506,26 @@ void CFGNode::retarget_branch(CFGNode *to_prev, CFGNode *to_next) {
 }
 
 void CFGNode::retarget_fake_succ(CFGNode *to_prev, CFGNode *to_next) {
-  assert(std::find(fake_succ.begin(), fake_succ.end(), to_prev) !=
-         fake_succ.end());
   assert(std::find(to_prev->fake_pred.begin(), to_prev->fake_pred.end(),
                    this) != to_prev->fake_pred.end());
-  assert(std::find(fake_succ.begin(), fake_succ.end(), to_next) ==
-         fake_succ.end());
-  assert(std::find(to_next->fake_pred.begin(), to_next->fake_pred.end(),
-                   this) == to_next->fake_pred.end());
+  auto succ_itr = std::find(fake_succ.begin(), fake_succ.end(), to_next);
+  auto prev_itr = std::find(fake_succ.begin(), fake_succ.end(), to_prev);
+  assert(prev_itr != fake_succ.end());
 
-  // Modify fake_succ in place so we don't invalidate iterator in
-  // traverse_dominated_blocks_and_rewrite_branch.
-  *std::find(fake_succ.begin(), fake_succ.end(), to_prev) = to_next;
+  // It is valid to rewrite a fake succ to an existing one.
+  // It's possible that we need to rewrite from one loop exit to another.
+
+  if (succ_itr == fake_succ.end()) {
+    *prev_itr = to_next;
+    assert(std::find(to_next->fake_pred.begin(), to_next->fake_pred.end(),
+                     this) == to_next->fake_pred.end());
+  } else {
+    // We can invalidate iterators since we break out immediately when rewriting
+    // a fake succ.
+    fake_succ.erase(prev_itr);
+  }
+
   to_next->add_unique_fake_pred(this);
-
   recompute_immediate_post_dominator();
 }
 

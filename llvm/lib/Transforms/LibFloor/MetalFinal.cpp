@@ -1,7 +1,7 @@
 //===- MetalFinal.cpp - Metal final pass ----------------------------------===//
 //
 //  Flo's Open libRary (floor)
-//  Copyright (C) 2004 - 2024 Florian Ziesche
+//  Copyright (C) 2004 - 2025 Florian Ziesche
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -63,6 +63,7 @@
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/LibFloor.h"
 #include "llvm/Transforms/LibFloor/FloorUtils.h"
+#include "llvm/Transforms/LibFloor/MetalTypes.h"
 #include <algorithm>
 #include <cstdarg>
 #include <memory>
@@ -149,6 +150,7 @@ namespace {
 		LLVMContext* ctx { nullptr };
 		Function* func { nullptr };
 		Instruction* alloca_insert { nullptr };
+		uint32_t metal_version { 0u };
 		bool was_modified { false };
 		bool is_kernel_func { false };
 		bool is_vertex_func { false };
@@ -158,6 +160,13 @@ namespace {
 		
 		struct per_function_state_t {
 			uint32_t kernel_dim { 1 };
+			uint32_t kernel_simd_width { 0 };
+			uint32_t kernel_local_size[3] { 0, 0, 0 };
+			bool has_fixed_local_size() const {
+				return (kernel_local_size[0] != 0 &&
+						kernel_local_size[1] != 0 &&
+						kernel_local_size[2] != 0);
+			}
 			
 			// added kernel function args
 			Argument* global_id { nullptr };
@@ -173,7 +182,9 @@ namespace {
 			
 			// added vertex function args
 			Argument* vertex_id { nullptr };
+			Argument* base_vertex_id { nullptr };
 			Argument* instance_id { nullptr };
+			Argument* base_instance_id { nullptr };
 			
 			// added fragment function args
 			Argument* point_coord { nullptr };
@@ -206,10 +217,12 @@ namespace {
 		};
 		
 		enum METAL_VERTEX_ARG_REV_IDX : int32_t {
-			METAL_VERTEX_ID = -2,
-			METAL_VS_INSTANCE_ID = -1,
+			METAL_VERTEX_ID = -4,
+			METAL_BASE_VERTEX_ID = -3,
+			METAL_VS_INSTANCE_ID = -2,
+			METAL_VS_BASE_INSTANCE_ID = -1,
 			
-			METAL_VERTEX_ARG_COUNT = 2,
+			METAL_VERTEX_ARG_COUNT = 4,
 		};
 		
 		enum METAL_FRAGMENT_ARG_REV_IDX : int32_t {
@@ -219,11 +232,12 @@ namespace {
 		};
 		
 		enum METAL_TESS_EVAL_ARG_REV_IDX : int32_t {
-			METAL_PATCH_ID = -3,
-			METAL_TES_INSTANCE_ID = -2,
+			METAL_PATCH_ID = -4,
+			METAL_TES_INSTANCE_ID = -3,
+			METAL_TES_BASE_INSTANCE_ID = -2,
 			METAL_POSITION_IN_PATCH = -1,
 			
-			METAL_TESS_EVAL_ARG_COUNT = 3,
+			METAL_TESS_EVAL_ARG_COUNT = 4,
 		};
 		
 		bool runOnFunction(Function &F) override {
@@ -236,6 +250,7 @@ namespace {
 			func = &F;
 			builder = std::make_shared<llvm::IRBuilder<>>(*ctx);
 			state = {};
+			metal_version = metal::get_metal_version(*M);
 			
 			for(auto& instr : F.getEntryBlock().getInstList()) {
 				if(!isa<AllocaInst>(instr)) {
@@ -252,13 +267,13 @@ namespace {
 			
 			// check for optional features: soft-printf, primitive id, barycentric coord
 			bool has_soft_printf = false, has_primitive_id = false, has_barycentric_coord = false;
-			if (auto soft_printf_meta = M->getNamedMetadata("floor.soft_printf")) {
+			if (M->getNamedMetadata("floor.soft_printf")) {
 				has_soft_printf = true;
 			}
-			if (auto primitive_id_meta = M->getNamedMetadata("floor.primitive_id")) {
+			if (M->getNamedMetadata("floor.primitive_id")) {
 				has_primitive_id = true;
 			}
-			if (auto barycentric_coord_meta = M->getNamedMetadata("floor.barycentric_coord")) {
+			if (M->getNamedMetadata("floor.barycentric_coord")) {
 				has_barycentric_coord = true;
 			}
 			
@@ -274,6 +289,24 @@ namespace {
 					assert((is_kernel_func && state.kernel_dim >= 1 && state.kernel_dim <= 3) ||
 						   (is_tess_control_func && state.kernel_dim == 1));
 				}
+				
+				if (is_kernel_func) {
+					auto kernel_simd_width_node = F.getMetadata("kernel_simd_width");
+					if (kernel_simd_width_node && kernel_simd_width_node->getNumOperands() == 1) {
+						auto& op = kernel_simd_width_node->getOperand(0);
+						state.kernel_simd_width = (uint32_t)mdconst::extract<ConstantInt>(op)->getZExtValue();
+						assert(state.kernel_simd_width >= 1 && state.kernel_simd_width <= 128);
+					}
+					
+					MDNode* wg_size_node = func->getMetadata("reqd_work_group_size");
+					if (wg_size_node && wg_size_node->getNumOperands() == 3) {
+						state.kernel_local_size[0] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(0))->getZExtValue();
+						state.kernel_local_size[1] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(1))->getZExtValue();
+						state.kernel_local_size[2] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(2))->getZExtValue();
+						assert(state.kernel_local_size[0] > 0 && state.kernel_local_size[1] > 0 && state.kernel_local_size[2] > 0);
+					}
+				}
+				
 				if (F.arg_size() >= METAL_KERNEL_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
 					int32_t rev_idx = -1;
 					state.num_sub_groups = get_arg_by_idx(rev_idx--);
@@ -301,7 +334,9 @@ namespace {
 				if (F.arg_size() >= METAL_VERTEX_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
 					// TODO: this should be optional / only happen on request
 					state.vertex_id = get_arg_by_idx(METAL_VERTEX_ID);
+					state.base_vertex_id = get_arg_by_idx(METAL_BASE_VERTEX_ID);
 					state.instance_id = get_arg_by_idx(METAL_VS_INSTANCE_ID);
+					state.base_instance_id = get_arg_by_idx(METAL_VS_BASE_INSTANCE_ID);
 					if (has_soft_printf) {
 						state.soft_printf = get_arg_by_idx(-(METAL_VERTEX_ARG_COUNT + 1));
 					}
@@ -317,6 +352,7 @@ namespace {
 					// TODO: this should be optional / only happen on request
 					state.patch_id = get_arg_by_idx(METAL_PATCH_ID);
 					state.instance_id = get_arg_by_idx(METAL_TES_INSTANCE_ID);
+					state.base_instance_id = get_arg_by_idx(METAL_TES_BASE_INSTANCE_ID);
 					state.position_in_patch = get_arg_by_idx(METAL_POSITION_IN_PATCH);
 					if (has_soft_printf) {
 						state.soft_printf = get_arg_by_idx(-(METAL_TESS_EVAL_ARG_COUNT + 1));
@@ -350,18 +386,30 @@ namespace {
 			}
 			
 			// update function signature / param list
-			if(is_kernel_func || is_vertex_func || is_fragment_func || is_tess_control_func || is_tess_eval_func) {
+			if (is_kernel_func || is_vertex_func || is_fragment_func || is_tess_control_func || is_tess_eval_func) {
 				std::vector<Type*> param_types;
-				for(auto& arg : F.args()) {
+				for (auto& arg : F.args()) {
+					// replace noalias LLVM attribute with "air-buffer-no-alias" string attribute on Metal 3.1+
+					if (metal_version >= 310 && arg.hasAttribute(Attribute::NoAlias)) {
+						arg.addAttr(llvm::Attribute::get(*ctx, "air-buffer-no-alias"));
+						arg.removeAttr(Attribute::NoAlias);
+					}
 					param_types.push_back(arg.getType());
 				}
 				auto new_func_type = FunctionType::get(F.getReturnType(), param_types, false);
 				F.mutateType(PointerType::get(new_func_type, 0));
 				F.mutateFunctionType(new_func_type);
 				
-				// always remove "norecurse" and "min-legal-vector-width"
-				F.removeFnAttr(Attribute::NoRecurse);
+				// always remove "norecurse" and "min-legal-vector-width" on Metal < 3.1
+				if (metal_version < 310) {
+					F.removeFnAttr(Attribute::NoRecurse);
+				}
 				F.removeFnAttr("min-legal-vector-width");
+				
+				// set our own "min-legal-vector-width" attribute on Metal 3.1+
+				if (metal_version >= 310) {
+					F.addFnAttr(llvm::Attribute::get(*ctx, "min-legal-vector-width", "64"));
+				}
 			}
 			
 			// visit everything in this function
@@ -377,7 +425,7 @@ namespace {
 		using InstVisitor<MetalFinal>::visit;
 		void visit(Instruction& I) {
 			// remove fpmath metadata from all instructions
-			if (MDNode* MD = I.getMetadata(LLVMContext::MD_fpmath)) {
+			if (I.getMetadata(LLVMContext::MD_fpmath)) {
 				I.setMetadata(LLVMContext::MD_fpmath, nullptr);
 				was_modified = true;
 			}
@@ -550,6 +598,34 @@ namespace {
 					break;
 				}
 					
+				// three arguments cases
+				case Intrinsic::fma: {
+					auto op_0 = I.getOperand(0);
+					auto op_1 = I.getOperand(1);
+					auto op_2 = I.getOperand(2);
+					
+					// create AIR function name
+					auto suffix = get_suffix_for_type(op_0->getType(), true);
+					if (!suffix) {
+						ctx->emitError(&I, "unexpected type in intrinsic:\n" + print_instr(I));
+						return;
+					}
+					std::string func_name = "air.fma" + *suffix;
+					
+					// create the new call
+					SmallVector<llvm::Type*, 3> param_types { op_0->getType(), op_1->getType(), op_2->getType() };
+					const auto func_type = llvm::FunctionType::get(I.getType(), param_types, false);
+					builder->SetInsertPoint(&I);
+					
+					auto call = builder->CreateCall(M->getOrInsertFunction(func_name, func_type), { op_0, op_1, op_2 });
+					call->setDebugLoc(I.getDebugLoc());
+					
+					I.replaceAllUsesWith(call);
+					I.eraseFromParent();
+					was_modified = true;
+					break;
+				}
+					
 #if 0 // TODO: implement these
 				case Intrinsic::vector_reduce_fadd: {
 					auto init = I.getOperand(0);
@@ -641,17 +717,41 @@ namespace {
 			}
 			if (!func_name.startswith("floor.")) return;
 			
+			// helper function to retrieve a constant dim index for a id variable load
+			const auto get_dim_idx = [this](Value* dim_op, Instruction* originating_call_or_null) {
+				const auto const_dim_op = dyn_cast_or_null<ConstantInt>(dim_op);
+				if (!const_dim_op) {
+					llvm::errs() << "dim index in " << state.kernel_dim << "D kernel " << func->getName() << " is not constant:\n";
+					if (originating_call_or_null) {
+						llvm::errs() << *originating_call_or_null << "\n";
+					}
+					llvm::errs().flush();
+					return 0u;
+				}
+				
+				const auto dim_idx = const_dim_op->getZExtValue();
+				if ((dim_idx + 1) > state.kernel_dim) {
+					llvm::errs() << "out-of-bounds dim index " << dim_idx << " in " << state.kernel_dim << "D kernel " << func->getName() << ":\n";
+					if (originating_call_or_null) {
+						llvm::errs() << *originating_call_or_null << "\n";
+					}
+					llvm::errs().flush();
+					return 0u;
+				}
+				return uint32_t(dim_idx);
+			};
+			
 			builder->SetInsertPoint(&I);
 			
 			// figure out which one we need
-			Argument* id;
+			Value* id;
 			bool get_from_vector = false;
 			if(func_name == "floor.get_global_id.i32") {
 				id = state.global_id;
 				get_from_vector = true;
 			}
 			else if(func_name == "floor.get_global_size.i32") {
-				id =state. global_size;
+				id = state.global_size;
 				get_from_vector = true;
 			}
 			else if(func_name == "floor.get_local_id.i32") {
@@ -659,6 +759,13 @@ namespace {
 				get_from_vector = true;
 			}
 			else if(func_name == "floor.get_local_size.i32") {
+				if (state.has_fixed_local_size()) {
+					const auto dim_idx = get_dim_idx(I.getOperand(0), &I);
+					const auto const_local_size = ConstantInt::get(Type::getInt32Ty(*ctx), state.kernel_local_size[dim_idx]);
+					I.replaceAllUsesWith(const_local_size);
+					I.eraseFromParent();
+					return;
+				}
 				id = state.local_size;
 				get_from_vector = true;
 			}
@@ -677,10 +784,29 @@ namespace {
 				id = state.sub_group_local_id;
 			}
 			else if(func_name == "floor.get_sub_group_size.i32") {
-				id = state.sub_group_size;
+				// use fixed SIMD width if available
+				if (state.kernel_simd_width > 0) {
+					id = ConstantInt::get(Type::getInt32Ty(*ctx), state.kernel_simd_width);
+				} else {
+					id = state.sub_group_size;
+				}
 			}
 			else if(func_name == "floor.get_num_sub_groups.i32") {
-				id = state.num_sub_groups;
+				// if both the SIMD width and the local size are fixed, we also have a fixed #sub-groups,
+				// because the local size extent must be a multiple of the SIMD width
+				if (state.kernel_simd_width > 0 && state.has_fixed_local_size()) {
+					uint32_t local_size_extent = state.kernel_local_size[0];
+					if (state.kernel_dim > 1) {
+						local_size_extent *= state.kernel_local_size[1];
+					}
+					if (state.kernel_dim > 2) {
+						local_size_extent *= state.kernel_local_size[2];
+					}
+					assert((local_size_extent % state.kernel_simd_width) == 0u);
+					id = ConstantInt::get(Type::getInt32Ty(*ctx), local_size_extent / state.kernel_simd_width);
+				} else {
+					id = state.num_sub_groups;
+				}
 			}
 			else if(func_name == "floor.get_work_dim.i32") {
 				const auto const_kernel_dim = builder->getInt32(state.kernel_dim);
@@ -695,6 +821,16 @@ namespace {
 				}
 				
 				I.replaceAllUsesWith(state.vertex_id);
+				I.eraseFromParent();
+				return;
+			}
+			else if(func_name == "floor.get_base_vertex_id.i32") {
+				if(state.base_vertex_id == nullptr) {
+					DBG(printf("failed to get base_vertex_id arg, probably not in a vertex function?\n"); fflush(stdout);)
+					return;
+				}
+				
+				I.replaceAllUsesWith(state.base_vertex_id);
 				I.eraseFromParent();
 				return;
 			}
@@ -715,6 +851,16 @@ namespace {
 				}
 				
 				I.replaceAllUsesWith(state.instance_id);
+				I.eraseFromParent();
+				return;
+			}
+			else if(func_name == "floor.get_base_instance_id.i32") {
+				if(state.base_instance_id == nullptr) {
+					DBG(printf("failed to get base_instance_id arg, probably not in a vertex or tessellation-evaluation function?\n"); fflush(stdout);)
+					return;
+				}
+				
+				I.replaceAllUsesWith(state.base_instance_id);
 				I.eraseFromParent();
 				return;
 			}
@@ -771,29 +917,52 @@ namespace {
 				I.eraseFromParent();
 				return;
 			}
+			else if(func_name == "floor.exit") {
+				// NOTE: we assume everything has been inlined at this point, so that we can just return/exit
+				if (is_fragment_func) {
+					auto func_type = llvm::FunctionType::get(llvm::Type::getVoidTy(*ctx), false);
+					auto discard_func = dyn_cast<Function>(M->getOrInsertFunction("air.discard_fragment", func_type).getCallee());
+					discard_func->addFnAttr(Attribute::NoReturn);
+					auto discard_call = CallInst::Create(func_type, discard_func, "", &I);
+					discard_call->setDebugLoc(I.getDebugLoc());
+				} else if (is_kernel_func || is_tess_control_func || func->getReturnType()->isVoidTy()) {
+					assert(func->getReturnType()->isVoidTy());
+					ReturnInst::Create(*ctx, I.getParent());
+				} else {
+					// we need to create a dummy return value before we can return here
+					auto ret_type = func->getReturnType();
+					if (ret_type->isAggregateType() || ret_type->isVectorTy()) {
+						ReturnInst::Create(*ctx, ConstantAggregateZero::get(ret_type), I.getParent());
+					} else if (ret_type->isIntegerTy()) {
+						ReturnInst::Create(*ctx, ConstantInt::get(ret_type, 0), I.getParent());
+					} else if (ret_type->isFloatingPointTy()) {
+						ReturnInst::Create(*ctx, ConstantFP::get(ret_type, 0.0), I.getParent());
+					} else {
+						// last resort: create dummy alloca and return it
+						auto dummy_alloca = new AllocaInst(ret_type, 0, "dummy_exit_ret", &*func->getEntryBlock().begin());
+						ReturnInst::Create(*ctx, dummy_alloca, I.getParent());
+					}
+				}
+				I.eraseFromParent();
+				return;
+			}
 			// unknown -> ignore for now
 			else return;
 			
-			if(id == nullptr) {
+			if (id == nullptr) {
 				DBG(printf("failed to get id arg, probably not in a kernel function?\n"); fflush(stdout);)
 				return;
 			}
 			
-			if (get_from_vector) {
-				const auto dim_op = I.getOperand(0);
-				if (const auto const_dim_op = dyn_cast_or_null<ConstantInt>(dim_op); dim_op) {
-					const auto dim_idx = const_dim_op->getZExtValue();
-					if ((dim_idx + 1) > state.kernel_dim) {
-						llvm::errs() << "out-of-bounds dim index " << dim_idx << " in " << state.kernel_dim << "D kernel " << func->getName() << ":\n";
-						llvm::errs() << I << "\n";
-						llvm::errs().flush();
-						return;
-					}
-				}
-			}
-			
 			// replace call with vector load / elem extraction from the appropriate vector
-			I.replaceAllUsesWith(get_from_vector ? builder->CreateExtractElement(id, I.getOperand(0)) : id);
+			Value* repl = nullptr;
+			if (get_from_vector) {
+				const auto dim_idx = get_dim_idx(I.getOperand(0), &I);
+				repl = builder->CreateExtractElement(id, dim_idx);
+			} else {
+				repl = id;
+			}
+			I.replaceAllUsesWith(repl);
 			I.eraseFromParent();
 		}
 		
@@ -1124,18 +1293,22 @@ namespace {
 		
 		// this finds all libfloor image storage class structs and other structs, and replaces their names with the appropriate Apple Metal struct type name
 		// NOTE: we need to do this, since Apple decided to handle these specially based on their name alone (e.g. no allocating additional registers)
-		bool run_array_of_images_name_replacement() {
+		bool run_metal_name_replacement() {
 			std::vector<llvm::StructType*> image_storage_types;
 			for (auto& st_type : ctx->pImpl->NamedStructTypes) {
-				if (st_type.first().startswith("class.floor_image::image")) {
+				if (st_type.first().startswith("class.floor_image::image") ||
+					st_type.first().startswith("class.fl::floor_image::image")) {
 					image_storage_types.emplace_back(st_type.second);
 				} else {
 					// simple libfloor/std name -> Metal name replacement
 					// NOTE: since we need to match the start of the name, we can't simply use a map here
 					static const std::vector<std::pair<std::string, std::string>> simple_repl_lut {
 						{ "struct.std::__1::array", "struct.metal::array" },
+						{ "struct.fl::const_array", "struct.metal::array" },
 						{ "struct.triangle_tessellation_levels_t", "struct.metal::MTLTriangleTessellationFactorsHalf" },
+						{ "struct.fl::triangle_tessellation_levels_t", "struct.metal::MTLTriangleTessellationFactorsHalf" },
 						{ "struct.quad_tessellation_levels_t", "struct.metal::MTLQuadTessellationFactorsHalf" },
+						{ "struct.fl::quad_tessellation_levels_t", "struct.metal::MTLQuadTessellationFactorsHalf" },
 					};
 					for (const auto& repl : simple_repl_lut) {
 						if (st_type.first().startswith(repl.first)) {
@@ -1165,6 +1338,7 @@ namespace {
 				static const std::unordered_map<std::string, std::string> metal_name_lut {
 					{ "struct._texture_1d_t", "struct.metal::texture1d" },
 					{ "struct._texture_1d_array_t", "struct.metal::texture1d_array" },
+					{ "struct._texture_1d_buffer_t", "struct.metal::texture1d_buffer" },
 					{ "struct._texture_2d_t", "struct.metal::texture2d" },
 					{ "struct._texture_2d_array_t", "struct.metal::texture2d_array" },
 					{ "struct._depth_2d_t", "struct.metal::depth2d" },
@@ -1195,7 +1369,7 @@ namespace {
 			M = &Mod;
 			ctx = &M->getContext();
 			
-			bool module_modified = run_array_of_images_name_replacement();
+			bool module_modified = run_metal_name_replacement();
 			
 			// * strip floor_* calling convention from all functions and their users (replace it with C CC)
 			// * kill all functions named floor.*

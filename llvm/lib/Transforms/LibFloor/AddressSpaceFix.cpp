@@ -1,7 +1,7 @@
 //===- AddressSpaceFix.cpp - OpenCL/SPIR and related addrspace fixes ------===//
 //
 //  Flo's Open libRary (floor)
-//  Copyright (C) 2004 - 2024 Florian Ziesche
+//  Copyright (C) 2004 - 2025 Florian Ziesche
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -93,8 +93,6 @@ namespace {
 		
 		static char ID; // Pass identification, replacement for typeid
 		
-		std::shared_ptr<llvm::IRBuilder<>> builder;
-		
 		Module* M { nullptr };
 		LLVMContext* ctx { nullptr };
 		bool was_modified { false };
@@ -113,7 +111,6 @@ namespace {
 		bool runOnModule(Module& Mod) override {
 			M = &Mod;
 			ctx = &M->getContext();
-			builder = std::make_shared<llvm::IRBuilder<>>(*ctx);
 			
 			DBG(errs() << Mod << "\n");
 			
@@ -146,9 +143,10 @@ namespace {
 		}
 
 		template <bool fix_call_instrs = true>
-		static void fix_users(AddressSpaceFix* asfix_pass, LLVMContext& ctx, std::shared_ptr<llvm::IRBuilder<>>& builder,
+		static void fix_users(Pass* pass, LLVMContext& ctx,
 							  Instruction* instr, Value* parent, const uint32_t address_space,
-							  const bool fix_inner_ptr, std::vector<ReturnInst*>& returns) {
+							  const bool fix_inner_ptr, std::vector<ReturnInst*>& returns,
+							  bool& was_modified) {
 			// fix instruction
 			bool need_users_update = true;
 			switch(instr->getOpcode()) {
@@ -183,6 +181,8 @@ namespace {
 					// always allow trivial fixes of memcpy
 					// TODO: memset, memmove
 					if (auto memcpy_instr = dyn_cast_or_null<MemCpyInst>(instr); memcpy_instr) {
+						// need a temporary builder for this
+						auto builder = std::make_unique<llvm::IRBuilder<>>(ctx);
 						builder->SetInsertPoint(memcpy_instr);
 						CallInst* new_memcpy_instr = nullptr;
 						if (memcpy_instr->getIntrinsicID() != Intrinsic::memcpy_inline) {
@@ -215,7 +215,8 @@ namespace {
 						auto CI = cast<CallInst>(instr);
 						DBG(errs() << ">> call: " << *CI << "\n";)
 						// -> recurse (note that the argument will already have the correct address space)
-						asfix_pass->fix_call_instr(*CI, false);
+						assert(pass);
+						fix_call_instr(*pass, *CI, false, was_modified);
 					}
 					break;
 				}
@@ -309,8 +310,8 @@ namespace {
 			}
 			
 			// recursively fix all users
-			libfloor_utils::for_all_instruction_users(*instr, [&asfix_pass, &ctx, &builder, &instr, &address_space,
-																&fix_inner_ptr, &returns](Instruction& user_instr) {
+			libfloor_utils::for_all_instruction_users(*instr, [&pass, &ctx, &instr, &address_space,
+																&fix_inner_ptr, &returns, &was_modified](Instruction& user_instr) {
 				DBG(errs() << ">> replacing rec use: " << user_instr << " -> as: " << address_space << "\n";)
 				switch (user_instr.getOpcode()) {
 					   case Instruction::GetElementPtr:
@@ -321,7 +322,7 @@ namespace {
 					   case Instruction::Store:
 					   case Instruction::PHI:
 					   case Instruction::Select:
-						   fix_users<fix_call_instrs>(asfix_pass, ctx, builder, &user_instr, instr, address_space, fix_inner_ptr, returns);
+						   fix_users<fix_call_instrs>(pass, ctx, &user_instr, instr, address_space, fix_inner_ptr, returns, was_modified);
 						   break;
 					   case Instruction::AddrSpaceCast:
 					   case Instruction::Invoke:
@@ -340,15 +341,18 @@ namespace {
 		};
 		
 		// returns true if the return type changed
-		void fix_function(llvm::Function* func, const std::vector<as_fix_arg_info>& args, const bool is_top_call, const bool fix_inner_ptr) {
+		static void fix_function(Pass& pass, llvm::Function* func, const std::vector<as_fix_arg_info>& args, const bool is_top_call,
+								 const bool fix_inner_ptr, bool& was_modified) {
+			LLVMContext* ctx = &func->getContext();
 			std::vector<ReturnInst*> returns; // returns to fix
 			for(const auto& arg : args) {
 				if(arg.read_only_fix) continue;
 				
 				Argument& func_arg = *(std::next(func->arg_begin(), arg.index));
-				libfloor_utils::for_all_instruction_users(func_arg, [this, &func_arg, &arg, fix_inner_ptr, &returns](Instruction& instr) {
+				libfloor_utils::for_all_instruction_users(func_arg, [&pass, &func_arg, &arg, fix_inner_ptr, &returns, ctx,
+																	 &was_modified](Instruction& instr) {
 					DBG(errs() << ">> replacing use: " << instr << "\n";)
-					fix_users(this, *ctx, builder, &instr, &func_arg, arg.address_space, fix_inner_ptr, returns);
+					fix_users(&pass, *ctx, &instr, &func_arg, arg.address_space, fix_inner_ptr, returns, was_modified);
 				});
 				DBG(errs() << "<< fixed arg: " << arg.index << "\n";)
 			}
@@ -393,7 +397,7 @@ namespace {
 			DBG(errs() << "<< fixed func\n";)
 		}
 		
-		void fix_call(CallInst& CI, const std::vector<as_fix_arg_info>& args, const bool is_top_call) {
+		static void fix_call(Pass& pass, CallInst& CI, const std::vector<as_fix_arg_info>& args, const bool is_top_call, bool& was_modified) {
 			bool need_clone = false, need_read_only_fix = false;
 			for(const auto& arg : args) {
 				if(!arg.read_only_fix) need_clone = true;
@@ -426,15 +430,18 @@ namespace {
 					
 					auto call_arg = CI.getOperand(arg.index);
 					
-					builder->SetInsertPoint(alloca_insert); // insert alloca at function entry
-					auto tmp = builder->CreateAlloca(call_arg->getType()->getPointerElementType(),
-													 // what about arrays?
-													 nullptr,
-													 // give it a nice name
-													 "asfixtmp");
+					auto tmp = new AllocaInst(call_arg->getType()->getPointerElementType(),
+											  0 /* no AS */,
+											  // what about arrays?
+											  nullptr,
+											  // give it a nice name
+											  "asfixtmp",
+											  // insert alloca at function entry
+											  alloca_insert);
 					
-					builder->SetInsertPoint(&CI); // insert load before call
-					builder->CreateStore(builder->CreateLoad(call_arg->getType()->getPointerElementType(), call_arg), tmp);
+					// insert load+store before call
+					auto ld = new LoadInst(call_arg->getType()->getPointerElementType(), call_arg, "", &CI);
+					new StoreInst(ld, tmp, &CI);
 					
 					CI.setOperand(arg.index, tmp);
 				}
@@ -482,6 +489,7 @@ namespace {
 				}
 				
 				// check if cloned function already exists
+				auto M = CI.getModule();
 				auto cloned_func = M->getFunction(func_name);
 				if(cloned_func == nullptr) {
 					// only do this once
@@ -506,7 +514,7 @@ namespace {
 					DBG(errs() << "\n>> before <<\n" << *cloned_func);
 					
 					//
-					fix_function(cloned_func, args, is_top_call, false);
+					fix_function(pass, cloned_func, args, is_top_call, false, was_modified);
 					CI.setCalledFunction(cloned_func, true);
 					CI.mutateType(cloned_func->getReturnType());
 					
@@ -521,12 +529,12 @@ namespace {
 		}
 		
 		void visitCallInst(CallInst& CI) {
-			fix_call_instr(CI, true);
+			fix_call_instr(*this, CI, true, was_modified);
 		}
 		
-		void fix_call_instr(CallInst& CI, const bool is_top_call) {
+		static void fix_call_instr(Pass& pass, CallInst& CI, const bool is_top_call, bool& was_modified) {
 			PointerType* FPTy = cast<PointerType>(CI.getCalledOperand()->getType());
-			FunctionType* FTy = cast<FunctionType>(FPTy->getElementType());
+			FunctionType* FTy = cast<FunctionType>(FPTy->getPointerElementType());
 			
 			std::vector<as_fix_arg_info> fix_args;
 			for (unsigned i = 0, e = FTy->getNumParams(); i != e; ++i) {
@@ -545,7 +553,7 @@ namespace {
 					
 					// check if the mismatch is _only_ due to the addrspace
 					auto as_ptr = cast<PointerType>(called_arg_type);
-					if(PointerType::get(as_ptr->getElementType(),
+					if(PointerType::get(as_ptr->getPointerElementType(),
 										expected_arg_type->getPointerAddressSpace()) !=
 					   expected_arg_type) {
 						// emit original verifier assertion (TODO: fix it there!)
@@ -615,7 +623,8 @@ namespace {
 						} else if (elem_type->isStructTy()) {
 							// if this is a struct type, we need to fully traverse it to figure out if it may be cloneable or not
 							const std::function<void(const llvm::StructType*)> traverse_st_type = [&traverse_st_type, &is_clonable, &is_constant_as](const llvm::StructType* st_type) {
-								if (st_type->getName().startswith("class.floor_image::image")) {
+								if (st_type->getName().startswith("class.floor_image::image") ||
+									st_type->getName().startswith("class.fl::floor_image::image")) {
 									is_clonable = false;
 									return;
 								}
@@ -625,8 +634,8 @@ namespace {
 															  cast<llvm::ArrayType>(field_type->getPointerElementType()) : nullptr));
 									if (array_type) {
 										const auto elem_type = array_type->getElementType();
-										if (!elem_type->isSized()) {
-											// -> can only clone sized types
+										if (!elem_type->isSized() || elem_type->isPointerTy()) {
+											// -> can only clone sized and non-pointer types
 											is_clonable = false;
 										} else {
 											if (elem_type->isStructTy()) {
@@ -668,8 +677,8 @@ namespace {
 				// retrieving AA directly in a module pass (as a dep) in llvm 3.8 is apparantly no longer possible,
 				// so we have to this localized AA instead (specific to the current function)
 				auto func = CI.getParent()->getParent();
-				BasicAAResult BAR(createLegacyPMBasicAAResult(*this, *func));
-				AAResults AA(createLegacyPMAAResults(*this, *func, BAR));
+				BasicAAResult BAR(createLegacyPMBasicAAResult(pass, *func));
+				AAResults AA(createLegacyPMAAResults(pass, *func, BAR));
 				
 				// check if we have both clone and read-only fixes
 				bool has_ro_fix = false, has_clone_fix = false;
@@ -697,7 +706,7 @@ namespace {
 				
 				// fix the call (+detect return type change)
 				auto orig_ret_type = CI.getCalledFunction()->getReturnType();
-				fix_call(CI, fix_args, is_top_call);
+				fix_call(pass, CI, fix_args, is_top_call, was_modified);
 				auto fixed_ret_type = CI.getCalledFunction()->getReturnType();
 				
 				if(is_top_call &&
@@ -714,16 +723,29 @@ namespace {
 }
 
 namespace llvm {
-	void fix_instruction_users(LLVMContext &ctx,
-	                           Instruction &instr,
-	                           Value &parent,
-	                           const uint32_t address_space,
-	                           const bool fix_inner_ptr,
-	                           std::vector<ReturnInst *> &returns) {
-		// NOTE: we can't fix call instructions here
-		auto builder = std::make_shared<llvm::IRBuilder<>>(ctx);
-		AddressSpaceFix::fix_users<false>(nullptr, ctx, builder, &instr, &parent, address_space, fix_inner_ptr, returns);
-	}
+void fix_instruction_users(LLVMContext &ctx,
+						   Instruction &instr,
+						   Value &parent,
+						   const uint32_t address_space,
+						   const bool fix_inner_ptr,
+						   std::vector<ReturnInst *> &returns) {
+	// NOTE: we can't fix call instructions here
+	bool was_modified = false;
+	AddressSpaceFix::fix_users<false>(nullptr, ctx, &instr, &parent, address_space, fix_inner_ptr, returns, was_modified);
+	(void)was_modified;
+}
+
+bool fix_instruction_users_with_calls(Pass& pass,
+									  LLVMContext &ctx,
+									  Instruction &instr,
+									  Value &parent,
+									  const uint32_t address_space,
+									  const bool fix_inner_ptr,
+									  std::vector<ReturnInst *> &returns) {
+	bool was_modified = false;
+	AddressSpaceFix::fix_users<true>(&pass, ctx, &instr, &parent, address_space, fix_inner_ptr, returns, was_modified);
+	return was_modified;
+}
 }
 
 char AddressSpaceFix::ID = 0;

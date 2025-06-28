@@ -3511,7 +3511,8 @@ public:
                                 QualType& ConvertedType);
   bool FunctionParamTypesAreEqual(const FunctionProtoType *OldType,
                                   const FunctionProtoType *NewType,
-                                  unsigned *ArgPos = nullptr);
+                                  unsigned *ArgPos = nullptr,
+                                  bool Reversed = false);
   void HandleFunctionTypeMismatch(PartialDiagnostic &PDiag,
                                   QualType FromType, QualType ToType);
 
@@ -8662,7 +8663,8 @@ public:
   FunctionTemplateDecl *getMoreSpecializedTemplate(
       FunctionTemplateDecl *FT1, FunctionTemplateDecl *FT2, SourceLocation Loc,
       TemplatePartialOrderingContext TPOC, unsigned NumCallArguments1,
-      unsigned NumCallArguments2, bool Reversed = false);
+      unsigned NumCallArguments2, bool Reversed = false,
+      bool AllowOrderingByConstraints = true);
   UnresolvedSetIterator
   getMostSpecialized(UnresolvedSetIterator SBegin, UnresolvedSetIterator SEnd,
                      TemplateSpecCandidateSet &FailedCandidates,
@@ -10441,6 +10443,10 @@ public:
   void AddComputeKernelWorkGroupSizeAttr(SourceRange AttrRange, Decl *D,
                                          Expr *size_x_expr, Expr *size_y_expr, Expr *size_z_expr,
                                          const AttributeCommonInfo &CI);
+
+  /// Adds a kernel_simd_width(width) attribute to a particular declaration.
+  void AddComputeKernelSIMDWidthAttr(SourceRange AttrRange, Decl *D, Expr *E,
+                                     const AttributeCommonInfo &CI);
 
   /// The declarator \p D defines a function in the scope \p S which is nested
   /// in an `omp begin/end declare variant` scope. In this method we create a

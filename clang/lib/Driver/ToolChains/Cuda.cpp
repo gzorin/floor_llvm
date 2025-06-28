@@ -85,6 +85,14 @@ CudaVersion getCudaVersion(uint32_t raw_version) {
     return CudaVersion::CUDA_124;
   if (raw_version < 12060)
     return CudaVersion::CUDA_125;
+  if (raw_version < 12070)
+    return CudaVersion::CUDA_126;
+  if (raw_version < 12080)
+    return CudaVersion::CUDA_127;
+  if (raw_version < 12090)
+    return CudaVersion::CUDA_128;
+  if (raw_version < 12100)
+    return CudaVersion::CUDA_129;
   return CudaVersion::NEW;
 }
 

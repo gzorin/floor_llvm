@@ -5193,7 +5193,15 @@ LValue CodeGenFunction::EmitCallExprLValue(const CallExpr *E) {
          "Can't have a scalar return unless the return type is a "
          "reference type!");
 
-  return MakeNaturalAlignPointeeAddrLValue(RV.getScalarVal(), E->getType());
+  // handle vector compat type replacement
+  auto expr_type = E->getType();
+  if (auto cxx_rdecl = expr_type->getAsCXXRecordDecl(); cxx_rdecl && cxx_rdecl->hasAttr<VectorCompatAttr>()) {
+    if (RV.getScalarVal()->getType()->isPointerTy() &&
+        RV.getScalarVal()->getType()->getPointerElementType()->isVectorTy()) {
+      expr_type = getContext().get_compat_vector_type(cxx_rdecl);
+    }
+  }
+  return MakeNaturalAlignPointeeAddrLValue(RV.getScalarVal(), expr_type);
 }
 
 LValue CodeGenFunction::EmitVAArgExprLValue(const VAArgExpr *E) {

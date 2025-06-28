@@ -46,6 +46,7 @@
 #include <string>
 #include <sstream>
 #include <optional>
+#include <span>
 using namespace llvm;
 using namespace std;
 using namespace metal;
@@ -71,6 +72,15 @@ static cl::opt<bool> PreserveAssemblyUseListOrder(
     "preserve-ll-uselistorder",
     cl::desc("Preserve use-list order when writing LLVM assembly."),
     cl::init(false), cl::Hidden);
+
+static cl::opt<std::string>
+FunctionFilter("filter", cl::desc("Only print/dump functions starting with <name>"),
+               cl::value_desc("name"), cl::init(""));
+
+static cl::opt<bool>
+FuzzySearch("fuzzy",
+            cl::desc("enable fuzzy searching of metallib data (MTLB blocks) in the input file"),
+            cl::init(false));
 
 /* .metallib layout (as of Metal 2.4 / macOS 12.0)
  
@@ -113,7 +123,7 @@ static cl::opt<bool> PreserveAssemblyUseListOrder(
  [debug metadata ...]
  
  bitcode:
- [LLVM 5.0 bitcode binaries ...]
+ [LLVM 5.0/14.0 bitcode binaries ...]
  
  (opt) embedded source code:
  [source archive count: uint32_t]
@@ -360,19 +370,13 @@ static void hex_dump(raw_fd_ostream& os, const char* ptr, const size_t length, c
 	}
 }
 
-static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>& Out) {
+static Expected<bool> parse_metallib(const std::span<const char> data_span, std::unique_ptr<ToolOutputFile>& Out, char* call_bin) {
 	auto& os = Out->os();
-	
-	//
-	ErrorOr<std::unique_ptr<MemoryBuffer>> input_data = MemoryBuffer::getFileOrSTDIN(InputFilename);
-	if (!input_data) {
-		return errorCodeToError(input_data.getError());
-	}
-	const auto& buffer = (*input_data)->getBuffer();
-	const auto& data = buffer.data();
+	const auto data = data_span.data();
+	const auto buffer_size = data_span.size_bytes();
 	
 	// sanity check
-	if(buffer.size() < sizeof(metallib_header)) {
+	if(buffer_size < sizeof(metallib_header)) {
 		return make_error<StringError>("invalid header size", inconvertibleErrorCode());
 	}
 	
@@ -464,7 +468,7 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	os << "bitcode_length: " << header.header_control.bitcode_length << '\n';
 	
 	// read programs info
-	if(buffer.size() < header.header_control.programs_offset + header.header_control.programs_length + 4u) {
+	if(buffer_size < header.header_control.programs_offset + header.header_control.programs_length + 4u) {
 		return make_error<StringError>("invalid size", inconvertibleErrorCode());
 	}
 	
@@ -484,10 +488,12 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	os << "program_count: " << program_count << '\n';
 	info.entries.resize(program_count);
 	
-	hex_dump(os, program_ptr, header.header_control.programs_length, "program metadata");
-	hex_dump(os, add_program_md_ptr, add_program_md_length, "additional program metadata");
-	hex_dump(os, extended_md_ptr, header.header_control.extended_md_length, "extended metadata");
-	hex_dump(os, debug_ptr, header.header_control.debug_length, "debug metadata");
+	if (FunctionFilter.empty()) {
+		hex_dump(os, program_ptr, header.header_control.programs_length, "program metadata");
+		hex_dump(os, add_program_md_ptr, add_program_md_length, "additional program metadata");
+		hex_dump(os, extended_md_ptr, header.header_control.extended_md_length, "extended metadata");
+		hex_dump(os, debug_ptr, header.header_control.debug_length, "debug metadata");
+	}
 	
 	for(uint32_t i = 0; i < program_count; ++i) {
 		auto& entry = info.entries[i];
@@ -588,6 +594,8 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	// parse additional metadata
 	std::optional<uint64_t> refl_list_offset;
 	std::optional<uint64_t> refl_list_length;
+	std::optional<uint64_t> i_list_offset;
+	std::optional<uint64_t> i_list_length;
 	std::optional<uint64_t> dyn_header_list_offset;
 	std::optional<uint64_t> dyn_header_list_length;
 	{
@@ -624,6 +632,12 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 					refl_list_offset = *(const uint64_t*)add_program_md_ptr;
 					refl_list_length = *(const uint64_t*)(add_program_md_ptr + 8u);
 					os << "\nreflection list:\n\toffset: " << *refl_list_offset << "\n\tlength: " << *refl_list_length << '\n';
+					break;
+				}
+				case TAG_TYPE::ILST: {
+					i_list_offset = *(const uint64_t*)add_program_md_ptr;
+					i_list_length = *(const uint64_t*)(add_program_md_ptr + 8u);
+					os << "\ni (?) list:\n\toffset: " << *i_list_offset << "\n\tlength: " << *i_list_length << '\n';
 					break;
 				}
 				case TAG_TYPE::HDYN: {
@@ -813,9 +827,9 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	
 	// parse reflection list
 	if (refl_list_offset && refl_list_length) {
-		if (*refl_list_offset + *refl_list_length > buffer.size()) {
+		if (*refl_list_offset + *refl_list_length > buffer_size) {
 			return make_error<StringError>("reflection list data goes out-of-bounds: " +
-										   to_string(*refl_list_offset + *refl_list_length) + " > " + to_string(buffer.size()),
+										   to_string(*refl_list_offset + *refl_list_length) + " > " + to_string(buffer_size),
 										   inconvertibleErrorCode());
 		}
 		for (uint32_t i = 0; i < program_count; ++i) {
@@ -882,11 +896,21 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 		}
 	}
 	
+	// parse i (?) list
+	if (i_list_offset && i_list_length) {
+		if (*i_list_offset + *i_list_length > buffer_size) {
+			return make_error<StringError>("i list data goes out-of-bounds: " +
+										   to_string(*i_list_offset + *i_list_length) + " > " + to_string(buffer_size),
+										   inconvertibleErrorCode());
+		}
+		// TODO: properly handle this
+	}
+	
 	// parse hdyn / dynamic header
 	if (dyn_header_list_offset && dyn_header_list_length) {
-		if (*dyn_header_list_offset + *dyn_header_list_length > buffer.size()) {
+		if (*dyn_header_list_offset + *dyn_header_list_length > buffer_size) {
 			return make_error<StringError>("hdyn data goes out-of-bounds: " +
-										   to_string(*dyn_header_list_offset + *dyn_header_list_length) + " > " + to_string(buffer.size()),
+										   to_string(*dyn_header_list_offset + *dyn_header_list_length) + " > " + to_string(buffer_size),
 										   inconvertibleErrorCode());
 		}
 		
@@ -939,6 +963,12 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	
 	//
 	for(const auto& prog : info.entries) {
+		if (!FunctionFilter.empty()) {
+			if (!prog.name.starts_with(FunctionFilter)) {
+				continue;
+			}
+		}
+		
 		os << '\n';
 		os << "################################################################################\n";
 		os << '\n';
@@ -1054,7 +1084,7 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 		memcpy((char*)bc_mem->getBufferStart(), data + bc_offset, bc_mem->getBufferSize());
 		
 		LLVMContext Context;
-		Context.setDiagnosticHandler(std::make_unique<MetalLibDisDiagnosticHandler>(argv[0]));
+		Context.setDiagnosticHandler(std::make_unique<MetalLibDisDiagnosticHandler>(call_bin));
 		auto bc_mod = parseBitcodeFile(*bc_mem, Context);
 		if(bc_mod) {
 			std::unique_ptr<AssemblyAnnotationWriter> Annotator;
@@ -1083,6 +1113,41 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	}
 	
 	return true;
+}
+
+static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>& Out) {
+	auto& os = Out->os();
+	ErrorOr<std::unique_ptr<MemoryBuffer>> input_data = MemoryBuffer::getFileOrSTDIN(InputFilename);
+	if (!input_data) {
+		return errorCodeToError(input_data.getError());
+	}
+	const auto& buffer = (*input_data)->getBuffer();
+	const auto& data = buffer.data();
+	
+	if (!FuzzySearch) {
+		return parse_metallib(std::span<const char> { data, buffer.size() }, Out, argv[0]);
+	} else {
+		const std::string_view mtlb_header { "MTLB"sv };
+		auto cur_data_span = std::span<const char> { data, buffer.size() };
+		bool found_any = false;
+		size_t total_offset = 0;
+		for (;;) {
+			const auto iter = std::search(cur_data_span.begin(), cur_data_span.end(), mtlb_header.begin(), mtlb_header.end());
+			if (iter == cur_data_span.end()) {
+				break;
+			}
+			const auto start_offset = std::distance(cur_data_span.begin(), iter);
+			total_offset += start_offset;
+			os << ">> found metal library @offset: rel " << start_offset << ", abs " << total_offset << "\n";
+			cur_data_span = cur_data_span.subspan(start_offset);
+			if (parse_metallib(cur_data_span, Out, argv[0])) {
+				found_any = true;
+			}
+			// offset span by 4 so that we don't match the same metallib
+			cur_data_span = cur_data_span.subspan(4);
+		}
+		return found_any;
+	}
 }
 
 static ExitOnError ExitOnErr;

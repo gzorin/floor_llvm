@@ -2238,7 +2238,8 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 	static const std::string prefix_ssbo_array = "ssbo_array:";
 	
 	//
-	const auto handle_stage_input_output = [this, &stage_infos, &is_vertex, &is_fragment](const QualType& clang_type,
+	const auto handle_stage_input_output = [this, &stage_infos, &is_vertex, &is_fragment](const FunctionDecl* FD,
+																						  const QualType& clang_type,
 																						  llvm::Type* llvm_type,
 																						  const bool is_return,
 																						  arg_idx_handler_t* arg_idx) {
@@ -2247,11 +2248,26 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 		const bool is_vertex_io = (is_return && is_vertex) || (!is_return && is_fragment);
 		const bool is_fragment_io = (is_return && is_fragment);
 		
-		const auto add_fbo_output = [this, &stage_infos](const QualType& type, const uint32_t location) {
-			const auto canon_data_type = type.getCanonicalType();
-			std::string output_type_str = "float";
-			if (canon_data_type->isIntegerType()) output_type_str = "int";
-			if (canon_data_type->isUnsignedIntegerType()) output_type_str = "uint";
+		const auto add_fbo_output = [this, &stage_infos](const QualType& type, const uint32_t location, const SourceLocation& src_loc) {
+			auto canon_scalar_type = type.getCanonicalType();
+			if (auto cxx_rdecl = canon_scalar_type->getAsCXXRecordDecl(); cxx_rdecl && cxx_rdecl->hasAttr<VectorCompatAttr>()) {
+				canon_scalar_type = getContext().get_compat_vector_type(cxx_rdecl).getCanonicalType();
+			}
+			if (canon_scalar_type->isVectorType()) {
+				canon_scalar_type = cast<VectorType>(canon_scalar_type)->getElementType().getCanonicalType();
+			}
+			
+			std::string output_type_str;
+			if (canon_scalar_type->isUnsignedIntegerType()) {
+				output_type_str = "uint";
+			} else if (canon_scalar_type->isSignedIntegerType()) {
+				output_type_str = "int";
+			} else if (canon_scalar_type->isFloatingType()) {
+				output_type_str = "float";
+			} else {
+				Error(src_loc, StringRef("invalid fragment shader output type"));
+				return;
+			}
 			stage_infos.push_back(llvm::MDString::get(VMContext, prefix_stage + "fbo_output:" + output_type_str + ":" + std::to_string(location)));
 		};
 		
@@ -2302,7 +2318,8 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 						}
 					} else if (is_fragment_io) {
 						if (field.hasAttr<GraphicsFBOColorLocationAttr>()) {
-							add_fbo_output(field.type, field.getAttr<GraphicsFBOColorLocationAttr>()->getEvalLocation());
+							add_fbo_output(field.type, field.getAttr<GraphicsFBOColorLocationAttr>()->getEvalLocation(),
+										   field.getAttr<GraphicsFBOColorLocationAttr>()->getLocation());
 						} else if (field.hasAttr<GraphicsFBODepthTypeAttr>()) {
 							const auto depth_attr = field.getAttr<GraphicsFBODepthTypeAttr>();
 							if (!field.type->isFloatingType()) {
@@ -2327,7 +2344,7 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 									break;
 								}
 							}
-							add_fbo_output(field.type, fbo_location);
+							add_fbo_output(field.type, fbo_location, field.field_decl->getLocation());
 							++fbo_location;
 						}
 					}
@@ -2342,16 +2359,15 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 				if (is_vertex_io) {
 					stage_infos.push_back(llvm::MDString::get(VMContext, prefix_stage + "position"));
 				} else if (is_fragment_io) {
-					add_fbo_output(clang_type, 0);
+					add_fbo_output(clang_type, 0, FD->getLocation());
 				}
 			}
 		} else if (!clang_type->isVoidType()) {
-			// TODO: anything else?
 			// stage defaults (can only be those)
 			if (is_vertex_io) {
 				stage_infos.push_back(llvm::MDString::get(VMContext, prefix_stage + "position"));
 			} else if (is_fragment_io) {
-				add_fbo_output(clang_type, 0);
+				add_fbo_output(clang_type, 0, FD->getLocation());
 			}
 		} else {
 			return;
@@ -2377,10 +2393,16 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 		std::string sample_type_str = "float";
 		if (data_type) {
 			const auto canon_data_type = data_type->getImageDataType().getCanonicalType();
-			if (canon_data_type->isIntegerType()) sample_type_str = "int";
-			if (canon_data_type->isUnsignedIntegerType()) sample_type_str = "uint";
-			if (canon_data_type->isHalfType()) sample_type_str = "half";
-			// else: just assume float
+			if (canon_data_type->isUnsignedIntegerType()) {
+				sample_type_str = "uint";
+			} else if (canon_data_type->isSignedIntegerType()) {
+				sample_type_str = "int";
+			} else if (canon_data_type->isHalfType()) {
+				sample_type_str = "half";
+			} else {
+				// else: just assume float
+				assert(canon_data_type->isFloatingType());
+			}
 		}
 		
 		stage_infos.push_back(llvm::MDString::get(VMContext, (prefix + access_str +
@@ -2425,15 +2447,10 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 		
 		// stage input
 		if (parm->hasAttr<GraphicsStageInputAttr>()) {
-			handle_stage_input_output(clang_type, llvm_type, false, &arg_idx);
+			handle_stage_input_output(FD, clang_type, llvm_type, false, &arg_idx);
 			// don't inc arg idx at the end
 			inc_arg_idx_at_end = false;
 		} else if (parm->hasAttr<FloorArgBufferAttr>()) {
-			if (!getCodeGenOpts().VulkanDescriptorBufferSupport) {
-				// argument buffers are not support without descriptor buffer support
-				Error(parm->getSourceRange().getBegin(), "argument buffers are not support without Vulkan descriptor buffer support");
-				return;
-			}
 			if (!cxx_rdecl) {
 				Error(parm->getSourceRange().getBegin(), "argument buffer element type must be a struct or class");
 				return;
@@ -2609,8 +2626,10 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "num_sub_groups"));
 	} else if (is_vertex) {
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "vertex_index"));
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "base_vertex_index"));
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "view_index"));
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "instance_index"));
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "base_instance_index"));
 	} else if (is_fragment) {
 		if (getCodeGenOpts().GraphicsPrimitiveID) {
 			stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "primitive_id"));
@@ -2626,7 +2645,7 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 	// handle return value
 	stage_infos.push_back(llvm::MDString::get(VMContext, "stage_output"));
 	if (is_vertex || is_fragment) {
-		handle_stage_input_output(FD->getReturnType(), Fn->getReturnType(), true, nullptr);
+		handle_stage_input_output(FD, FD->getReturnType(), Fn->getReturnType(), true, nullptr);
 	}
 	
 	// add to global stage_io node
@@ -2816,8 +2835,14 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			if (cxx_rdecl->hasAttr<VectorCompatAttr>()) {
 				// floor vector type
 				const auto vec_size = type_name_str.substr(type_param_start - 1, 1);
-				return strip_cvr(template_param + vec_size);
-			} else if (type_name_str.find("floor_image::image") == 0) {
+				auto type_name = strip_cvr(template_param + vec_size);
+				// turn "unsigned type" into "utype"
+				if (const auto pos = type_name.find("unsigned "); pos != std::string::npos) {
+					type_name.erase(pos + 1, 8);
+				}
+				return type_name;
+			} else if (type_name_str.starts_with("floor_image::image") ||
+					   type_name_str.starts_with("fl::floor_image::image")) {
 				// floor image type
 				// NOTE: this handling is slightly different than the one further down below
 				const auto image_type = (COMPUTE_IMAGE_TYPE)strtoull(template_param.c_str(), nullptr, 10);
@@ -2830,6 +2855,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 					COMPUTE_IMAGE_TYPE::FLAG_MSAA
 				};
 				const auto masked_image_type = image_type & opaque_image_mask;
+				const auto is_16bit = (image_type & COMPUTE_IMAGE_TYPE::FLAG_16_BIT_SAMPLING) != COMPUTE_IMAGE_TYPE::NONE;
 				
 				std::string img_type_str;
 				switch (masked_image_type) {
@@ -2892,13 +2918,13 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				img_type_str += '<';
 				switch (image_type & COMPUTE_IMAGE_TYPE::__DATA_TYPE_MASK) {
 					case COMPUTE_IMAGE_TYPE::FLOAT:
-						img_type_str += "float";
+						img_type_str += (is_16bit ? "half" : "float");
 						break;
 					case COMPUTE_IMAGE_TYPE::INT:
-						img_type_str += "int";
+						img_type_str += (is_16bit ? "short" : "int");
 						break;
 					case COMPUTE_IMAGE_TYPE::UINT:
-						img_type_str += "uint";
+						img_type_str += (is_16bit ? "ushort" : "uint");
 						break;
 					default:
 						break;
@@ -2921,7 +2947,8 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				
 				img_type_str += '>';
 				return img_type_str;
-			} else if (type_name_str.find("std::array") == 0) {
+			} else if (type_name_str.starts_with("std::array") ||
+					   type_name_str.starts_with("fl::const_array")) {
 				auto arr_def = cxx_rdecl->getDefinition();
 				if (!arr_def || !arr_def->isCompleteDefinition()) {
 					break;
@@ -2946,7 +2973,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 					break;
 				}
 				
-				return "array<" + make_type_name(arr_elem_type.getAsType()) + "," + std::to_string(arr_elem_count.getAsIntegral().getZExtValue()) + ">";
+				return "array<" + make_type_name(arr_elem_type.getAsType()) + ", " + std::to_string(arr_elem_count.getAsIntegral().getZExtValue()) + ">";
 			}
 		} while (false);
 		
@@ -2958,10 +2985,12 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		} else {
 			type_name = unqualified_type.getAsString(Policy);
 		}
-		// Turn "unsigned type" to "utype"
-		const auto pos = type_name.find("unsigned");
-		if (pos != std::string::npos) type_name.erase(pos + 1, 8);
-		return strip_cvr(type_name);
+		type_name = strip_cvr(type_name);
+		// turn "unsigned type" into "utype"
+		if (const auto pos = type_name.find("unsigned "); pos != std::string::npos) {
+			type_name.erase(pos + 1, 8);
+		}
+		return type_name;
 	};
 	
 	//
@@ -3024,6 +3053,9 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				case BuiltinType::OCLImage1dArray:
 					tex_type_name += "texture1d_array";
 					break;
+				case BuiltinType::OCLImage1dBuffer:
+					tex_type_name += "texture1d_buffer";
+					break;
 				case BuiltinType::OCLImage2d:
 					tex_type_name += "texture2d";
 					break;
@@ -3039,8 +3071,14 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				case BuiltinType::OCLImage2dMSAA:
 					tex_type_name += "texture2d_ms";
 					break;
+				case BuiltinType::OCLImage2dArrayMSAA:
+					tex_type_name += "texture2d_ms_array";
+					break;
 				case BuiltinType::OCLImage2dMSAADepth:
 					tex_type_name += "depth2d_ms";
+					break;
+				case BuiltinType::OCLImage2dArrayMSAADepth:
+					tex_type_name += "depth2d_ms_array";
 					break;
 				case BuiltinType::OCLImage3d:
 					tex_type_name += "texture3d";
@@ -3066,9 +3104,19 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			std::string sample_type_str = "float";
 			if (data_type) {
 				const auto canon_data_type = data_type->getImageDataType().getCanonicalType();
-				if (canon_data_type->isIntegerType()) sample_type_str = "int";
-				if (canon_data_type->isUnsignedIntegerType()) sample_type_str = "uint";
-				// else: just assume float
+				const auto llvm_canon_data_type = getTypes().ConvertTypeForMem(canon_data_type);
+				const auto data_type_size = getDataLayout().getTypeStoreSize(llvm_canon_data_type).getFixedValue();
+				
+				if (canon_data_type->isSignedIntegerType()) {
+					sample_type_str = (data_type_size == 2 ? "short" : "int");
+				} else if (canon_data_type->isUnsignedIntegerType()) {
+					sample_type_str = (data_type_size == 2 ? "ushort" : "uint");
+				} else {
+					// else: just assume float
+					if (data_type_size == 2) {
+						sample_type_str = "half";
+					}
+				}
 			}
 			tex_type_name += sample_type_str;
 			tex_type_name += ", ";
@@ -3089,7 +3137,12 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			
 			// #8/#9: arg name
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
-			arg_info.push_back(llvm::MDString::get(VMContext, StringRef(name)));
+			
+			auto name_ref = StringRef(name);
+			if (name_ref.endswith(".0")) {
+				name_ref = name_ref.substr(0, name.size() - 2u);
+			}
+			arg_info.push_back(llvm::MDString::get(VMContext, name_ref));
 			
 			return arg_info;
 		};
@@ -3173,30 +3226,28 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				
 				bool is_inline_struct = false;
 				const auto buffer_idx_offset = buffer_or_tex_idx_child;
-				if (indirect_buffer || is_indirect || indirect_struct_type_info) {
-					if (!field_type->isPointerType() &&
-						!field_type->isReferenceType() &&
-						!field_type->isImageType() &&
-						!field_type->isArrayImageType(true) &&
-						!field_type->isAggregateImageType() &&
-						!parent_decl.hasAttr<GraphicsStageInputAttr>() &&
-						field_type->isStructureOrClassType()) {
-						if (const auto inline_struct_rdecl = field_type->getAsCXXRecordDecl();
-							inline_struct_rdecl && !inline_struct_rdecl->hasAttr<VectorCompatAttr>()) {
-							is_inline_struct = true;
-							// #-2: inline struct type
-							struct_info.push_back(llvm::MDString::get(VMContext, "air.struct_type_info"));
-							// #-1: metadata of struct type
-							uint32_t struct_arg_idx_child = 0, struct_buf_idx_child = 0;
-							auto struct_type_info = add_struct_type_info(*inline_struct_rdecl, struct_rdecl, is_indirect, indirect_buffer, indirect_struct_type_info, struct_arg_idx_child, struct_buf_idx_child);
-							assert(!struct_type_info.empty());
-							struct_info.push_back(llvm::MDNode::get(VMContext, struct_type_info));
-							
-							// next param
-							++arg_idx_child;
-							// adjust buffer index at this level
-							buffer_or_tex_idx_child += std::max(array_size, 1u) * struct_buf_idx_child;
-						}
+				if (!field_type->isPointerType() &&
+					!field_type->isReferenceType() &&
+					!field_type->isImageType() &&
+					!field_type->isArrayImageType(true) &&
+					!field_type->isAggregateImageType() &&
+					!parent_decl.hasAttr<GraphicsStageInputAttr>() &&
+					field_type->isStructureOrClassType()) {
+					if (const auto inline_struct_rdecl = field_type->getAsCXXRecordDecl();
+						inline_struct_rdecl && !inline_struct_rdecl->hasAttr<VectorCompatAttr>()) {
+						is_inline_struct = true;
+						// #-2: inline struct type
+						struct_info.push_back(llvm::MDString::get(VMContext, "air.struct_type_info"));
+						// #-1: metadata of struct type
+						uint32_t struct_arg_idx_child = 0, struct_buf_idx_child = 0;
+						auto struct_type_info = add_struct_type_info(*inline_struct_rdecl, struct_rdecl, is_indirect, indirect_buffer, indirect_struct_type_info, struct_arg_idx_child, struct_buf_idx_child);
+						assert(!struct_type_info.empty());
+						struct_info.push_back(llvm::MDNode::get(VMContext, struct_type_info));
+						
+						// next param
+						++arg_idx_child;
+						// adjust buffer index at this level
+						buffer_or_tex_idx_child += std::max(array_size, 1u) * struct_buf_idx_child;
 					}
 				}
 				
@@ -3355,9 +3406,10 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(getDataLayout().getTypeStoreSize(llvm_pointee_type))));
 			// #12/#13: type alignment
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_align_size"));
-			// max out at 16, anything higher is unreasonable
-			// TODO: make sure this is POT
-			const auto align_size = std::min(getDataLayout().getTypeAllocSize(llvm_pointee_type).getFixedValue(), uint64_t(16));
+			// max out at 16 for normal types, anything higher is unreasonable
+			// for argument/indirect buffers, always assume an 8-byte alignment
+			const auto align_size = std::min(getDataLayout().getABITypeAlign(llvm_pointee_type).value(),
+											 indirect_buffer ? uint64_t(8u) : uint64_t(16u));
 			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(align_size)));
 			//getPrimitiveSizeInBits
 			// #14/#15: type name
@@ -3650,15 +3702,29 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		add_id_arg("__metal__num_sub_groups__", "air.simdgroups_per_threadgroup", "uint");
 	} else if (is_vertex || is_tess_eval) {
 		if (is_vertex) {
-			SmallVector<llvm::Metadata*, 6> arg_info;
-			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
-			arg_info.push_back(llvm::MDString::get(VMContext, "air.vertex_id"));
-			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
-			arg_info.push_back(llvm::MDString::get(VMContext, "uint"));
-			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
-			arg_info.push_back(llvm::MDString::get(VMContext, "__metal__vertex_id__"));
-			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
-			++arg_idx; // next llvm arg
+			{
+				SmallVector<llvm::Metadata*, 6> arg_info;
+				arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.vertex_id"));
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+				arg_info.push_back(llvm::MDString::get(VMContext, "uint"));
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+				arg_info.push_back(llvm::MDString::get(VMContext, "__metal__vertex_id__"));
+				arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+				++arg_idx; // next llvm arg
+			}
+			
+			{
+				SmallVector<llvm::Metadata*, 6> arg_info;
+				arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.base_vertex"));
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+				arg_info.push_back(llvm::MDString::get(VMContext, "uint"));
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+				arg_info.push_back(llvm::MDString::get(VMContext, "__metal__base_vertex_id__"));
+				arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+				++arg_idx; // next llvm arg
+			}
 		} else if (is_tess_eval) {
 			SmallVector<llvm::Metadata*, 6> arg_info;
 			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
@@ -3679,6 +3745,18 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			arg_info.push_back(llvm::MDString::get(VMContext, "uint"));
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
 			arg_info.push_back(llvm::MDString::get(VMContext, "__metal__instance_id__"));
+			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+			++arg_idx; // next llvm arg
+		}
+		
+		{
+			SmallVector<llvm::Metadata*, 6> arg_info;
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.base_instance"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "uint"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "__metal__base_instance_id__"));
 			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
 			++arg_idx; // next llvm arg
 		}
@@ -3925,13 +4003,130 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		
 		kernelMDArgs.push_back(llvm::MDNode::get(VMContext, max_work_group_size_info));
 	}
+	
+	// is early fragment tests set?
+	if (FD->getAttr<GraphicsEarlyFragmentTestsAttr>()) {
+		kernelMDArgs.push_back(llvm::MDString::get(VMContext, "early_fragment_tests"));
+	}
 }
+
+namespace libfloor {
+//! address space
+enum class ARG_ADDRESS_SPACE : uint32_t {
+	UNKNOWN							= (0u),
+	GLOBAL							= (1u),
+	LOCAL							= (2u),
+	CONSTANT						= (3u),
+	IMAGE							= (4u),
+};
+
+//! image type
+enum class ARG_IMAGE_TYPE : uint32_t {
+	NONE							= (0u),
+	IMAGE_1D						= (1u),
+	IMAGE_1D_ARRAY					= (2u),
+	IMAGE_1D_BUFFER					= (3u),
+	IMAGE_2D						= (4u),
+	IMAGE_2D_ARRAY					= (5u),
+	IMAGE_2D_DEPTH					= (6u),
+	IMAGE_2D_ARRAY_DEPTH			= (7u),
+	IMAGE_2D_MSAA					= (8u),
+	IMAGE_2D_ARRAY_MSAA				= (9u),
+	IMAGE_2D_MSAA_DEPTH				= (10u),
+	IMAGE_2D_ARRAY_MSAA_DEPTH		= (11u),
+	IMAGE_3D						= (12u),
+	IMAGE_CUBE						= (13u),
+	IMAGE_CUBE_ARRAY				= (14u),
+	IMAGE_CUBE_DEPTH				= (15u),
+	IMAGE_CUBE_ARRAY_DEPTH			= (16u),
+};
+
+//! r/w memory/image access flags
+enum class ARG_ACCESS : uint32_t {
+	UNSPECIFIED						= (0u),
+	READ							= (1u << 0u),
+	WRITE							= (1u << 1u),
+	READ_WRITE						= (READ | WRITE),
+};
+
+static constexpr inline ARG_ACCESS operator|(const ARG_ACCESS& e0, const ARG_ACCESS& e1) {
+	return (ARG_ACCESS)((std::underlying_type_t<ARG_ACCESS>)e0 |
+						(std::underlying_type_t<ARG_ACCESS>)e1);
+}
+static constexpr inline ARG_ACCESS& operator|=(ARG_ACCESS& e0, const ARG_ACCESS& e1) {
+	e0 = e0 | e1;
+	return e0;
+}
+
+//! special argument flags (backend or function type specific)
+enum class ARG_FLAG : uint32_t {
+	NONE							= (0u),
+	//! an array of some sort (buffers, images, plain data)
+	ARRAY							= (1u << 0u),
+	//! array of images
+	IMAGE_ARRAY						= (1u << 1u),
+	//! Vulkan/Metal only: array of buffers
+	//! NOTE: Vulkan: always used, Metal: only used for buffer arrays in argument buffers
+	BUFFER_ARRAY					= (1u << 2u),
+	//! argument/indirect buffer
+	ARGUMENT_BUFFER					= (1u << 3u),
+	//! graphics-only: shader stage input
+	STAGE_INPUT						= (1u << 4u),
+	//! Vulkan-only: constant parameter fast path
+	PUSH_CONSTANT					= (1u << 5u),
+	//! Vulkan-only: param is a storage buffer (not uniform)
+	SSBO							= (1u << 6u),
+	//! Vulkan-only: inline uniform block
+	IUB								= (1u << 7u),
+};
+
+static constexpr inline ARG_FLAG operator|(const ARG_FLAG& e0, const ARG_FLAG& e1) {
+	return (ARG_FLAG)((std::underlying_type_t<ARG_FLAG>)e0 |
+					  (std::underlying_type_t<ARG_FLAG>)e1);
+}
+static constexpr inline ARG_FLAG& operator|=(ARG_FLAG& e0, const ARG_FLAG& e1) {
+	e0 = e0 | e1;
+	return e0;
+}
+
+template <ARG_FLAG flag>
+static constexpr inline bool has_flag(const ARG_FLAG& in_flags) {
+	return ((uint32_t(flag) & uint32_t(in_flags)) == uint32_t(flag));
+}
+
+struct argument_info_t {
+	uint64_t size { 0u };
+	uint64_t array_extent { 0u };
+	ARG_ADDRESS_SPACE address_space { ARG_ADDRESS_SPACE::GLOBAL };
+	ARG_ACCESS access { ARG_ACCESS::UNSPECIFIED };
+	ARG_IMAGE_TYPE image_type { ARG_IMAGE_TYPE::NONE };
+	ARG_FLAG flags { ARG_FLAG::NONE };
+	
+	operator std::string() const {
+		std::stringstream sstr;
+		sstr << size << ",";
+		sstr << array_extent << ",";
+		sstr << (std::underlying_type_t<decltype(address_space)>)address_space << ",";
+		sstr << (std::underlying_type_t<decltype(access)>)access << ",";
+		sstr << (std::underlying_type_t<decltype(image_type)>)image_type << ",";
+		sstr << (std::underlying_type_t<decltype(flags)>)flags;
+		return sstr.str();
+	}
+	
+	friend std::ostream& operator<<(std::ostream& output, const argument_info_t& argument_info) {
+		output << (std::string)argument_info;
+		return output;
+	}
+};
+} // namespace libfloor
 
 void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 											  llvm::Function *Fn,
 											  const FunctionArgList &Args,
 											  const CGFunctionInfo &FnInfo,
 											  CodeGenModule &CGM) {
+	using namespace libfloor;
+	
 	const bool is_kernel = FD->hasAttr<ComputeKernelAttr>();
 	const bool is_vertex = FD->hasAttr<GraphicsVertexShaderAttr>();
 	const bool is_fragment = FD->hasAttr<GraphicsFragmentShaderAttr>();
@@ -3951,7 +4146,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 	const PrintingPolicy &Policy = getContext().getPrintingPolicy();
 	
 	// #0: info version
-	constexpr const uint32_t floor_info_version { 4u };
+	constexpr const uint32_t floor_info_version { 5u };
 	info << floor_info_version << ",";
 	// #1: function name
 	info << Fn->getName().str() << ",";
@@ -3976,7 +4171,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 		(getLangOpts().Vulkan && CGM.getCodeGenOpts().VulkanSoftPrintf > 0)) {
 		func_flags |= (1u << 0u);
 	}
-	if (getLangOpts().Vulkan && CGM.getCodeGenOpts().VulkanDescriptorBufferSupport) {
+	if (getLangOpts().Vulkan) {
 		func_flags |= (1u << 1u);
 	}
 	if (is_kernel || is_tess_control) {
@@ -3988,13 +4183,19 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 		func_flags |= (1u << (1u + kernel_dim));
 	}
 	info << func_flags << ",";
-	// #4,5,6: local size/dim
+	// #4,5,6: required local size/dim
 	if (const ReqdWorkGroupSizeAttr *reg_local_size = FD->getAttr<ReqdWorkGroupSizeAttr>()) {
 		info << reg_local_size->getXDim() << ",";
 		info << reg_local_size->getYDim() << ",";
 		info << reg_local_size->getZDim() << ",";
 	} else {
 		info << "0,0,0,";
+	}
+	// #7 required SIMD-width
+	if (const auto kernel_simd_width_attr = FD->getAttr<ComputeKernelSIMDWidthAttr>(); kernel_simd_width_attr) {
+		info << kernel_simd_width_attr->getWidth() << ",";
+	} else {
+		info << "0,";
 	}
 	
 	// iterate over clang function decl parameters
@@ -4008,70 +4209,15 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 		const auto llvm_type = std::next(Fn->arg_begin(), arg_idx.get_llvm_arg_idx())->getType();
 		const auto cxx_rdecl = clang_type->getAsCXXRecordDecl();
 		
-		enum class FLOOR_ARG_INFO : uint64_t {
-			// 0 == invalid!
-			NONE						= (0ull),
-			
-			// sets: -------- 000000-- -------- -------- xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx
-			__SIZE_SHIFT				= (0ull),
-			__SIZE_MASK					= (0x0000'0000'FFFF'FFFFull),
-			
-			// sets: -------- 000000-- -------- 00000xxx 00000000 00000000 00000000 00000000
-			__AS_SHIFT					= (32ull),
-			__AS_MASK					= (0x0000'0007'0000'0000ull),
-			AS_NONE						= NONE,
-			AS_GLOBAL					= (1ull << __AS_SHIFT),
-			AS_LOCAL					= (2ull << __AS_SHIFT),
-			AS_CONSTANT					= (3ull << __AS_SHIFT),
-			AS_IMAGE					= (4ull << __AS_SHIFT),
-			
-			// sets: -------- 000000-- xxxxxxxx 00000--- 00000000 00000000 00000000 00000000
-			__IMG_TYPE_SHIFT			= (40ull),
-			__IMG_TYPE_MASK				= (0x0000'FF000'0000'000ull),
-			IMG_1D						= (1ull << __IMG_TYPE_SHIFT),
-			IMG_1D_ARRAY				= (2ull << __IMG_TYPE_SHIFT),
-			IMG_1D_BUFFER				= (3ull << __IMG_TYPE_SHIFT),
-			IMG_2D						= (4ull << __IMG_TYPE_SHIFT),
-			IMG_2D_ARRAY				= (5ull << __IMG_TYPE_SHIFT),
-			IMG_2D_DEPTH				= (6ull << __IMG_TYPE_SHIFT),
-			IMG_2D_ARRAY_DEPTH			= (7ull << __IMG_TYPE_SHIFT),
-			IMG_2D_MSAA					= (8ull << __IMG_TYPE_SHIFT),
-			IMG_2D_ARRAY_MSAA			= (9ull << __IMG_TYPE_SHIFT),
-			IMG_2D_MSAA_DEPTH			= (10ull << __IMG_TYPE_SHIFT),
-			IMG_2D_ARRAY_MSAA_DEPTH		= (11ull << __IMG_TYPE_SHIFT),
-			IMG_3D						= (12ull << __IMG_TYPE_SHIFT),
-			IMG_CUBE					= (13ull << __IMG_TYPE_SHIFT),
-			IMG_CUBE_ARRAY				= (14ull << __IMG_TYPE_SHIFT),
-			IMG_CUBE_DEPTH				= (15ull << __IMG_TYPE_SHIFT),
-			IMG_CUBE_ARRAY_DEPTH		= (16ull << __IMG_TYPE_SHIFT),
-			
-			// sets: -------- 000000xx -------- 00000--- 00000000 00000000 00000000 00000000
-			__IMG_ACCESS_SHIFT			= (48ull),
-			__IMG_ACCESS_MASK			= (0x0003'0000'0000'0000ull),
-			IMG_ACCESS_READ				= (1ull << __IMG_ACCESS_SHIFT),
-			IMG_ACCESS_WRITE			= (2ull << __IMG_ACCESS_SHIFT),
-			IMG_ACCESS_READ_WRITE		= (IMG_ACCESS_READ | IMG_ACCESS_WRITE),
-			
-			// sets: xxxxxxxx 000000-- -------- 00000--- 00000000 00000000 00000000 00000000
-			__SPECIAL_TYPE_SHIFT		= (56ull),
-			__SPECIAL_TYPE_MASK			= (0xFF00'0000'0000'0000ull),
-			STAGE_INPUT					= (1ull << __SPECIAL_TYPE_SHIFT),
-			PUSH_CONSTANT				= (2ull << __SPECIAL_TYPE_SHIFT),
-			SSBO						= (3ull << __SPECIAL_TYPE_SHIFT),
-			IMAGE_ARRAY					= (4ull << __SPECIAL_TYPE_SHIFT),
-			IUB							= (5ull << __SPECIAL_TYPE_SHIFT),
-			ARGUMENT_BUFFER				= (6ull << __SPECIAL_TYPE_SHIFT),
-			BUFFER_ARRAY				= (7ull << __SPECIAL_TYPE_SHIFT),
-		};
 		static const auto to_fas = [](const LangAS& addr_space) {
 			if (addr_space == LangAS::opencl_global) {
-				return FLOOR_ARG_INFO::AS_GLOBAL;
+				return ARG_ADDRESS_SPACE::GLOBAL;
 			} else if (addr_space == LangAS::opencl_local) {
-				return FLOOR_ARG_INFO::AS_LOCAL;
+				return ARG_ADDRESS_SPACE::LOCAL;
 			} else if (addr_space == LangAS::opencl_constant) {
-				return FLOOR_ARG_INFO::AS_CONSTANT;
+				return ARG_ADDRESS_SPACE::CONSTANT;
 			}
-			return FLOOR_ARG_INFO::AS_NONE;
+			return ARG_ADDRESS_SPACE::UNKNOWN;
 		};
 		
 		const auto compute_type_size = [&CGM, &parm, &Fn](llvm::Type* type) {
@@ -4099,69 +4245,70 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 		static const auto get_image_access = [](const FloorImageFlagsAttr* flags_attr) {
 			if (flags_attr != nullptr) {
 				if (flags_attr->isWriteOnly()) {
-					return FLOOR_ARG_INFO::IMG_ACCESS_WRITE;
+					return ARG_ACCESS::WRITE;
 				} else if (flags_attr->isReadWrite()) {
-					return FLOOR_ARG_INFO::IMG_ACCESS_READ_WRITE;
+					return ARG_ACCESS::READ_WRITE;
 				}
 			}
-			return FLOOR_ARG_INFO::IMG_ACCESS_READ;
+			return ARG_ACCESS::READ;
 		};
 		static const auto img_type_to_floor_type = [](const clang::Type* type) {
 			const auto builtin_type = type->getAs<BuiltinType>();
 			if (!builtin_type) {
-				return (FLOOR_ARG_INFO)~0ull;
+				return ARG_IMAGE_TYPE::NONE;
 			}
 			switch (builtin_type->getKind()) {
 				case BuiltinType::OCLImage1d:
-					return FLOOR_ARG_INFO::IMG_1D;
+					return ARG_IMAGE_TYPE::IMAGE_1D;
 				case BuiltinType::OCLImage1dArray:
-					return FLOOR_ARG_INFO::IMG_1D_ARRAY;
+					return ARG_IMAGE_TYPE::IMAGE_1D_ARRAY;
 				case BuiltinType::OCLImage1dBuffer:
-					return FLOOR_ARG_INFO::IMG_1D_BUFFER;
+					return ARG_IMAGE_TYPE::IMAGE_1D_BUFFER;
 				case BuiltinType::OCLImage2d:
-					return FLOOR_ARG_INFO::IMG_2D;
+					return ARG_IMAGE_TYPE::IMAGE_2D;
 				case BuiltinType::OCLImage2dArray:
-					return FLOOR_ARG_INFO::IMG_2D_ARRAY;
+					return ARG_IMAGE_TYPE::IMAGE_2D_ARRAY;
 				case BuiltinType::OCLImage2dDepth:
-					return FLOOR_ARG_INFO::IMG_2D_DEPTH;
+					return ARG_IMAGE_TYPE::IMAGE_2D_DEPTH;
 				case BuiltinType::OCLImage2dArrayDepth:
-					return FLOOR_ARG_INFO::IMG_2D_ARRAY_DEPTH;
+					return ARG_IMAGE_TYPE::IMAGE_2D_ARRAY_DEPTH;
 				case BuiltinType::OCLImage2dMSAA:
-					return FLOOR_ARG_INFO::IMG_2D_MSAA;
+					return ARG_IMAGE_TYPE::IMAGE_2D_MSAA;
 				case BuiltinType::OCLImage2dArrayMSAA:
-					return FLOOR_ARG_INFO::IMG_2D_ARRAY_MSAA;
+					return ARG_IMAGE_TYPE::IMAGE_2D_ARRAY_MSAA;
 				case BuiltinType::OCLImage2dMSAADepth:
-					return FLOOR_ARG_INFO::IMG_2D_MSAA_DEPTH;
+					return ARG_IMAGE_TYPE::IMAGE_2D_MSAA_DEPTH;
 				case BuiltinType::OCLImage2dArrayMSAADepth:
-					return FLOOR_ARG_INFO::IMG_2D_ARRAY_MSAA_DEPTH;
+					return ARG_IMAGE_TYPE::IMAGE_2D_ARRAY_MSAA_DEPTH;
 				case BuiltinType::OCLImage3d:
-					return FLOOR_ARG_INFO::IMG_3D;
+					return ARG_IMAGE_TYPE::IMAGE_3D;
 				case BuiltinType::OCLImageCube:
-					return FLOOR_ARG_INFO::IMG_CUBE;
+					return ARG_IMAGE_TYPE::IMAGE_CUBE;
 				case BuiltinType::OCLImageCubeArray:
-					return FLOOR_ARG_INFO::IMG_CUBE_ARRAY;
+					return ARG_IMAGE_TYPE::IMAGE_CUBE_ARRAY;
 				case BuiltinType::OCLImageCubeDepth:
-					return FLOOR_ARG_INFO::IMG_CUBE_DEPTH;
+					return ARG_IMAGE_TYPE::IMAGE_CUBE_DEPTH;
 				case BuiltinType::OCLImageCubeArrayDepth:
-					return FLOOR_ARG_INFO::IMG_CUBE_ARRAY_DEPTH;
+					return ARG_IMAGE_TYPE::IMAGE_CUBE_ARRAY_DEPTH;
 				default: break;
 			}
-			return (FLOOR_ARG_INFO)~0ull;
+			return ARG_IMAGE_TYPE::NONE;
 		};
-		const auto add_image_arg = [](const FLOOR_ARG_INFO& floor_img_type,
-									  const FLOOR_ARG_INFO& access,
-									  const uint32_t elem_count = 1) -> uint64_t /* arg info */ {
-			uint64_t arg_info = uint64_t(FLOOR_ARG_INFO::AS_IMAGE);
-			arg_info |= uint64_t(floor_img_type);
-			arg_info |= uint64_t(access);
-			if (elem_count > 1) {
-				arg_info |= elem_count;
-				arg_info |= uint64_t(FLOOR_ARG_INFO::IMAGE_ARRAY);
-			}
+		const auto add_image_arg = [](const ARG_IMAGE_TYPE& floor_img_type,
+									  const ARG_ACCESS& access,
+									  const uint32_t elem_count = 1) -> argument_info_t {
+			argument_info_t arg_info {
+				.size = 0u,
+				.array_extent = (elem_count > 1 ? elem_count : 0u),
+				.address_space = ARG_ADDRESS_SPACE::IMAGE,
+				.access = access,
+				.image_type = floor_img_type,
+				.flags = (elem_count > 1 ? ARG_FLAG::IMAGE_ARRAY : ARG_FLAG::NONE),
+			};
 			return arg_info;
 		};
 		struct aggregate_image_ret_t {
-			uint64_t arg_info;
+			argument_info_t arg_info;
 			uint32_t arg_index_bias;
 		};
 		const auto add_aggregate_image_arg = [&CGM, &add_image_arg](const CXXRecordDecl* cxx_rdecl,
@@ -4186,8 +4333,8 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 			
 			// sanity check that all field types are actually images, have proper access attributes and image types match
 			// (should probably put this somewhere else, since it is sema-checking, but then I'd need to duplicate code)
-			FLOOR_ARG_INFO floor_img_type = FLOOR_ARG_INFO::NONE;
-			uint64_t floor_img_access = 0;
+			auto floor_img_type = ARG_IMAGE_TYPE::NONE;
+			auto floor_img_access = ARG_ACCESS::UNSPECIFIED;
 			for (const auto& img : agg_images) {
 				const auto access_attr = img->getAttr<FloorImageFlagsAttr>();
 				if (access_attr == nullptr) {
@@ -4195,7 +4342,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 							  StringRef("image type in an aggregate-image must have an access qualifier"));
 					return {};
 				}
-				floor_img_access |= uint64_t(get_image_access(access_attr));
+				floor_img_access |= get_image_access(access_attr);
 				
 				// first field initializes this
 				auto img_type = img->getType();
@@ -4206,7 +4353,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 					}
 					img_type = img_type->getAsArrayTypeUnsafe()->getElementType();
 				}
-				if (floor_img_type == FLOOR_ARG_INFO::NONE) {
+				if (floor_img_type == ARG_IMAGE_TYPE::NONE) {
 					floor_img_type = img_type_to_floor_type(img_type.getTypePtr());
 				} else {
 					// second field must have the same type!
@@ -4219,7 +4366,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 			}
 			
 			// if the aggregate has two image objects, one must be read, one must be write -> read/write
-			if (field_count == 2 && floor_img_access != uint64_t(FLOOR_ARG_INFO::IMG_ACCESS_READ_WRITE)) {
+			if (field_count == 2 && floor_img_access != ARG_ACCESS::READ_WRITE) {
 				CGM.Error(cxx_rdecl->getSourceRange().getBegin(),
 						  StringRef("aggregate-image has 2 image fields, but joint access is not read-write"));
 				return {};
@@ -4228,7 +4375,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 			// everything works out, add this as a single kernel argument (floor backends will handle r/w images as necessary)
 			// NOTE: for aggregate images that contain an array of images we still only count this as one image,
 			//       since this is behind-the-scenes stuff and not part of the user interface!
-			auto arg_info = add_image_arg(floor_img_type, (FLOOR_ARG_INFO)floor_img_access);
+			auto arg_info = add_image_arg(floor_img_type, floor_img_access);
 			
 			// 1 clang aggregate-image == 2 llvm image types -> inc index once more
 			uint32_t arg_index_bias = 0;
@@ -4244,29 +4391,37 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 															   const clang::QualType& clang_type,
 															   const CXXRecordDecl* parent,
 															   const FieldDecl* field_decl,
-															   const FLOOR_ARG_INFO init_info = FLOOR_ARG_INFO::NONE) -> uint64_t /* arg info */ {
-			// for now: just use the direct type size + no address space
-			uint64_t arg_info = (uint64_t)init_info;
+															   const ARG_FLAG init_flags = ARG_FLAG::NONE) -> argument_info_t {
+			// for now: just use the direct type size + no address space + always mark as read-only
+			argument_info_t arg_info {
+				.flags = init_flags,
+				.access = ARG_ACCESS::READ,
+			};
 			// handle some llvm weirdness? why can this be a pointer still?
-			if (init_info == FLOOR_ARG_INFO::STAGE_INPUT && clang_type->isPatchControlPointT()) {
+			if (has_flag<ARG_FLAG::STAGE_INPUT>(arg_info.flags) && clang_type->isPatchControlPointT()) {
 				// NOTE: if this is a tessellation evaluation shader, we know that this must be a control point (no additional special type needed)
 				
 				// extract the user specified control point info (we need to store the #fields)
 				auto cp = extract_control_point_info(CGM, parent, field_decl);
 				if (!cp) {
-					return 0u;
+					return {};
 				}
-				arg_info |= cp->fields.size();
+				arg_info.size = cp->fields.size();
 			} else if (llvm_type->isPointerTy()) {
-				arg_info |= compute_type_size(llvm_type->getPointerElementType());
+				arg_info.size = compute_type_size(llvm_type->getPointerElementType());
 			} else {
-				arg_info |= compute_type_size(llvm_type);
+				arg_info.size = compute_type_size(llvm_type);
 			}
-			arg_info |= (uint64_t)to_fas(clang_type.getAddressSpace());
+			// add array info if this is an array
+			if (llvm_type->isArrayTy()) {
+				arg_info.array_extent = llvm_type->getArrayNumElements();
+				arg_info.flags |= ARG_FLAG::ARRAY;
+			}
+			arg_info.address_space = to_fas(clang_type.getAddressSpace());
 			return arg_info;
 		};
 		//
-		const std::function<std::pair<uint64_t, uint32_t>(const clang::QualType&, const NamedDecl&, const bool, const bool, const bool, const uint32_t)>
+		const std::function<std::pair<argument_info_t, uint32_t>(const clang::QualType&, const NamedDecl&, const bool, const bool, const bool, const uint32_t)>
 		add_buffer_arg = [this, &CGM, &vulkan_iub_count, &compute_type_size, &arg_buf_info, &Fn, /*&add_buffer_arg,*/ &add_normal_arg,
 						  &add_image_arg, &add_aggregate_image_arg](const clang::QualType& type,
 																	const NamedDecl& decl,
@@ -4274,7 +4429,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 																	const bool is_indirect, // specifies if we're within an indirect buffer
 																	const bool is_floor_arg_buffer,
 																	const uint32_t logical_arg_idx)
-		-> std::pair<uint64_t /* arg info */, uint32_t /* #args in arg buffer */> {
+		-> std::pair<argument_info_t, uint32_t /* #args in arg buffer */> {
 			const auto converted_llvm_type = CGM.getTypes().ConvertTypeForMem(type);
 			QualType clang_pointee_type;
 			llvm::Type* llvm_pointee_type = nullptr;
@@ -4290,22 +4445,32 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 			const auto indirect_buffer = is_indirect_buffer(type, CGM, is_floor_arg_buffer);
 			
 			const uint64_t arg_size = compute_type_size(llvm_pointee_type);
-			uint64_t arg_info = arg_size;
+			argument_info_t arg_info {
+				.size = arg_size,
+			};
+			
+			// mark definite read-only buffers (otherwise keep unspecified for now)
+			if (indirect_buffer ||
+				clang_pointee_type.isConstQualified() ||
+				(clang_pointee_type.getAddressSpace() == LangAS::opencl_constant)) {
+				arg_info.access = ARG_ACCESS::READ;
+			}
+			
 			if (CGM.getLangOpts().OpenCL) {
-				arg_info |= (uint64_t)to_fas(clang_pointee_type.getAddressSpace());
+				arg_info.address_space = to_fas(clang_pointee_type.getAddressSpace());
 			} else if (CGM.getLangOpts().CUDA || CGM.getLangOpts().FloorHostCompute) {
 				// always pretend this is global
-				arg_info |= (uint64_t)FLOOR_ARG_INFO::AS_GLOBAL;
+				arg_info.address_space = ARG_ADDRESS_SPACE::GLOBAL;
 			}
 			if (indirect_buffer) {
-				arg_info |= (uint64_t)FLOOR_ARG_INFO::ARGUMENT_BUFFER;
+				arg_info.flags |= ARG_FLAG::ARGUMENT_BUFFER;
 			} else if (CGM.getLangOpts().Vulkan) {
 				// NOTE: only using global& for const parameters (aka uniforms) right now,
 				//       if this should change, this must also be modified
 				//       -> global pointer must always be a SSBO
 				if (!type->isReferenceType() &&
 					clang_pointee_type.getAddressSpace() == LangAS::opencl_global) {
-					arg_info |= (uint64_t)FLOOR_ARG_INFO::SSBO;
+					arg_info.flags |= ARG_FLAG::SSBO;
 				}
 				
 				// make parameters a IUB if their size is <= the size limit and we are still below the IUB count limit
@@ -4315,7 +4480,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 						decl.getAttr<FloorArgBufferAttr>() == nullptr /* must not be an argument buffer */ &&
 						arg_size <= CGM.getCodeGenOpts().VulkanIUBSize &&
 						vulkan_iub_count < CGM.getCodeGenOpts().VulkanIUBCount) {
-						arg_info |= (uint64_t)FLOOR_ARG_INFO::IUB;
+						arg_info.flags |= ARG_FLAG::IUB;
 						++vulkan_iub_count;
 					}
 				}
@@ -4354,8 +4519,8 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 						this_arg_buf_info << "0,"; // none for argument buffers
 						// #4: argument index in function
 						this_arg_buf_info << logical_arg_idx << ",";
-						// #5/6: 0 / unused for argument buffers
-						this_arg_buf_info << "0,0,";
+						// #5/6/7: 0 / unused for argument buffers
+						this_arg_buf_info << "0,0,0,";
 						
 						for (const auto& field : fields) {
 							auto field_type = field->getType();
@@ -4368,16 +4533,23 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 									// TODO: handle recursive arg buffers -> for now, ignore this and add it as a 8-byte sized normal arg
 									//const auto field_arg_info = add_buffer_arg(field_type, **field, false, true, false, arg_buffer_arg_idx).first;
 									//this_arg_buf_info << field_arg_info << ",";
-									uint64_t field_arg_info = 8; // ptr size is always 8
+									argument_info_t field_arg_info {
+										.size = 8u, // ptr size is always 8
+									};
 									const auto field_pointee_type = field_type->getPointeeType();
-									field_arg_info |= (uint64_t)to_fas(field_pointee_type.getAddressSpace());
+									field_arg_info.address_space = to_fas(field_pointee_type.getAddressSpace());
+									// mark definite read-only buffers (otherwise keep unspecified for now)
+									if (field_pointee_type.isConstQualified() ||
+										(field_pointee_type.getAddressSpace() == LangAS::opencl_constant)) {
+										field_arg_info.access = ARG_ACCESS::READ;
+									}
 									if (CGM.getLangOpts().Vulkan) {
 										// flag this as an SSBO for Vulkan
 										if (field_pointee_type.getAddressSpace() != LangAS::opencl_global) {
 											CGM.Error(field->getSourceRange().getBegin(), StringRef("invalid address space for buffer inside argument buffer"));
 											return {};
 										}
-										field_arg_info |= (uint64_t)FLOOR_ARG_INFO::SSBO;
+										field_arg_info.flags |= ARG_FLAG::SSBO;
 									}
 									this_arg_buf_info << field_arg_info << ",";
 								} else if (field_type->isImageType()) {
@@ -4406,9 +4578,16 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 								} else if ((CGM.getLangOpts().Vulkan || CGM.getLangOpts().Metal) && field_type->isArrayBufferType()) {
 									const auto array_buffer_info = get_array_buffer_info(field_type, field_type->getAsCXXRecordDecl(), getContext());
 									if (array_buffer_info) {
-										uint64_t field_arg_info = (uint64_t)FLOOR_ARG_INFO::BUFFER_ARRAY;
-										field_arg_info |= array_buffer_info->element_count;
-										field_arg_info |= (uint64_t)to_fas(array_buffer_info->element_type->getPointeeType().getAddressSpace());
+										const auto elem_pointee_type = array_buffer_info->element_type->getPointeeType();
+										argument_info_t field_arg_info {
+											.array_extent = array_buffer_info->element_count,
+											.address_space = to_fas(elem_pointee_type.getAddressSpace()),
+											.flags = ARG_FLAG::BUFFER_ARRAY,
+										};
+										if (elem_pointee_type.isConstQualified() ||
+											(elem_pointee_type.getAddressSpace() == LangAS::opencl_constant)) {
+											field_arg_info.access = ARG_ACCESS::READ;
+										}
 										this_arg_buf_info << field_arg_info << ",";
 									} else {
 										CGM.Error(field->getSourceRange().getBegin(), "invalid buffer array in indirect/argument buffer!");
@@ -4424,12 +4603,11 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 									if (CGM.getLangOpts().Vulkan) {
 										// this is not a pointer in Vulkan -> must manually set the address space
 										assert(!field_type->isPointerType() && !field_type->isReferenceType());
-										field_arg_info |= (uint64_t)FLOOR_ARG_INFO::AS_CONSTANT;
+										field_arg_info.address_space = ARG_ADDRESS_SPACE::CONSTANT;
 										// check if this can be an IUB, flag it if so
-										const auto field_arg_size = (field_arg_info & (uint64_t)FLOOR_ARG_INFO::__SIZE_MASK);
-										if (field_arg_size <= CGM.getCodeGenOpts().VulkanIUBSize &&
+										if (field_arg_info.size <= CGM.getCodeGenOpts().VulkanIUBSize &&
 											vulkan_iub_count < CGM.getCodeGenOpts().VulkanIUBCount) {
-											field_arg_info |= (uint64_t)FLOOR_ARG_INFO::IUB;
+											field_arg_info.flags |= ARG_FLAG::IUB;
 											++vulkan_iub_count;
 										}
 									}
@@ -4438,7 +4616,11 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 							}
 							++arg_buffer_arg_idx;
 						}
-						arg_buf_info << this_arg_buf_info.str() << "\n";
+						auto this_arg_buf_info_str = this_arg_buf_info.str();
+						if (this_arg_buf_info_str.back() == ',') {
+							this_arg_buf_info_str.pop_back();
+						}
+						arg_buf_info << this_arg_buf_info_str << "\n";
 					}
 				}
 			}
@@ -4498,36 +4680,43 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 				// check if this is an aggregate image (must have image access qualifiers)
 				const FloorImageFlagsAttr* flags_attr = get_aggregate_image_flags_attr(cxx_rdecl);
 				if (flags_attr != nullptr) {
-					uint64_t arg_info = 0; // size is irrelevant for cuda images
-					arg_info |= uint64_t(get_image_access(flags_attr));
-					arg_info |= (uint64_t)FLOOR_ARG_INFO::AS_IMAGE;
+					// NOTE: size is irrelevant for CUDA images
+					argument_info_t arg_info {
+						.address_space = ARG_ADDRESS_SPACE::IMAGE,
+						.access = get_image_access(flags_attr),
+					};
 					info << arg_info << ",";
 				} else if (abi_arg_info_iter->info.isDirect()) {
 					// simple aggregate, all constant -> must handle each field individually
 					// note that we're only interested in the first expanded layer, not multiple expansion
 					// (i.e. fully scalarized), as this is identical to what cuda / nvptx / the abi do
-					uint64_t arg_info = 0; // sizes will be accumulated
+					argument_info_t arg_info {
+						.size = 0u, // sizes will be accumulated
+						.address_space = ARG_ADDRESS_SPACE::CONSTANT,
+					};
 					const auto fields = get_aggregate_fields(cxx_rdecl);
 					for (size_t i = 0; i < fields.size(); ++i) {
 						const auto field_llvm_type = std::next(Fn->arg_begin(), arg_idx.get_llvm_arg_idx())->getType();
-						arg_info += compute_type_size(field_llvm_type);
+						arg_info.size += compute_type_size(field_llvm_type);
 						arg_idx.next();
 					}
-					arg_info |= (uint64_t)FLOOR_ARG_INFO::AS_CONSTANT;
 					info << arg_info << ",";
 					inc_arg_idx_at_end = false; // don't inc arg idx later
 				} else { // -> indirect
 					// simple aggregate, all constant -> single pointer on either side of clang/llvm
-					uint64_t arg_info = 0;
-					arg_info |= compute_type_size(llvm_type->getPointerElementType());
-					arg_info |= (uint64_t)FLOOR_ARG_INFO::AS_CONSTANT;
+					argument_info_t arg_info {
+						.size = compute_type_size(llvm_type->getPointerElementType()),
+						.address_space = ARG_ADDRESS_SPACE::CONSTANT,
+					};
 					info << arg_info << ",";
 				}
 			} else {
 				// -> this is a simple constant (scalar or aggregate with scalar eval)
 				// store the parameter size
-				uint64_t arg_info = compute_type_size(llvm_type);
-				arg_info |= (uint64_t)FLOOR_ARG_INFO::AS_CONSTANT;
+				argument_info_t arg_info {
+					.size = compute_type_size(llvm_type),
+					.address_space = ARG_ADDRESS_SPACE::CONSTANT,
+				};
 				info << arg_info << ",";
 			}
 		} else if (parm->hasAttr<GraphicsStageInputAttr>()) { // stage input
@@ -4543,7 +4732,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 				for (const auto& field : fields) {
 					// TODO: check if field type is int or float!
 					const auto field_llvm_type = std::next(Fn->arg_begin(), arg_idx.get_llvm_arg_idx())->getType();
-					const auto arg_info = add_normal_arg(field_llvm_type, field.type, field.parents[0], field.field_decl, FLOOR_ARG_INFO::STAGE_INPUT);
+					const auto arg_info = add_normal_arg(field_llvm_type, field.type, field.parents[0], field.field_decl, ARG_FLAG::STAGE_INPUT);
 					info << arg_info << ",";
 					arg_idx.next();
 				}
@@ -4551,7 +4740,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 			} else {
 				// add as-is
 				// TODO: check if type is int or float!
-				const auto arg_info = add_normal_arg(llvm_type, clang_type, nullptr, nullptr, FLOOR_ARG_INFO::STAGE_INPUT);
+				const auto arg_info = add_normal_arg(llvm_type, clang_type, nullptr, nullptr, ARG_FLAG::STAGE_INPUT);
 				info << arg_info << ",";
 			}
 		} else {
@@ -4566,8 +4755,11 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 		++abi_arg_info_iter;
 	}
 	
-	info << "\n";
-	file << info.str();
+	auto info_str = info.str();
+	if (info_str.back() == ',') {
+		info_str.pop_back();
+	}
+	file << info_str << "\n";
 	file << arg_buf_info.str();
 	
 #if 0 // for debugging purposes

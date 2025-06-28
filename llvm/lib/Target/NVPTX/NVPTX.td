@@ -26,62 +26,83 @@ include "NVPTXInstrInfo.td"
 
 // SM Versions
 // Fermi
-def SM20 : SubtargetFeature<"sm_20", "SmVersion", "20",
+def SM20 : SubtargetFeature<"sm_20", "FullSmVersion", "200",
                             "Target SM 2.0">;
-def SM21 : SubtargetFeature<"sm_21", "SmVersion", "21",
+def SM21 : SubtargetFeature<"sm_21", "FullSmVersion", "210",
                             "Target SM 2.1">;
 // Kepler
-def SM30 : SubtargetFeature<"sm_30", "SmVersion", "30",
+def SM30 : SubtargetFeature<"sm_30", "FullSmVersion", "300",
                             "Target SM 3.0">;
-def SM32 : SubtargetFeature<"sm_32", "SmVersion", "32",
+def SM32 : SubtargetFeature<"sm_32", "FullSmVersion", "320",
                             "Target SM 3.2">;
-def SM35 : SubtargetFeature<"sm_35", "SmVersion", "35",
+def SM35 : SubtargetFeature<"sm_35", "FullSmVersion", "350",
                             "Target SM 3.5">;
-def SM37 : SubtargetFeature<"sm_37", "SmVersion", "37",
+def SM37 : SubtargetFeature<"sm_37", "FullSmVersion", "370",
                             "Target SM 3.7">;
 // Maxwell
-def SM50 : SubtargetFeature<"sm_50", "SmVersion", "50",
+def SM50 : SubtargetFeature<"sm_50", "FullSmVersion", "500",
                             "Target SM 5.0">;
-def SM52 : SubtargetFeature<"sm_52", "SmVersion", "52",
+def SM52 : SubtargetFeature<"sm_52", "FullSmVersion", "520",
                             "Target SM 5.2">;
-def SM53 : SubtargetFeature<"sm_53", "SmVersion", "53",
+def SM53 : SubtargetFeature<"sm_53", "FullSmVersion", "530",
                             "Target SM 5.3">;
 // Pascal
-def SM60 : SubtargetFeature<"sm_60", "SmVersion", "60",
-                             "Target SM 6.0">;
-def SM61 : SubtargetFeature<"sm_61", "SmVersion", "61",
-                             "Target SM 6.1">;
-def SM62 : SubtargetFeature<"sm_62", "SmVersion", "62",
-                             "Target SM 6.2">;
+def SM60 : SubtargetFeature<"sm_60", "FullSmVersion", "600",
+                            "Target SM 6.0">;
+def SM61 : SubtargetFeature<"sm_61", "FullSmVersion", "610",
+                            "Target SM 6.1">;
+def SM62 : SubtargetFeature<"sm_62", "FullSmVersion", "620",
+                            "Target SM 6.2">;
 // Volta
-def SM70 : SubtargetFeature<"sm_70", "SmVersion", "70",
-                             "Target SM 7.0">;
-def SM72 : SubtargetFeature<"sm_72", "SmVersion", "72",
-                             "Target SM 7.2">;
-def SM73 : SubtargetFeature<"sm_73", "SmVersion", "73",
-                             "Target SM 7.3">;
+def SM70 : SubtargetFeature<"sm_70", "FullSmVersion", "700",
+                            "Target SM 7.0">;
+def SM72 : SubtargetFeature<"sm_72", "FullSmVersion", "720",
+                            "Target SM 7.2">;
+def SM73 : SubtargetFeature<"sm_73", "FullSmVersion", "730",
+                            "Target SM 7.3">;
 // Turing
-def SM75 : SubtargetFeature<"sm_75", "SmVersion", "75",
-                             "Target SM 7.5">;
+def SM75 : SubtargetFeature<"sm_75", "FullSmVersion", "750",
+                            "Target SM 7.5">;
 // Ampere
-def SM80 : SubtargetFeature<"sm_80", "SmVersion", "80",
-                             "Target SM 8.0">;
-def SM82 : SubtargetFeature<"sm_82", "SmVersion", "82",
-                             "Target SM 8.2">;
-def SM86 : SubtargetFeature<"sm_86", "SmVersion", "86",
-                             "Target SM 8.6">;
-def SM87 : SubtargetFeature<"sm_87", "SmVersion", "87",
-                             "Target SM 8.7">;
-def SM88 : SubtargetFeature<"sm_88", "SmVersion", "88",
-                             "Target SM 8.8">;
-
+def SM80 : SubtargetFeature<"sm_80", "FullSmVersion", "800",
+                            "Target SM 8.0">;
+def SM82 : SubtargetFeature<"sm_82", "FullSmVersion", "820",
+                            "Target SM 8.2">;
+def SM86 : SubtargetFeature<"sm_86", "FullSmVersion", "860",
+                            "Target SM 8.6">;
+def SM87 : SubtargetFeature<"sm_87", "FullSmVersion", "870",
+                            "Target SM 8.7">;
+def SM88 : SubtargetFeature<"sm_88", "FullSmVersion", "880",
+                            "Target SM 8.8">;
 // Ada
-def SM89 : SubtargetFeature<"sm_89", "SmVersion", "89",
-                             "Target SM 8.9">;
-
+def SM89 : SubtargetFeature<"sm_89", "FullSmVersion", "890",
+                            "Target SM 8.9">;
 // Hopper
-def SM90 : SubtargetFeature<"sm_90", "SmVersion", "90",
+def SM90 : SubtargetFeature<"sm_90", "FullSmVersion", "900",
                              "Target SM 9.0">;
+def SM90a : SubtargetFeature<"sm_90a", "FullSmVersion", "901",
+                             "Target SM 9.0a">;
+// Blackwell
+def SM100 : SubtargetFeature<"sm_100", "FullSmVersion", "1000",
+                             "Target SM 10.0">;
+def SM100a : SubtargetFeature<"sm_100a", "FullSmVersion", "1001",
+                              "Target SM 10.0a">;
+def SM101 : SubtargetFeature<"sm_101", "FullSmVersion", "1010",
+                             "Target SM 10.1">;
+def SM101a : SubtargetFeature<"sm_101a", "FullSmVersion", "1011",
+                              "Target SM 10.1a">;
+def SM103 : SubtargetFeature<"sm_103", "FullSmVersion", "1030",
+                             "Target SM 10.3">;
+def SM103a : SubtargetFeature<"sm_103a", "FullSmVersion", "1031",
+                              "Target SM 10.3a">;
+def SM120 : SubtargetFeature<"sm_120", "FullSmVersion", "1200",
+                             "Target SM 12.0">;
+def SM120a : SubtargetFeature<"sm_120a", "FullSmVersion", "1201",
+                              "Target SM 12.0a">;
+def SM121 : SubtargetFeature<"sm_121", "FullSmVersion", "1210",
+                             "Target SM 12.1">;
+def SM121a : SubtargetFeature<"sm_121a", "FullSmVersion", "1211",
+                              "Target SM 12.1a">;
 
 // PTX Versions
 def PTX32 : SubtargetFeature<"ptx32", "PTXVersion", "32",
@@ -138,6 +159,12 @@ def PTX84 : SubtargetFeature<"ptx84", "PTXVersion", "84",
                              "Use PTX version 8.4">;
 def PTX85 : SubtargetFeature<"ptx85", "PTXVersion", "85",
                              "Use PTX version 8.5">;
+def PTX86 : SubtargetFeature<"ptx86", "PTXVersion", "86",
+                             "Use PTX version 8.6">;
+def PTX87 : SubtargetFeature<"ptx87", "PTXVersion", "87",
+                             "Use PTX version 8.7">;
+def PTX88 : SubtargetFeature<"ptx88", "PTXVersion", "88",
+                             "Use PTX version 8.8">;
 
 //===----------------------------------------------------------------------===//
 // NVPTX supported processors.
@@ -169,6 +196,17 @@ def : Proc<"sm_87", [SM87, PTX76]>;
 def : Proc<"sm_88", [SM88, PTX76]>;
 def : Proc<"sm_89", [SM88, PTX78]>;
 def : Proc<"sm_90", [SM90, PTX78]>;
+def : Proc<"sm_90a", [SM90a, PTX78]>;
+def : Proc<"sm_100", [SM100, PTX86]>;
+def : Proc<"sm_100a", [SM100a, PTX86]>;
+def : Proc<"sm_101", [SM101, PTX86]>;
+def : Proc<"sm_101a", [SM101a, PTX86]>;
+def : Proc<"sm_103", [SM103, PTX88]>;
+def : Proc<"sm_103a", [SM103a, PTX88]>;
+def : Proc<"sm_120", [SM120, PTX87]>;
+def : Proc<"sm_120a", [SM120a, PTX87]>;
+def : Proc<"sm_121", [SM121, PTX88]>;
+def : Proc<"sm_121a", [SM121a, PTX88]>;
 
 def NVPTXInstrInfo : InstrInfo {
 }

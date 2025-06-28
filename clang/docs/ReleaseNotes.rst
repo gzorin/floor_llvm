@@ -281,6 +281,10 @@ C++20 Feature Support
   macro prior to including the header.
 
 
+- As per "Conditionally Trivial Special Member Functions" (P0848), it is
+  now possible to overload destructors using concepts. Note that the rest
+  of the paper about other special member functions is not yet implemented.
+
 C++2b Feature Support
 ^^^^^^^^^^^^^^^^^^^^^
 - Implemented `P1938R3: if consteval <https://wg21.link/P1938R3>`_.

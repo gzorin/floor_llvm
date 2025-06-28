@@ -1,7 +1,7 @@
 //===-- MetalTypes.h - base class for image transformations------*- C++ -*-===//
 //
 //  Flo's Open libRary (floor)
-//  Copyright (C) 2004 - 2024 Florian Ziesche
+//  Copyright (C) 2004 - 2025 Florian Ziesche
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -70,6 +70,7 @@ enum TAG_TYPE : uint32_t {
 	SARC        = make_tag_type('S', 'A', 'R', 'C'),
 	// TODO/TBD
 	LAYR        = make_tag_type('L', 'A', 'Y', 'R'),
+	ILST        = make_tag_type('I', 'L', 'S', 'T'),
 	// generic end tag
 	END         = make_tag_type('E', 'N', 'D', 'T'),
 };
@@ -577,6 +578,29 @@ struct function_constant {
 	DATA_TYPE type { DATA_TYPE::INVALID };
 	bool active { false };
 };
+
+//! returns the Metal language version of a module as major_version * 100 + minor_version * 10 (e.g. 310 for Metal 3.1)
+static inline uint32_t get_metal_version(llvm::Module& M) {
+	llvm::NamedMDNode* AIRLangVersion = M.getNamedMetadata("air.language_version");
+	assert(AIRLangVersion);
+	const llvm::MDNode* language_version_md = AIRLangVersion->getOperand(0);
+	assert(language_version_md->getNumOperands() >= 4);
+	
+	const llvm::MDOperand& version_major_op = language_version_md->getOperand(1);
+	const llvm::MDOperand& version_minor_op = language_version_md->getOperand(2);
+	uint32_t metal_version = 0;
+	if (const llvm::ConstantAsMetadata* version_major_md = dyn_cast_or_null<llvm::ConstantAsMetadata>(version_major_op.get())) {
+		if (const llvm::ConstantInt* version_major_int = dyn_cast_or_null<llvm::ConstantInt>(version_major_md->getValue())) {
+			metal_version += version_major_int->getZExtValue() * 100u;
+		}
+	}
+	if (const llvm::ConstantAsMetadata* version_minor_md = dyn_cast_or_null<llvm::ConstantAsMetadata>(version_minor_op.get())) {
+		if (const llvm::ConstantInt* version_minor_int = dyn_cast_or_null<llvm::ConstantInt>(version_minor_md->getValue())) {
+			metal_version += version_minor_int->getZExtValue() * 10u;
+		}
+	}
+	return metal_version;
+}
 
 } // namespace metal
 

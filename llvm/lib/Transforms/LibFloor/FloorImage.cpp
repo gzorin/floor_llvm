@@ -1,7 +1,7 @@
 //===- FloorImage.cpp - base class for image transformations --------------===//
 //
 //  Flo's Open libRary (floor)
-//  Copyright (C) 2004 - 2024 Florian Ziesche
+//  Copyright (C) 2004 - 2025 Florian Ziesche
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -67,7 +67,8 @@ FloorImageBasePass::FloorImageBasePass(char &ID,
 : FunctionPass(ID), image_type_id(image_type_id_),
 image_read_prefix(image_type_id == IMAGE_TYPE_ID::CUDA ? "floor.cuda.read_image." : "floor.opaque.read_image."),
 image_write_prefix(image_type_id == IMAGE_TYPE_ID::CUDA ? "floor.cuda.write_image." : "floor.opaque.write_image."),
-image_get_dim_prefix(image_type_id == IMAGE_TYPE_ID::CUDA ? "floor.cuda.get_image_dim" : "floor.opaque.get_image_dim"),
+image_get_dim_prefix(image_type_id == IMAGE_TYPE_ID::CUDA ? "floor.cuda.get_image_dim" : "floor.opaque.get_image_dim."),
+image_query_lod_prefix(image_type_id == IMAGE_TYPE_ID::CUDA ? "floor.cuda.UNAVAILABLE_query_image_lod" : "floor.opaque.query_image_lod."),
 image_capabilities((IMAGE_CAPABILITY)image_capabilities_) {
 }
 
@@ -154,6 +155,9 @@ void FloorImageBasePass::visitCallBase(CallBase& CB) {
 		was_modified = true;
 	} else if (full_func_name.startswith(image_get_dim_prefix)) {
 		handle_image_query(CB, full_func_name);
+		was_modified = true;
+	} else if (full_func_name.startswith(image_query_lod_prefix)) {
+		handle_query_lod(CB, full_func_name);
 		was_modified = true;
 	}
 }
@@ -530,6 +534,72 @@ void FloorImageBasePass::handle_image_query(CallBase& CB, const StringRef& func_
 	const auto lod_arg = CB.getOperand(2);
 	
 	handle_get_image_dim(CB, func_name, img_handle_arg, full_image_type, image_type, lod_arg);
+}
+
+void FloorImageBasePass::handle_query_lod(CallBase& CB, const StringRef& func_name) {
+	if (image_type_id == IMAGE_TYPE_ID::CUDA) {
+		ctx->emitError(&CB, "unsupported function call (query LOD)");
+		return;
+	}
+	
+	builder->SetInsertPoint(&CB);
+	
+	/* args for opaque query_image_lod functions:
+	 
+	 opaque get_image_dim:
+	 image_t img, sampler_type smplr, COMPUTE_IMAGE_TYPE type, coord_vec_type coord
+	 
+	 this is not available in CUDA!
+	 
+	 */
+	
+	// check + get arguments
+	constexpr const uint32_t arg_count = 4;
+	if (CB.arg_size() != arg_count) {
+		ctx->emitError(&CB, func_name + ": invalid argument count (expected " + std::to_string(arg_count) + ")");
+		return;
+	}
+	
+	// -> tex/surf/img handle
+	const auto img_handle_arg = CB.getOperand(0);
+	if (!img_handle_arg->getType()->isPointerTy()) {
+		ctx->emitError(&CB, "invalid image handle type (must be an image pointer)");
+		return;
+	}
+	
+	// -> sampler
+	// prefer const sampler / either const or dyn will be nullptr
+	llvm::ConstantInt* const_sampler_arg = nullptr;
+	llvm::Value* dyn_sampler_arg = nullptr;
+	if(image_type_id != IMAGE_TYPE_ID::CUDA) {
+		const_sampler_arg = dyn_cast_or_null<ConstantInt>(CB.getOperand(1));
+		if(const_sampler_arg == nullptr) {
+			dyn_sampler_arg = CB.getOperand(1);
+		}
+	}
+	
+	// -> type enum
+	const auto image_type_arg = dyn_cast_or_null<ConstantInt>(CB.getOperand(2));
+	if (!image_type_arg) {
+		ctx->emitError(&CB, "image type argument must be a constant value");
+		return;
+	}
+	if (!image_type_arg->getType()->isIntegerTy()) {
+		ctx->emitError(&CB, "invalid image-type type (must be enum/integer)");
+		return;
+	}
+	const auto full_image_type = COMPUTE_IMAGE_TYPE(image_type_arg->getZExtValue());
+	const COMPUTE_IMAGE_TYPE image_type = full_image_type & COMPUTE_IMAGE_TYPE::BASE_TYPE_MASK;
+	
+	// -> coord
+	const auto coord_arg = CB.getOperand(3);
+	const auto coord_arg_type = dyn_cast<FixedVectorType>(coord_arg->getType());
+	if (!coord_arg_type || !coord_arg_type->getElementType()->isFloatTy()) {
+		ctx->emitError(&CB, "invalid image coordinate type");
+		return;
+	}
+	
+	handle_query_image_lod(CB, func_name, img_handle_arg, image_type, const_sampler_arg, dyn_sampler_arg, coord_arg);
 }
 
 void FloorImageBasePass::emulate_depth_compare(llvm::Value*& dst_vec,

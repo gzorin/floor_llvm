@@ -1,7 +1,7 @@
 //===- CUDAImage.cpp - CUDA-specific floor image transformations ----------===//
 //
 //  Flo's Open libRary (floor)
-//  Copyright (C) 2004 - 2024 Florian Ziesche
+//  Copyright (C) 2004 - 2025 Florian Ziesche
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -152,6 +152,8 @@ namespace {
 			// -> return data
 			std::string dtype;
 			llvm::Type* ret_type, *ret_vec_type;
+			bool needs_uint_to_ushort_conversion = false;
+			bool needs_int_to_short_conversion = false;
 			if (func_name == "floor.cuda.read_image.float") {
 				dtype = "f32";
 				constraints_str = "=f,=f,=f,=f";
@@ -172,7 +174,7 @@ namespace {
 					llvm::Type::getHalfTy(*ctx)
 				}});
 				ret_vec_type = llvm::FixedVectorType::get(llvm::Type::getHalfTy(*ctx), 4);
-			} else if (func_name == "floor.cuda.read_image.int") {
+			} else if (func_name == "floor.cuda.read_image.int" || func_name == "floor.cuda.read_image.short") {
 				dtype = "s32";
 				constraints_str = "=r,=r,=r,=r";
 				ret_type = llvm::StructType::get(*ctx, std::vector<llvm::Type*> {{
@@ -182,7 +184,8 @@ namespace {
 					llvm::Type::getInt32Ty(*ctx)
 				}});
 				ret_vec_type = llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 4);
-			} else if (func_name == "floor.cuda.read_image.uint") {
+				needs_int_to_short_conversion = func_name.endswith(".short");
+			} else if (func_name == "floor.cuda.read_image.uint" || func_name == "floor.cuda.read_image.ushort") {
 				dtype = "u32";
 				constraints_str = "=r,=r,=r,=r";
 				ret_type = llvm::StructType::get(*ctx, std::vector<llvm::Type*> {{
@@ -192,6 +195,7 @@ namespace {
 					llvm::Type::getInt32Ty(*ctx)
 				}});
 				ret_vec_type = llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 4);
+				needs_uint_to_ushort_conversion = func_name.endswith(".ushort");
 			}
 			// unknown -> ignore
 			else return;
@@ -433,12 +437,20 @@ namespace {
 			
 			//
 			llvm::Value* dst_vec = UndefValue::get(ret_vec_type);
-			if(compare_override == nullptr) {
+			if (compare_override == nullptr) {
 				// -> normal color read or h/w depth compare
-				if(!is_compare || has_hw_depth_compare) {
-					for(uint32_t i = 0; i < 4; ++i) {
+				if (!is_compare || has_hw_depth_compare) {
+					for (uint32_t i = 0; i < 4; ++i) {
 						auto scalar = builder->CreateExtractValue(asm_call, i);
 						dst_vec = builder->CreateInsertElement(dst_vec, scalar, builder->getInt32(i));
+					}
+					
+					if (needs_uint_to_ushort_conversion) {
+						// convert result from uint32 to uint16
+						dst_vec = builder->CreateZExtOrTrunc(dst_vec, llvm::FixedVectorType::get(llvm::Type::getInt16Ty(*ctx), 4));
+					} else if (needs_int_to_short_conversion) {
+						// convert result from int32 to int16
+						dst_vec = builder->CreateSExtOrTrunc(dst_vec, llvm::FixedVectorType::get(llvm::Type::getInt16Ty(*ctx), 4));
 					}
 				}
 				// -> s/w depth compare
@@ -646,8 +658,10 @@ namespace {
 			const auto is_float = (func_name == "floor.cuda.write_image.float");
 			const auto is_half = (func_name == "floor.cuda.write_image.half");
 			const auto is_int = (func_name == "floor.cuda.write_image.int");
+			const auto is_short = (func_name == "floor.cuda.write_image.short");
 			const auto is_uint = (func_name == "floor.cuda.write_image.uint");
-			if (!is_float && !is_half && !is_int && !is_uint) {
+			const auto is_ushort = (func_name == "floor.cuda.write_image.ushort");
+			if (!is_float && !is_half && !is_int && !is_short && !is_uint && !is_ushort) {
 				return; // unknown -> ignore
 			}
 			
@@ -717,19 +731,25 @@ namespace {
 						emit_block("unorm16", COMPUTE_IMAGE_TYPE::FORMAT_16, COMPUTE_IMAGE_TYPE::FORMAT_16 | COMPUTE_IMAGE_TYPE::UINT | COMPUTE_IMAGE_TYPE::FLAG_NORMALIZED, channel_count, false, false, false);
 						emit_block("snorm16", COMPUTE_IMAGE_TYPE::FORMAT_16, COMPUTE_IMAGE_TYPE::FORMAT_16 | COMPUTE_IMAGE_TYPE::INT | COMPUTE_IMAGE_TYPE::FLAG_NORMALIZED, channel_count, false, false, true);
 						emit_block("f16", COMPUTE_IMAGE_TYPE::FORMAT_16, COMPUTE_IMAGE_TYPE::FORMAT_16 | COMPUTE_IMAGE_TYPE::FLOAT, channel_count, is_float, is_half, false);
-						auto f32_block = emit_block("f32", COMPUTE_IMAGE_TYPE::FORMAT_32, COMPUTE_IMAGE_TYPE::FORMAT_32 | COMPUTE_IMAGE_TYPE::FLOAT, channel_count, is_float, is_half, false);
-						// NOTE: 32-bit float + 8-bit stencil contains exactly the same code as only 32-bit float -> reuse "f32"
-						sw->addCase(ConstantInt::get(img_type_int_type, uint64_t(COMPUTE_IMAGE_TYPE::FORMAT_32_8 | COMPUTE_IMAGE_TYPE::FLOAT | channel_bit(channel_count))), f32_block);
-					} else if (is_uint) {
+						if (is_float) {
+							auto f32_block = emit_block("f32", COMPUTE_IMAGE_TYPE::FORMAT_32, COMPUTE_IMAGE_TYPE::FORMAT_32 | COMPUTE_IMAGE_TYPE::FLOAT, channel_count, is_float, is_half, false);
+							// NOTE: 32-bit float + 8-bit stencil contains exactly the same code as only 32-bit float -> reuse "f32"
+							sw->addCase(ConstantInt::get(img_type_int_type, uint64_t(COMPUTE_IMAGE_TYPE::FORMAT_32_8 | COMPUTE_IMAGE_TYPE::FLOAT | channel_bit(channel_count))), f32_block);
+						}
+					} else if (is_uint || is_ushort) {
 						emit_block("ui8", COMPUTE_IMAGE_TYPE::FORMAT_8, COMPUTE_IMAGE_TYPE::FORMAT_8 | COMPUTE_IMAGE_TYPE::UINT, channel_count, false, false, false);
 						emit_block("ui16", COMPUTE_IMAGE_TYPE::FORMAT_16, COMPUTE_IMAGE_TYPE::FORMAT_16 | COMPUTE_IMAGE_TYPE::UINT, channel_count, false, false, false);
-						emit_block("ui24", COMPUTE_IMAGE_TYPE::FORMAT_24, COMPUTE_IMAGE_TYPE::FORMAT_24 | COMPUTE_IMAGE_TYPE::UINT, channel_count, false, false, false);
-						emit_block("ui32", COMPUTE_IMAGE_TYPE::FORMAT_32, COMPUTE_IMAGE_TYPE::FORMAT_32 | COMPUTE_IMAGE_TYPE::UINT, channel_count, false, false, false);
-					} else if (is_int) {
+						if (is_uint) {
+							emit_block("ui24", COMPUTE_IMAGE_TYPE::FORMAT_24, COMPUTE_IMAGE_TYPE::FORMAT_24 | COMPUTE_IMAGE_TYPE::UINT, channel_count, false, false, false);
+							emit_block("ui32", COMPUTE_IMAGE_TYPE::FORMAT_32, COMPUTE_IMAGE_TYPE::FORMAT_32 | COMPUTE_IMAGE_TYPE::UINT, channel_count, false, false, false);
+						}
+					} else if (is_int || is_short) {
 						emit_block("i8", COMPUTE_IMAGE_TYPE::FORMAT_8, COMPUTE_IMAGE_TYPE::FORMAT_8 | COMPUTE_IMAGE_TYPE::INT, channel_count, false, false, true);
 						emit_block("i16", COMPUTE_IMAGE_TYPE::FORMAT_16, COMPUTE_IMAGE_TYPE::FORMAT_16 | COMPUTE_IMAGE_TYPE::INT, channel_count, false, false, true);
-						emit_block("i24", COMPUTE_IMAGE_TYPE::FORMAT_24, COMPUTE_IMAGE_TYPE::FORMAT_24 | COMPUTE_IMAGE_TYPE::INT, channel_count, false, false, true);
-						emit_block("i32", COMPUTE_IMAGE_TYPE::FORMAT_32, COMPUTE_IMAGE_TYPE::FORMAT_32 | COMPUTE_IMAGE_TYPE::INT, channel_count, false, false, true);
+						if (is_int) {
+							emit_block("i24", COMPUTE_IMAGE_TYPE::FORMAT_24, COMPUTE_IMAGE_TYPE::FORMAT_24 | COMPUTE_IMAGE_TYPE::INT, channel_count, false, false, true);
+							emit_block("i32", COMPUTE_IMAGE_TYPE::FORMAT_32, COMPUTE_IMAGE_TYPE::FORMAT_32 | COMPUTE_IMAGE_TYPE::INT, channel_count, false, false, true);
+						}
 					}
 				}
 			};
@@ -761,20 +781,22 @@ namespace {
 
 			// query/get function base
 			const auto query_image = [&](const std::string& query_name) {
+				const auto is_spatial = (query_name != "array_size");
+				
 				SmallVector<llvm::Type*, 2> func_arg_types;
 				SmallVector<llvm::Value*, 2> func_args;
 				func_arg_types.push_back(img_handle_arg->getType());
 				func_args.push_back(img_handle_arg);
-				if (is_tex) {
+				if (is_tex && is_spatial) {
 					func_arg_types.push_back(lod_arg->getType());
 					func_args.push_back(lod_arg);
 				}
 				
 				// -> build asm call
-				std::string asm_str = (is_tex ? "txq.level." : "suq.") + query_name + ".b32 ";
+				std::string asm_str = (is_tex ? (is_spatial ? "txq.level." : "txq.") : "suq.") + query_name + ".b32 ";
 				std::string constraints_str = "=r,l";
 				asm_str += "$0, [$1]";
-				if (is_tex) {
+				if (is_tex && is_spatial) {
 					asm_str += ", $2";
 					constraints_str += ",r";
 				}
@@ -819,6 +841,17 @@ namespace {
 			//
 			I.replaceAllUsesWith(ret_vec);
 			I.eraseFromParent();
+		}
+		
+		void handle_query_image_lod(Instruction& I,
+									const StringRef&,
+									llvm::Value*,
+									const COMPUTE_IMAGE_TYPE&,
+									llvm::ConstantInt*,
+									llvm::Value*,
+									llvm::Value*) override {
+			ctx->emitError(&I, "image LOD query is not supported by CUDA");
+			return;
 		}
 		
 	};

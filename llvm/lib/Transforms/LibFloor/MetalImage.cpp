@@ -1,7 +1,7 @@
 //===- MetalImage.cpp - Metal-specific floor image transformations --------===//
 //
 //  Flo's Open libRary (floor)
-//  Copyright (C) 2004 - 2024 Florian Ziesche
+//  Copyright (C) 2004 - 2025 Florian Ziesche
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -59,6 +59,7 @@
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/LibFloor.h"
 #include "llvm/Transforms/LibFloor/FloorImage.h"
+#include "llvm/Transforms/LibFloor/MetalTypes.h"
 #include <unordered_map>
 using namespace llvm;
 
@@ -119,6 +120,90 @@ namespace {
 				default:
 					return nullptr;
 			}
+		}
+		
+		static llvm::Value* make_sampler(llvm::ConstantInt* const_sampler_arg,
+										 llvm::Value* dyn_sampler_arg,
+										 LLVMContext* ctx,
+										 Module& M,
+										 const Instruction& originating_instruction) {
+			// sampler handling since Metal 2.0+ is more complex
+			// -> need to transform sampler into a global constant
+			// -> need to add this constant to !air.sampler_states metadata
+			if (dyn_sampler_arg == nullptr) {
+				ctx->emitError(&originating_instruction, "sampler arg should be dynamic");
+				return nullptr;
+			}
+			
+			auto ce_sampler = dyn_cast<ConstantExpr>(dyn_sampler_arg);
+			if (ce_sampler == nullptr) {
+				ctx->emitError(&originating_instruction, "sampler arg must be a constant expression");
+				return nullptr;
+			}
+			
+			if (!ce_sampler->isCast() || ce_sampler->getOpcode() != llvm::Instruction::IntToPtr) {
+				ctx->emitError(&originating_instruction, "sampler arg must be a constant inttoptr expression");
+				return nullptr;
+			}
+			
+			auto sampler_constant_value = dyn_cast<ConstantInt>(ce_sampler->getOperand(0));
+			if (sampler_constant_value == nullptr) {
+				ctx->emitError(&originating_instruction, "sampler arg must contain a constant value");
+				return nullptr;
+			}
+			
+			// create global sampler state
+			// NOTE: since we're often using the same sampler -> cache them
+			static std::unordered_map<uint64_t, GlobalVariable*> sample_state_cache;
+			auto sampler_constant_value_u64 = sampler_constant_value->getZExtValue();
+			auto cache_iter = sample_state_cache.find(sampler_constant_value_u64);
+			GlobalVariable* sampler_state = nullptr;
+			if (cache_iter != sample_state_cache.end()) {
+				sampler_state = cache_iter->second;
+			} else {
+				const auto metal_version = metal::get_metal_version(M);
+				if (metal_version < 320) {
+					sampler_state = new GlobalVariable(M,
+													   sampler_constant_value->getType(),
+													   true,
+													   GlobalVariable::InternalLinkage,
+													   sampler_constant_value,
+													   "__air_sampler_state",
+													   nullptr,
+													   GlobalValue::NotThreadLocal,
+													   Metal_ConstantAS);
+				} else {
+					auto sampler_const_array = ConstantArray::get(ArrayType::get(sampler_constant_value->getType(), 2u), {
+						ConstantInt::get(Type::getInt64Ty(*ctx), sampler_constant_value_u64),
+						ConstantInt::get(Type::getInt64Ty(*ctx), 0ull)
+					});
+					sampler_state = new GlobalVariable(M,
+													   sampler_const_array->getType(),
+													   true,
+													   GlobalVariable::InternalLinkage,
+													   sampler_const_array,
+													   "__air_sampler_state",
+													   nullptr,
+													   GlobalValue::NotThreadLocal,
+													   Metal_ConstantAS);
+				}
+				sampler_state->setAlignment(MaybeAlign { 8u }); // always 8-byte aligned
+				sample_state_cache.emplace(sampler_constant_value_u64, sampler_state);
+				
+				// insert metadata
+				SmallVector<llvm::Metadata*, 2> sampler_md_info;
+				sampler_md_info.push_back(llvm::MDString::get(*ctx, "air.sampler_state"));
+				sampler_md_info.push_back(llvm::ConstantAsMetadata::get(sampler_state));
+				
+				auto samplers_md = M.getOrInsertNamedMetadata("air.sampler_states");
+				samplers_md->addOperand(llvm::MDNode::get(*ctx, sampler_md_info));
+			}
+			
+			// still need to bitcast to %struct._sampler_t*
+			auto sampler_type = dyn_cast<PointerType>(dyn_sampler_arg->getType());
+			auto cast_sampler_state = ConstantExpr::getBitCast(sampler_state, sampler_type);
+			
+			return cast_sampler_state;
 		}
 		
 		void handle_read_image(Instruction& I,
@@ -215,69 +300,11 @@ namespace {
 			// only add the sampler arg if this is a sample call
 			bool set_sampler_attrs = false;
 			uint32_t sampler_param_idx = 0;
-			if(is_sample_call) {
-				// sampler handling since Metal 2.0+ is more complex
-				// -> need to transform sampler into a global constant
-				// -> need to add this constant to !air.sampler_states metadata
-				if (dyn_sampler_arg == nullptr) {
-					ctx->emitError(&I, "sampler arg should be dynamic");
-					return;
-				}
+			if (is_sample_call) {
+				auto sampler = make_sampler(const_sampler_arg, dyn_sampler_arg, ctx, *M, I);
 				
-				auto ce_sampler = dyn_cast<ConstantExpr>(dyn_sampler_arg);
-				if (ce_sampler == nullptr) {
-					ctx->emitError(&I, "sampler arg must be a constant expression");
-					return;
-				}
-				
-				if (!ce_sampler->isCast() || ce_sampler->getOpcode() != llvm::Instruction::IntToPtr) {
-					ctx->emitError(&I, "sampler arg must be a constant inttoptr expression");
-					return;
-				}
-				
-				auto sampler_constant_value = dyn_cast<ConstantInt>(ce_sampler->getOperand(0));
-				if (sampler_constant_value == nullptr) {
-					ctx->emitError(&I, "sampler arg must contain a constant value");
-					return;
-				}
-				
-				// create global sampler state
-				// NOTE: since we're often using the same sampler -> cache them
-				static std::unordered_map<uint64_t, GlobalVariable*> sample_state_cache;
-				auto sampler_constant_value_u64 = sampler_constant_value->getZExtValue();
-				auto cache_iter = sample_state_cache.find(sampler_constant_value_u64);
-				GlobalVariable* sampler_state = nullptr;
-				if (cache_iter != sample_state_cache.end()) {
-					sampler_state = cache_iter->second;
-				} else {
-					sampler_state = new GlobalVariable(*M,
-													   sampler_constant_value->getType(),
-													   true,
-													   GlobalVariable::InternalLinkage,
-													   sampler_constant_value,
-													   "__air_sampler_state",
-													   nullptr,
-													   GlobalValue::NotThreadLocal,
-													   Metal_ConstantAS);
-					sampler_state->setAlignment(MaybeAlign { 8u }); // always 8-byte aligned
-					sample_state_cache.emplace(sampler_constant_value_u64, sampler_state);
-					
-					// insert metadata
-					auto ctx = &M->getContext();
-					SmallVector<llvm::Metadata*, 2> sampler_md_info;
-					sampler_md_info.push_back(llvm::MDString::get(*ctx, "air.sampler_state"));
-					sampler_md_info.push_back(llvm::ConstantAsMetadata::get(sampler_state));
-					
-					auto samplers_md = M->getOrInsertNamedMetadata("air.sampler_states");
-					samplers_md->addOperand(llvm::MDNode::get(*ctx, sampler_md_info));
-				}
-				
-				// still need to bitcast to %struct._sampler_t*
-				auto sampler_type = dyn_cast<PointerType>(dyn_sampler_arg->getType());
-				auto cast_sampler_state = ConstantExpr::getBitCast(sampler_state, sampler_type);
-				
-				func_arg_types.push_back(cast_sampler_state->getType());
-				func_args.push_back(cast_sampler_state);
+				func_arg_types.push_back(sampler->getType());
+				func_args.push_back(sampler);
 				
 				set_sampler_attrs = true;
 				sampler_param_idx = func_args.size() - 1;
@@ -711,6 +738,103 @@ namespace {
 			
 			//
 			I.replaceAllUsesWith(ret_vec);
+			I.eraseFromParent();
+		}
+		
+		void handle_query_image_lod(Instruction& I,
+									const StringRef& func_name,
+									llvm::Value* img_handle_arg,
+									const COMPUTE_IMAGE_TYPE& image_type,
+									llvm::ConstantInt* const_sampler_arg,
+									llvm::Value* dyn_sampler_arg,
+									llvm::Value* coord_arg) override {
+			SmallVector<llvm::Type*, 4> func_arg_types;
+			SmallVector<llvm::Value*, 4> func_args;
+			
+			// -> return data
+			std::string dtype;
+			
+			// -> geom
+			const auto geom_cstr = type_to_geom(image_type);
+			if (!geom_cstr) {
+				ctx->emitError(&I, "unknown or incorrect image type");
+				return;
+			}
+			std::string geom = geom_cstr;
+			
+			// filter types that are not allowed
+			switch (image_type) {
+				case COMPUTE_IMAGE_TYPE::IMAGE_1D_BUFFER:
+				case COMPUTE_IMAGE_TYPE::IMAGE_2D_MSAA:
+				case COMPUTE_IMAGE_TYPE::IMAGE_2D_MSAA_ARRAY:
+				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_MSAA:
+				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_MSAA_ARRAY:
+					ctx->emitError(&I, "invalid image type - LOD can not be queried for this image type");
+					return;
+				case COMPUTE_IMAGE_TYPE::IMAGE_1D:
+				case COMPUTE_IMAGE_TYPE::IMAGE_1D_ARRAY: {
+					// not supported, but we still want to allow this for compat with Vulkan -> always return 0.0
+					auto result = ConstantFP::get(llvm::Type::getFloatTy(*ctx), 0.0f);
+					I.replaceAllUsesWith(result);
+					I.eraseFromParent();
+					return;
+				}
+				default:
+					break;
+			}
+			
+			// -> coord type
+			auto coord_vec_type = dyn_cast_or_null<FixedVectorType>(coord_arg->getType());
+			if (!coord_vec_type) {
+				ctx->emitError(&I, "invalid image coordinate argument (cast to vector failed)");
+				return;
+			}
+			const auto coord_type = coord_vec_type->getElementType();
+			if (!coord_type->isFloatTy()) {
+				ctx->emitError(&I, "coordinate type must be float");
+				return;
+			}
+			
+			func_arg_types.push_back(img_handle_arg->getType());
+			func_args.push_back(img_handle_arg);
+			
+			auto sampler = make_sampler(const_sampler_arg, dyn_sampler_arg, ctx, *M, I);
+			func_arg_types.push_back(sampler->getType());
+			func_args.push_back(sampler);
+			
+			func_arg_types.push_back(coord_arg->getType());
+			func_args.push_back(coord_arg);
+			
+			// access: always "sample" (0)
+			func_arg_types.push_back(llvm::Type::getInt32Ty(*ctx));
+			func_args.push_back(builder->getInt32(0));
+			
+			// -> build query func name
+			// NOTE: we use the "clamped" rather than the "unclamped" variant here, because we want the actual LOD that would be used
+			std::string query_lod_func_name = "air.calculate_clamped_lod_" + geom;
+			
+			AttrBuilder attr_builder(*ctx);
+			attr_builder.addAttribute(llvm::Attribute::Convergent);
+			attr_builder.addAttribute(llvm::Attribute::ArgMemOnly);
+			attr_builder.addAttribute(llvm::Attribute::NoUnwind);
+			attr_builder.addAttribute(llvm::Attribute::ReadOnly);
+			auto func_attrs = AttributeList::get(*ctx, ~0, attr_builder);
+			
+			// create the air call
+			const auto func_type = llvm::FunctionType::get(llvm::Type::getFloatTy(*ctx), func_arg_types, false);
+			llvm::CallInst* query_lod_call = builder->CreateCall(M->getOrInsertFunction(query_lod_func_name, func_type, func_attrs), func_args);
+			query_lod_call->setConvergent();
+			query_lod_call->setOnlyAccessesArgMemory();
+			query_lod_call->setDoesNotThrow();
+			query_lod_call->setOnlyReadsMemory(); // all reads are readonly (can be optimized away if unused)
+			query_lod_call->setDebugLoc(I.getDebugLoc()); // keep debug loc
+			
+			// set sampler* cast attributes
+			query_lod_call->addParamAttr(1, Attribute::NoCapture);
+			query_lod_call->addParamAttr(1, Attribute::ReadOnly);
+			
+			//
+			I.replaceAllUsesWith(query_lod_call);
 			I.eraseFromParent();
 		}
 		

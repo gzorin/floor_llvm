@@ -4289,7 +4289,7 @@ static bool prepareICWorklistFromFunction(Function &F, const DataLayout &DL,
       continue;
 
     // always keep everything in Vulkan fake continue blocks
-    if (isVulkan && BB.getName().endswith(".fake_continue"))
+    if (isVulkan && BB.isVulkanFakeContinue())
       continue;
 
     unsigned NumDeadInstInBB;

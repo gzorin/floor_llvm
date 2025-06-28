@@ -1,7 +1,7 @@
 //===-- LibFloor.h - LibFloor Transformations -------------------*- C++ -*-===//
 //
 //  Flo's Open libRary (floor)
-//  Copyright (C) 2004 - 2024 Florian Ziesche
+//  Copyright (C) 2004 - 2025 Florian Ziesche
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -108,6 +108,12 @@ FunctionPass *createCFGStructurizationPass();
 
 //===----------------------------------------------------------------------===//
 //
+// VulkanEarlyArgBufferFunctionClone - Clones functions for arg buffer use.
+//
+ModulePass *createVulkanEarlyArgBufferFunctionClonePass();
+
+//===----------------------------------------------------------------------===//
+//
 // VulkanImage - This pass applies SPIR-V-specific floor image transformations.
 //
 FunctionPass *createVulkanImagePass(const uint32_t image_capabilities = 0);
@@ -131,6 +137,13 @@ FunctionPass *createVulkanBuiltinParamHandlingPass();
 // structurization and VulkanFinal.
 //
 FunctionPass *createVulkanPreFinalPass();
+
+//===----------------------------------------------------------------------===//
+//
+// VulkanPreFinalPointerBCFixup - This pass tries to fix invalid pointer
+// bitcasts prior to CFG structurization and VulkanFinal.
+//
+FunctionPass *createVulkanPreFinalPointerBCFixupPass();
 
 //===----------------------------------------------------------------------===//
 //

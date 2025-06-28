@@ -992,6 +992,12 @@ bool VectorCombine::scalarizeLoadExtract(Instruction &I) {
   if (!FixedVT)
     return false;
 
+  if (isVulkan && isa<GlobalVariable>(Ptr)) {
+    // don't allow this transformation on Vulkan global variables,
+    // since this would cause unnecessary complexity later on
+    return false;
+  }
+
   InstructionCost OriginalCost =
       TTI.getMemoryOpCost(Instruction::Load, LI->getType(), LI->getAlign(),
                           LI->getPointerAddressSpace());

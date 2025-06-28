@@ -1,7 +1,7 @@
 //===- VulkanImage.cpp - Vulkan-specific floor image transformations ------===//
 ////
 //  Flo's Open libRary (floor)
-//  Copyright (C) 2004 - 2024 Florian Ziesche
+//  Copyright (C) 2004 - 2025 Florian Ziesche
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -75,7 +75,7 @@ namespace {
 	struct VulkanImage : public FloorImageBasePass {
 		static char ID; // Pass identification, replacement for typeid
 		
-		//! Vulkan currently (as of Vulkan 1.3 / SPIR-V 1.6) does not actually support float16 sampling,
+		//! Vulkan currently (as of Vulkan 1.3 / SPIR-V 1.6) does not actually support any 16-bit sampling,
 		//! if this ever changes / gets supported properly, set this to true
 		static constexpr const bool can_vulkan_handle_float16 = false;
 		
@@ -84,9 +84,10 @@ namespace {
 			initializeVulkanImagePass(*PassRegistry::getPassRegistry());
 		}
 		
+		template <uint32_t func_arg_count = 8u>
 		llvm::Function* get_or_create_spirv_function(std::string func_name,
 													 llvm::Type* ret_type,
-													 const SmallVector<llvm::Type*, 8>& func_arg_types,
+													 const SmallVector<llvm::Type*, func_arg_count>& func_arg_types,
 													 const bool is_readnone = false) {
 			const auto func_type = llvm::FunctionType::get(ret_type, func_arg_types, false);
 			auto func = M->getFunction(func_name);
@@ -173,6 +174,7 @@ namespace {
 			return ret;
 		}
 		
+		template <uint32_t func_arg_count = 8u>
 		void handle_vk_coord(llvm::Value* img_handle_arg,
 							 Instruction& I,
 							 llvm::Value* coord_arg,
@@ -186,8 +188,8 @@ namespace {
 							 llvm::Value* offset_arg,
 							 const std::string& geom,
 							 std::string& vk_func_name,
-							 SmallVector<llvm::Type*, 8>& func_arg_types,
-							 SmallVector<llvm::Value*, 8>& func_args) {
+							 SmallVector<llvm::Type*, func_arg_count>& func_arg_types,
+							 SmallVector<llvm::Value*, func_arg_count>& func_args) {
 			auto coord_vec_type = dyn_cast_or_null<FixedVectorType>(coord_arg->getType());
 			const auto coord_dim = coord_vec_type->getNumElements();
 			if (!coord_vec_type) {
@@ -372,15 +374,19 @@ namespace {
 			std::string vk_func_name;
 			llvm::Type* ret_type;
 			bool needs_float_to_half_conversion = false;
+			bool needs_uint_to_ushort_conversion = false;
+			bool needs_int_to_short_conversion = false;
 			if (func_name.endswith(".float")) {
 				vk_func_name = "_Z11read_imagef";
 				ret_type = llvm::FixedVectorType::get(llvm::Type::getFloatTy(*ctx), 4);
-			} else if (func_name.endswith(".int")) {
+			} else if (func_name.endswith(".int") || func_name.endswith(".short")) {
 				vk_func_name = "_Z11read_imagei";
 				ret_type = llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 4);
-			} else if (func_name.endswith(".uint")) {
+				needs_int_to_short_conversion = func_name.endswith(".short");
+			} else if (func_name.endswith(".uint") || func_name.endswith(".ushort")) {
 				vk_func_name = "_Z12read_imageui";
 				ret_type = llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 4);
+				needs_uint_to_ushort_conversion = func_name.endswith(".ushort");
 			} else if (func_name.endswith(".half")) {
 				vk_func_name = "_Z11read_imageh";
 				if constexpr (can_vulkan_handle_float16) {
@@ -610,6 +616,12 @@ namespace {
 			if (needs_float_to_half_conversion) {
 				// convert result from float32 to float16
 				read_call_result = builder->CreateFPTrunc(read_call, llvm::FixedVectorType::get(llvm::Type::getHalfTy(*ctx), 4));
+			} else if (needs_uint_to_ushort_conversion) {
+				 // convert result from uint32 to uint16
+				 read_call_result = builder->CreateZExtOrTrunc(read_call, llvm::FixedVectorType::get(llvm::Type::getInt16Ty(*ctx), 4));
+			} else if (needs_int_to_short_conversion) {
+				 // convert result from int32 to int16
+				 read_call_result = builder->CreateSExtOrTrunc(read_call, llvm::FixedVectorType::get(llvm::Type::getInt16Ty(*ctx), 4));
 			} else if (is_depth && is_compare) {
 				// if this is a depth compare, the return type is a float -> create a float4
 				read_call_result = UndefValue::get(llvm::FixedVectorType::get(llvm::Type::getFloatTy(*ctx), 4));
@@ -663,15 +675,19 @@ namespace {
 			
 			std::string vk_func_name, dtype;
 			bool needs_half_to_float_conversion = false;
+			bool needs_ushort_to_uint_conversion = false;
+			bool needs_short_to_int_conversion = false;
 			if (func_name.endswith(".float")) {
 				vk_func_name = "_Z12write_imagef";
 				dtype = "f";
-			} else if (func_name.endswith(".int")) {
+			} else if (func_name.endswith(".int") || func_name.endswith(".short")) {
 				vk_func_name = "_Z12write_imagei";
 				dtype = "i";
-			} else if (func_name.endswith(".uint")) {
+				needs_short_to_int_conversion = func_name.endswith(".short");
+			} else if (func_name.endswith(".uint") || func_name.endswith(".ushort")) {
 				vk_func_name = "_Z13write_imageui";
 				dtype = "j";
+				needs_ushort_to_uint_conversion = func_name.endswith(".ushort");
 			} else if (func_name.endswith(".half")) {
 				vk_func_name = "_Z12write_imageh";
 				if constexpr (can_vulkan_handle_float16) {
@@ -728,6 +744,10 @@ namespace {
 			Value* data_arg_ptr = data_arg;
 			if (needs_half_to_float_conversion) {
 				data_arg_ptr = builder->CreateFPExt(data_arg, llvm::FixedVectorType::get(llvm::Type::getFloatTy(*ctx), 4));
+			} else if (needs_ushort_to_uint_conversion) {
+				data_arg_ptr = builder->CreateZExt(data_arg, llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 4));
+			} else if (needs_short_to_int_conversion) {
+				data_arg_ptr = builder->CreateSExt(data_arg, llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 4));
 			}
 			func_arg_types.push_back(data_arg_ptr->getType());
 			func_args.push_back(data_arg_ptr);
@@ -834,7 +854,7 @@ namespace {
 				}
 				src_array_type = cast<ArrayType>(src_array_ptr_type->getPointerElementType());
 				
-				// abort if array elem type is a pointer (we're expecting [N x %"class.floor_image::const_image"])
+				// abort if array elem type is a pointer (we're expecting [N x %"class.fl::floor_image::const_image"])
 				if(array_type->getArrayElementType()->isPointerTy()) {
 					return;
 				}
@@ -968,6 +988,102 @@ namespace {
 			//
 			I.replaceAllUsesWith(ret_vec);
 			I.eraseFromParent();
+			
+			//
+			simplify_image_handle(img_handle_arg);
+		}
+		
+		void handle_query_image_lod(Instruction& I,
+									const StringRef& func_name,
+									llvm::Value* img_handle_arg,
+									const COMPUTE_IMAGE_TYPE& image_type,
+									llvm::ConstantInt* const_sampler_arg,
+									llvm::Value* dyn_sampler_arg,
+									llvm::Value* coord_arg) override {
+			SmallVector<llvm::Type*, 3> func_arg_types;
+			SmallVector<llvm::Value*, 3> func_args;
+			
+			// NOTE: query_image_lod call will be constructed as follows ([arg] are optional args):
+			// query_image_lod(image, sampler_idx, coord)
+			// -> this will use cxx mangling, since we still need to differentiate the calls later on
+			
+			// must be constant/constexpr for now
+			if (const_sampler_arg == nullptr) {
+				ctx->emitError(&I, "sampler must be a constant");
+				return;
+			}
+			
+			// get geom string / mangled name + flags
+			const auto geom_cstr = type_to_geom(image_type);
+			if (!geom_cstr) {
+				ctx->emitError(&I, "unknown or incorrect image type");
+				return;
+			}
+			std::string geom = geom_cstr;
+			
+			// filter types that are not allowed
+			switch (image_type) {
+				case COMPUTE_IMAGE_TYPE::IMAGE_1D_BUFFER:
+				case COMPUTE_IMAGE_TYPE::IMAGE_2D_MSAA:
+				case COMPUTE_IMAGE_TYPE::IMAGE_2D_MSAA_ARRAY:
+				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_MSAA:
+				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_MSAA_ARRAY:
+					ctx->emitError(&I, "invalid image type - LOD can not be queried for this image type");
+					return;
+				default:
+					break;
+			}
+			
+			// -> return data and vulkan function name (with manual C++ mangling)
+			std::string vk_func_name = "_Z18query_image_lodv2f";
+			llvm::Type* ret_type = llvm::FixedVectorType::get(llvm::Type::getFloatTy(*ctx), 2u);
+			
+			// -> geom/image
+			vk_func_name += geom;
+			func_arg_types.push_back(img_handle_arg->getType());
+			func_args.push_back(img_handle_arg);
+			
+			// -> sampler
+			vk_func_name += "11ocl_sampler"; // technically "i"
+			func_arg_types.push_back(const_sampler_arg->getType());
+			func_args.push_back(const_sampler_arg);
+			
+			// -> coord (simplified vs normal image read)
+			handle_vk_coord(img_handle_arg,
+							I,
+							coord_arg,
+							nullptr /* no layer */,
+							false /* !is_array */,
+							false /* !is_msaa */,
+							false /* !is_non_cube_array_depth_compare */,
+							false /* always float */,
+							false /* !is_offset_dynamic */,
+							nullptr /* no offset */,
+							geom,
+							vk_func_name,
+							func_arg_types,
+							func_args);
+			
+			// create the Vulkan call
+			// NOTE: always returns a vector2
+			auto query_lod_func = get_or_create_spirv_function(vk_func_name, ret_type, func_arg_types, true);
+			llvm::CallInst* query_lod_call = builder->CreateCall(query_lod_func, func_args);
+			query_lod_call->setConvergent();
+			query_lod_call->setOnlyAccessesArgMemory();
+			query_lod_call->setDoesNotThrow();
+			query_lod_call->setOnlyReadsMemory(); // all reads are readonly (can be optimized away if unused)
+			query_lod_call->setDebugLoc(I.getDebugLoc()); // keep debug loc
+			query_lod_call->setCallingConv(CallingConv::FLOOR_FUNC);
+			
+			// extract the first value, this is the result that we want
+			llvm::Value* result = builder->CreateExtractElement(query_lod_call, uint64_t(0u));
+			
+			//
+			I.replaceAllUsesWith(result);
+			I.eraseFromParent();
+			
+			//
+			simplify_image_handle(img_handle_arg);
 		}
 		
 	};

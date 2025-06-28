@@ -18,7 +18,8 @@ void llvm::createMemCpyLoopKnownSize(Instruction *InsertBefore, Value *SrcAddr,
                                      Value *DstAddr, ConstantInt *CopyLen,
                                      Align SrcAlign, Align DstAlign,
                                      bool SrcIsVolatile, bool DstIsVolatile,
-                                     const TargetTransformInfo &TTI) {
+                                     const TargetTransformInfo &TTI,
+                                     Type *OverrideLoopOpType) {
   // No need to expand zero length copies.
   if (CopyLen->isZero())
     return;
@@ -33,8 +34,9 @@ void llvm::createMemCpyLoopKnownSize(Instruction *InsertBefore, Value *SrcAddr,
   unsigned DstAS = cast<PointerType>(DstAddr->getType())->getAddressSpace();
 
   Type *TypeOfCopyLen = CopyLen->getType();
-  Type *LoopOpType = TTI.getMemcpyLoopLoweringType(
-      Ctx, CopyLen, SrcAS, DstAS, SrcAlign.value(), DstAlign.value());
+  Type *LoopOpType = (OverrideLoopOpType ? OverrideLoopOpType :
+      TTI.getMemcpyLoopLoweringType(Ctx, CopyLen, SrcAS, DstAS,
+                                    SrcAlign.value(), DstAlign.value()));
 
   unsigned LoopOpSize = DL.getTypeStoreSize(LoopOpType);
   uint64_t LoopEndCount = CopyLen->getZExtValue() / LoopOpSize;
@@ -135,7 +137,8 @@ void llvm::createMemCpyLoopUnknownSize(Instruction *InsertBefore,
                                        Value *CopyLen, Align SrcAlign,
                                        Align DstAlign, bool SrcIsVolatile,
                                        bool DstIsVolatile,
-                                       const TargetTransformInfo &TTI) {
+                                       const TargetTransformInfo &TTI,
+                                       Type *OverrideLoopOpType) {
   BasicBlock *PreLoopBB = InsertBefore->getParent();
   BasicBlock *PostLoopBB =
       PreLoopBB->splitBasicBlock(InsertBefore, "post-loop-memcpy-expansion");
@@ -146,8 +149,9 @@ void llvm::createMemCpyLoopUnknownSize(Instruction *InsertBefore,
   unsigned SrcAS = cast<PointerType>(SrcAddr->getType())->getAddressSpace();
   unsigned DstAS = cast<PointerType>(DstAddr->getType())->getAddressSpace();
 
-  Type *LoopOpType = TTI.getMemcpyLoopLoweringType(
-      Ctx, CopyLen, SrcAS, DstAS, SrcAlign.value(), DstAlign.value());
+  Type *LoopOpType = (OverrideLoopOpType ? OverrideLoopOpType :
+      TTI.getMemcpyLoopLoweringType(Ctx, CopyLen, SrcAS, DstAS,
+                                    SrcAlign.value(), DstAlign.value()));
   unsigned LoopOpSize = DL.getTypeStoreSize(LoopOpType);
 
   IRBuilder<> PLBuilder(PreLoopBB->getTerminator());

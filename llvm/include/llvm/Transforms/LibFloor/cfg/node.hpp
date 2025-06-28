@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ d6cff9039956d6f461625b01981c541eb724088c
+// @ ed18ccec1f8c87417af68252a0931121806798a0
 //
 //===----------------------------------------------------------------------===//
 
@@ -86,6 +86,7 @@ public:
 
   void add_branch(CFGNode *to);
   void add_fake_branch(CFGNode *to);
+  void clear_branches();
 
   explicit CFGNode(CFGNodePool &pool, BasicBlock &BB, std::string name);
 
@@ -150,8 +151,13 @@ private:
   static CFGNode *find_common_post_dominator(CFGNode *a, CFGNode *b);
   CFGNode *get_immediate_dominator_loop_header();
   bool can_backtrace_to(const CFGNode *parent) const;
+  bool can_backtrace_to_with_blockers(
+      const CFGNode *parent, const std::vector<CFGNode *> &block_nodes) const;
   bool can_backtrace_to(const CFGNode *parent,
                         std::unordered_set<const CFGNode *> &node_cache) const;
+  bool can_backtrace_to_with_blockers(
+      const CFGNode *parent, const std::vector<CFGNode *> &block_nodes,
+      std::unordered_set<const CFGNode *> &node_cache) const;
   bool post_dominates_any_work() const;
   bool post_dominates_any_work(
       const CFGNode *parent,

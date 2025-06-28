@@ -512,6 +512,18 @@ public:
   /// complexity when asserts are enabled as when they are disabled.
   void validateInstrOrdering() const;
 
+  /// Returns true if this is a Vulkan fake-continue block.
+  bool isVulkanFakeContinue() const {
+    return getBasicBlockBits().VulkanFakeContinue;
+  }
+
+  /// Mark this block as a Vulkan fake-continue block.
+  void markVulkanFakeContinue() {
+    BasicBlockBits Bits = getBasicBlockBits();
+    Bits.VulkanFakeContinue = true;
+    setBasicBlockBits(Bits);
+  }
+
 private:
 #if defined(_AIX) && (!defined(__GNUC__) || defined(__clang__))
 // Except for GCC; by default, AIX compilers store bit-fields in 4-byte words
@@ -526,7 +538,8 @@ private:
   BEGIN_TWO_BYTE_PACK()
   /// Bitfield to help interpret the bits in Value::SubclassData.
   struct BasicBlockBits {
-    unsigned short BlockAddressRefCount : 15;
+    unsigned short BlockAddressRefCount : 14;
+    unsigned short VulkanFakeContinue : 1;
     unsigned short InstrOrderValid : 1;
   };
   END_TWO_BYTE_PACK()

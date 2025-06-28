@@ -3241,6 +3241,80 @@ void Sema::AddComputeKernelWorkGroupSizeAttr(SourceRange AttrRange, Decl *D,
   D->addAttr(::new (Context) ComputeKernelWorkGroupSizeAttr(TmpAttr));
 }
 
+static void handleComputeKernelSIMDWidthAttr(Sema &S, Decl *D, const ParsedAttr &Attr) {
+  if (!Attr.checkExactlyNumArgs(S, 1)) {
+    Attr.setInvalid();
+    return;
+  }
+  S.AddComputeKernelSIMDWidthAttr(Attr.getRange(), D, Attr.getArgAsExpr(0), Attr);
+}
+
+void Sema::AddComputeKernelSIMDWidthAttr(SourceRange AttrRange, Decl *D, Expr *E, const AttributeCommonInfo &CI) {
+  ComputeKernelSIMDWidthAttr TmpAttr(Context, CI, E);
+  SourceLocation AttrLoc = AttrRange.getBegin();
+
+  QualType T;
+  if (ValueDecl *VD = dyn_cast<ValueDecl>(D))
+    T = VD->getType();
+  else {
+    Diag(AttrLoc, diag::err_attribute_argument_type) <<
+      &TmpAttr << AANT_ArgumentIntegerConstant;
+    return;
+  }
+
+  // TODO: check usage
+
+  if (!E->isValueDependent()) {
+    // TODO: might want to use/check isPotentialConstantExprUnevaluated
+
+    llvm::APSInt KernelSIMDWidth(32);
+    ExprResult ICE
+      = VerifyIntegerConstantExpression(E, &KernelSIMDWidth, AllowFoldKind::AllowFold);
+    if (ICE.isInvalid())
+      return;
+
+    // bounds check
+    if (KernelSIMDWidth.getExtValue() < 1 || KernelSIMDWidth.getExtValue() > 128) {
+      unsigned diagID = Diags.getCustomDiagID(DiagnosticsEngine::Error, "%0");
+      Diags.Report(AttrRange.getBegin(), diagID) << "kernel SIMD width must be in [1, 128]!";
+      return;
+    }
+
+    switch (KernelSIMDWidth.getExtValue()) {
+      case 1:
+      case 2:
+      case 4:
+      case 8:
+      case 16:
+      case 32:
+      case 64:
+      case 128:
+        // okay
+        break;
+      default:
+        unsigned diagID = Diags.getCustomDiagID(DiagnosticsEngine::Error, "%0");
+        Diags.Report(AttrRange.getBegin(), diagID) << "kernel SIMD width must be a power of two!";
+        return;
+    }
+
+    auto simd_width_attr = ::new (Context) ComputeKernelSIMDWidthAttr(Context, CI, ICE.get());
+    simd_width_attr->setWidth((unsigned int)KernelSIMDWidth.getZExtValue());
+    D->addAttr(simd_width_attr);
+    return;
+  }
+
+  // Save dependent expressions in the AST to be instantiated.
+  D->addAttr(::new (Context) ComputeKernelSIMDWidthAttr(TmpAttr));
+}
+
+static void handleGraphicsEarlyFragmentTestsAttr(Sema &S, Decl *D, const ParsedAttr &Attr) {
+  if (!Attr.checkAtMostNumArgs(S, 0)) {
+    Attr.setInvalid();
+    return;
+  }
+  D->addAttr(::new (S.Context) GraphicsEarlyFragmentTestsAttr(S.Context, Attr));
+}
+
 static void handleGraphicsFBODepthTypeAttr(Sema &S, Decl *D, const ParsedAttr &Attr) {
   if (!Attr.checkExactlyNumArgs(S, 1)) {
     Attr.setInvalid();
@@ -8901,6 +8975,12 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
     break;
   case ParsedAttr::AT_ComputeKernelWorkGroupSize:
     handleComputeKernelWorkGroupSizeAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_ComputeKernelSIMDWidth:
+    handleComputeKernelSIMDWidthAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_GraphicsEarlyFragmentTests:
+    handleGraphicsEarlyFragmentTestsAttr(S, D, AL);
     break;
   case ParsedAttr::AT_GraphicsFBOColorLocation:
     handleGraphicsFBOColorLocationAttr(S, D, AL);

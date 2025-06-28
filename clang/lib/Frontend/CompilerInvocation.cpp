@@ -1846,7 +1846,6 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
       getLastArgUInt64Value(Args, OPT_vulkan_iub_count_EQ, 4)));
   Opts.VulkanLLVMPreStructurizationPass = Args.hasArg(OPT_vulkan_llvm_pre_structurization_pass);
   Opts.VulkanSoftPrintf = Args.hasArg(OPT_vulkan_soft_printf);
-  Opts.VulkanDescriptorBufferSupport = Args.hasArg(OPT_vulkan_descriptor_buffer_support);
   Opts.SPIRCompileOptions = Args.getLastArgValue(OPT_cl_spir_compile_options).trim("\t\n\v\f\r\" ");
   Opts.GraphicsPrimitiveID = Args.hasArg(OPT_graphics_primitive_id);
   Opts.GraphicsBarycentricCoord = Args.hasArg(OPT_graphics_barycentric_coord);
@@ -3260,6 +3259,7 @@ void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
   if (LangStd == LangStandard::lang_metal30 ||
       LangStd == LangStandard::lang_metal31 ||
       LangStd == LangStandard::lang_metal32 ||
+      LangStd == LangStandard::lang_metal40 ||
       IK.getLanguage() == Language::Metal) {
     Opts.Metal = 1;
     Opts.OpenCL = 1;
@@ -3271,10 +3271,13 @@ void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
       Opts.MetalVersion = 310;
     else if (LangStd == LangStandard::lang_metal32)
       Opts.MetalVersion = 320;
+    else if (LangStd == LangStandard::lang_metal40)
+      Opts.MetalVersion = 400;
   }
 
   // as Vulkan is largely compiled as OpenCL, also enable + init opencl
   if (LangStd == LangStandard::lang_vulkan13 ||
+      LangStd == LangStandard::lang_vulkan14 ||
       IK.getLanguage() == Language::Vulkan) {
     Opts.Vulkan = 1;
     Opts.OpenCL = 1;
@@ -3282,6 +3285,8 @@ void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
 
     if (LangStd == LangStandard::lang_vulkan13)
       Opts.VulkanVersion = 130;
+    else if (LangStd == LangStandard::lang_vulkan14)
+      Opts.VulkanVersion = 140;
   }
 
   // OpenCL has some additional defaults.
@@ -3797,9 +3802,6 @@ bool CompilerInvocation::ParseLangArgs(LangOptions &Opts, ArgList &Args,
   // Vulkan lang options
   if (Args.hasArg(OPT_vulkan_soft_printf)) {
     Opts.vulkan_soft_printf = true;
-  }
-  if (Args.hasArg(OPT_vulkan_descriptor_buffer_support)) {
-    Opts.VulkanDescriptorBufferSupport = true;
   }
 
   // These need to be parsed now. They are used to set OpenCL defaults.

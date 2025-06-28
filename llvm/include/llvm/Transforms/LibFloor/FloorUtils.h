@@ -1,7 +1,7 @@
 //===- FloorUtils.h - libfloor utility functions --------------------------===//
 //
 //  Flo's Open libRary (floor)
-//  Copyright (C) 2004 - 2024 Florian Ziesche
+//  Copyright (C) 2004 - 2025 Florian Ziesche
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -31,16 +31,48 @@
 
 namespace libfloor_utils {
 
-//! execute specified "func_cb(User&)" on all users of "val"
-template <typename F>
-static inline void for_all_users(llvm::Value& val, F&& func_cb /* void(User&) */) {
+template <bool is_const, typename F>
+static inline void for_all_users_impl(std::conditional_t<is_const, const llvm::Value&, llvm::Value&> val,
+									  F&& func_cb /* void(const User&) or void(User&) */,
+									  const llvm::Function* restrict_to_function = nullptr) {
 	// gather direct and single-indirect users
-	std::vector<llvm::User*> users;
+	std::vector<std::conditional_t<is_const, const llvm::User*, llvm::User*>> users;
 	for (auto user : val.users()) {
-		users.emplace_back(user);
-		if (auto const_expr = dyn_cast<llvm::ConstantExpr>(user)) {
+		bool delay_user_add = false;
+		if (restrict_to_function) {
+			if (const auto instr_user = dyn_cast_or_null<const llvm::Instruction>(user); instr_user) {
+				if (!instr_user->getParent() || instr_user->getParent()->getParent() != restrict_to_function) {
+					continue;
+				}
+			} else {
+				// -> will determine the restriction later
+				assert(isa<llvm::ConstantExpr>(user));
+				delay_user_add = true;
+			}
+		}
+		
+		if (!delay_user_add) {
+			users.emplace_back(user);
+		}
+		if (auto const_expr = dyn_cast<std::conditional_t<is_const, const llvm::ConstantExpr, llvm::ConstantExpr>>(user)) {
 			// allow single recursion into constant expression
 			for (auto ce_user : const_expr->users()) {
+				if (restrict_to_function) {
+					if (const auto ce_instr_user = dyn_cast_or_null<const llvm::Instruction>(ce_user); ce_instr_user) {
+						if (!ce_instr_user->getParent() || ce_instr_user->getParent()->getParent() != restrict_to_function) {
+							continue;
+						}
+						if (delay_user_add) {
+							// can now add this
+							delay_user_add = false;
+							users.emplace_back(user);
+						}
+					} else {
+						assert(false && "unhandled ConstantExpr user");
+						continue;
+					}
+				}
+				
 				users.emplace_back(ce_user);
 			}
 		}
@@ -51,38 +83,39 @@ static inline void for_all_users(llvm::Value& val, F&& func_cb /* void(User&) */
 	}
 }
 
-//! execute specified "func_cb(const User&)" on all users of "val" (const variant)
+//! execute specified "func_cb(User&)" on all users of "val"
 template <typename F>
-static inline void for_all_users(const llvm::Value& val, F&& func_cb /* void(const User&) */) {
-	// gather direct and single-indirect users
-	std::vector<const llvm::User*> users;
-	for (const auto user : val.users()) {
-		users.emplace_back(user);
-		if (const auto const_expr = dyn_cast<const llvm::ConstantExpr>(user)) {
-			// allow single recursion into constant expression
-			for (const auto ce_user : const_expr->users()) {
-				users.emplace_back(ce_user);
-			}
-		}
-	}
-	// call user callback for all users
-	for (const auto& user : users) {
-		func_cb(*user);
-	}
+static inline void for_all_users(llvm::Value& val, F&& func_cb /* void(const User&) */,
+								 const llvm::Function* restrict_to_function = nullptr) {
+	for_all_users_impl<false>(val, func_cb, restrict_to_function);
 }
 
-//! execute specified "func_cb(Instruction&)" on all instruction users of "val"
+//! execute specified "func_cb(const User&)" on all users of "val" (const variant)
 template <typename F>
-static inline void for_all_instruction_users(llvm::Value& val, F&& func_cb /* void(Instruction&) */) {
+static inline void for_all_users(const llvm::Value& val, F&& func_cb /* void(const User&) */,
+								 const llvm::Function* restrict_to_function = nullptr) {
+	for_all_users_impl<true>(val, func_cb, restrict_to_function);
+}
+
+template <bool is_const, typename F>
+static inline void for_all_instruction_users_impl(std::conditional_t<is_const, const llvm::Value&, llvm::Value&> val,
+												  F&& func_cb /* void(const Instruction&) or void(Instruction&) */,
+												  const llvm::Function* restrict_to_function = nullptr) {
 	// gather direct and single-indirect instruction users
-	std::vector<llvm::Instruction*> instr_users;
+	std::vector<std::conditional_t<is_const, const llvm::Instruction*, llvm::Instruction*>> instr_users;
 	for (auto user : val.users()) {
-		if (auto instr = dyn_cast<llvm::Instruction>(user)) {
+		if (auto instr = dyn_cast<std::conditional_t<is_const, const llvm::Instruction, llvm::Instruction>>(user)) {
+			if (restrict_to_function && (!instr->getParent() || instr->getParent()->getParent() != restrict_to_function)) {
+				continue;
+			}
 			instr_users.emplace_back(instr);
-		} else if (auto const_expr = dyn_cast<llvm::ConstantExpr>(user)) {
+		} else if (auto const_expr = dyn_cast<std::conditional_t<is_const, const llvm::ConstantExpr, llvm::ConstantExpr>>(user)) {
 			// allow single recursion into constant expression
 			for (auto ce_user : const_expr->users()) {
-				if (auto ce_instr = dyn_cast<llvm::Instruction>(ce_user)) {
+				if (auto ce_instr = dyn_cast<std::conditional_t<is_const, const llvm::Instruction, llvm::Instruction>>(ce_user)) {
+					if (restrict_to_function && (!ce_instr->getParent() || ce_instr->getParent()->getParent() != restrict_to_function)) {
+						continue;
+					}
 					instr_users.emplace_back(ce_instr);
 				}
 			}
@@ -94,27 +127,47 @@ static inline void for_all_instruction_users(llvm::Value& val, F&& func_cb /* vo
 	}
 }
 
+//! execute specified "func_cb(Instruction&)" on all instruction users of "val"
+template <typename F>
+static inline void for_all_instruction_users(llvm::Value& val, F&& func_cb /* void(Instruction&) */,
+											 const llvm::Function* restrict_to_function = nullptr) {
+	for_all_instruction_users_impl<false>(val, func_cb, restrict_to_function);
+}
+
 //! execute specified "func_cb(const Instruction&)" on all instruction users of "val" (const variant)
 template <typename F>
-static inline void for_all_instruction_users(const llvm::Value& val, F&& func_cb /* void(const Instruction&) */) {
-	// gather direct and single-indirect instruction users
-	std::vector<const llvm::Instruction*> instr_users;
-	for (const auto user : val.users()) {
-		if (const auto instr = dyn_cast<const llvm::Instruction>(user)) {
-			instr_users.emplace_back(instr);
-		} else if (const auto const_expr = dyn_cast<const llvm::ConstantExpr>(user)) {
-			// allow single recursion into constant expression
-			for (const auto ce_user : const_expr->users()) {
-				if (const auto ce_instr = dyn_cast<const llvm::Instruction>(ce_user)) {
-					instr_users.emplace_back(ce_instr);
+static inline void for_all_instruction_users(const llvm::Value& val, F&& func_cb /* void(const Instruction&) */,
+											 const llvm::Function* restrict_to_function = nullptr) {
+	for_all_instruction_users_impl<true>(val, func_cb, restrict_to_function);
+}
+
+//! wrapper around Value::replaceUsesWithIf that only replaces the uses of "val" inside the specified function "F"
+static inline void replace_all_uses_with_in_function(llvm::Value& val, llvm::Value& new_val, const llvm::Function& F) {
+	val.replaceUsesWithIf(&new_val, [&F](llvm::Use& use) {
+		// we only replace the use if it is inside an instruction of the specified function
+		auto user = use.getUser();
+		if (!user) {
+			return false;
+		}
+		
+		if (auto cnst = dyn_cast_or_null<llvm::Constant>(user); cnst) {
+			for (const auto& ce_user : cnst->users()) {
+				assert(isa<llvm::Instruction>(ce_user));
+				if (const auto instr = dyn_cast_or_null<llvm::Instruction>(ce_user);
+					instr && instr->getParent() && instr->getParent()->getParent() == &F) {
+					return true;
 				}
 			}
+			return false;
 		}
-	}
-	// call user callback for all instructions
-	for (const auto& instr : instr_users) {
-		func_cb(*instr);
-	}
+		
+		assert(isa<llvm::Instruction>(user));
+		if (const auto instr = dyn_cast_or_null<llvm::Instruction>(user);
+			instr && instr->getParent() && instr->getParent()->getParent() == &F) {
+			return true;
+		}
+		return false;
+	});
 }
 
 //! tries to simplify the specified constant integer value to 32-bit,
@@ -200,6 +253,48 @@ static inline bool simplify_gep_indices(llvm::LLVMContext& ctx, llvm::GetElement
 	return did_modify;
 }
 // TODO: should do the same for extractelement/insertelement/extractvalue/insertvalue
+
+//! returns the underlying bitcast operand of "val" if value is a bitcast,
+//! will recursively look through bitcasts if "val" contains a chain of bitcasts
+static inline llvm::Value* get_underlying_bitcast_operand_or_null(llvm::Value* val) {
+	llvm::Value* op = val;
+	do {
+		if (auto bc = dyn_cast_or_null<llvm::BitCastInst>(op); bc) {
+			op = bc->getOperand(0);
+		} else if (auto cexpr = dyn_cast_or_null<llvm::ConstantExpr>(op);
+				   cexpr && cexpr->getOpcode() == llvm::Instruction::BitCast) {
+			op = cexpr->getOperand(0);
+		} else {
+			break;
+		}
+	} while (true);
+	return (op != val ? op : nullptr);
+}
+
+//! returns the underlying elemental type of the specified "type",
+//! i.e. the innermost type that can not be decomposed further,
+//! returns nullptr for invalid types
+static inline llvm::Type* get_elemental_type(llvm::Type* type) {
+	if (!type) {
+		return nullptr;
+	}
+	
+	// struct types: return the elemental type of the first field (recursively if necessary)
+	if (auto st_type = dyn_cast_or_null<llvm::StructType>(type)) {
+		if (st_type->getStructNumElements() == 0) {
+			return nullptr;
+		}
+		return get_elemental_type(st_type->getStructElementType(0));
+	}
+	
+	// array types: can just use the element type, then recurse
+	if (auto arr_type = dyn_cast_or_null<llvm::ArrayType>(type)) {
+		return get_elemental_type(arr_type->getElementType());
+	}
+	
+	// else: assume we already have an elemental type
+	return type;
+}
 
 } // namespace libfloor_utils
 

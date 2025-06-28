@@ -721,6 +721,16 @@ static void instantiateDependentComputeKernelWorkGroupSizeAttr(
   S.AddComputeKernelWorkGroupSizeAttr(A->getLocation(), New, size_x, size_y, size_z, *A);
 }
 
+static void instantiateDependentComputeKernelSIMDWidthAttr(
+    Sema &S, const MultiLevelTemplateArgumentList &TemplateArgs,
+    const ComputeKernelSIMDWidthAttr *A, const Decl *Tmpl, Decl *New) {
+  // TODO: check Tmpl with isPotentialConstantExprUnevaluated?
+  EnterExpressionEvaluationContext Unevaluated(S, Sema::ExpressionEvaluationContext::ConstantEvaluated);
+  ExprResult Result = S.SubstExpr(A->getSIMDWidth(), TemplateArgs);
+  if (!Result.isInvalid())
+    S.AddComputeKernelSIMDWidthAttr(A->getLocation(), New, Result.getAs<Expr>(), *A);
+}
+
 void Sema::InstantiateAttrs(const MultiLevelTemplateArgumentList &TemplateArgs,
                             const Decl *Tmpl, Decl *New,
                             LateInstantiatedAttrVec *LateAttrs,
@@ -862,6 +872,11 @@ void Sema::InstantiateAttrs(const MultiLevelTemplateArgumentList &TemplateArgs,
 
     if (auto *KernelWorkGroupSize = dyn_cast<ComputeKernelWorkGroupSizeAttr>(TmplAttr)) {
       instantiateDependentComputeKernelWorkGroupSizeAttr(*this, TemplateArgs, KernelWorkGroupSize, Tmpl, New);
+      continue;
+    }
+
+    if (auto *KernelSIMDWidth = dyn_cast<ComputeKernelSIMDWidthAttr>(TmplAttr)) {
+      instantiateDependentComputeKernelSIMDWidthAttr(*this, TemplateArgs, KernelSIMDWidth, Tmpl, New);
       continue;
     }
 
@@ -2529,6 +2544,7 @@ Decl *TemplateDeclInstantiator::VisitCXXMethodDecl(
         SemaRef.Context, Record, StartLoc, NameInfo, T, TInfo,
         Destructor->UsesFPIntrin(), Destructor->isInlineSpecified(), false,
         Destructor->getConstexprKind(), TrailingRequiresClause);
+    Method->setIneligibleOrNotSelected(true);
     Method->setRangeEnd(Destructor->getEndLoc());
     Method->setDeclName(SemaRef.Context.DeclarationNames.getCXXDestructorName(
         SemaRef.Context.getCanonicalType(
@@ -2712,6 +2728,22 @@ Decl *TemplateDeclInstantiator::VisitCXXMethodDecl(
   // FIXME: Is this necessary?
   if (IsExplicitSpecialization && !isFriend)
     SemaRef.CompleteMemberSpecialization(Method, Previous);
+
+  // If the method is a special member function, we need to mark it as
+  // ineligible so that Owner->addDecl() won't mark the class as non trivial.
+  // At the end of the class instantiation, we calculate eligibility again and
+  // then we adjust trivility if needed.
+  // We need this check to happen only after the method parameters are set,
+  // because being e.g. a copy constructor depends on the instantiated
+  // arguments.
+  if (auto *Constructor = dyn_cast<CXXConstructorDecl>(Method)) {
+    if (Constructor->isDefaultConstructor() ||
+        Constructor->isCopyOrMoveConstructor())
+      Method->setIneligibleOrNotSelected(true);
+  } else if (Method->isCopyAssignmentOperator() ||
+             Method->isMoveAssignmentOperator()) {
+    Method->setIneligibleOrNotSelected(true);
+  }
 
   // If there's a function template, let our caller handle it.
   if (FunctionTemplate) {

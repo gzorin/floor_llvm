@@ -323,6 +323,8 @@ static const unordered_map<uint32_t,
         {260, {{{2, 6, 0}}, {{3, 1, 0}}}},
         // Metal 3.2 uses AIR 2.7
         {270, {{{2, 7, 0}}, {{3, 2, 0}}}},
+        // Metal 4.0 uses AIR 2.8
+        {280, {{{2, 8, 0}}, {{4, 0, 0}}}},
     };
 
 static std::string make_abs_file_name(const std::string &file_name_in) {
@@ -414,8 +416,10 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       target_air_version = 250;
     } else if (ios_version.getMajor() == 17) {
       target_air_version = 260;
-    } else if (ios_version.getMajor() >= 18) {
+    } else if (ios_version.getMajor() == 18) {
       target_air_version = 270;
+    } else if (ios_version.getMajor() >= 26) {
+      target_air_version = 280;
     }
 
     auto ios_minor = ios_version.getMinor().hasValue()
@@ -424,8 +428,10 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     M.setSDKVersion(VersionTuple{ios_version.getMajor(), ios_minor});
   } else if (TT.isXROS()) {
     auto xros_version = TT.getXROSVersion();
-    if (xros_version.getMajor() >= 2) {
+    if (xros_version.getMajor() == 2) {
       target_air_version = 270;
+    } else if (xros_version.getMajor() >= 26) {
+      target_air_version = 280;
     }
 
     auto xros_minor = xros_version.getMinor().hasValue()
@@ -438,15 +444,19 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     auto osx_minor = osx_version.getMinor().hasValue()
                          ? osx_version.getMinor().getValue()
                          : 0;
-    if (osx_version.getMajor() == 13) {
+    auto osx_major = osx_version.getMajor();
+    if (osx_major == 13) {
       target_air_version = 250;
-    } else if (osx_version.getMajor() == 14) {
+    } else if (osx_major == 14) {
       target_air_version = 260;
-    } else if (osx_version.getMajor() >= 15) {
+    } else if (osx_major == 15) {
       target_air_version = 270;
+    } else if (osx_major == 16 || osx_major >= 26) {
+      target_air_version = 280;
+      osx_major = 26; // make sure SDK version is actually 26 for 16 as well
     }
 
-    M.setSDKVersion(VersionTuple{osx_version.getMajor(), osx_minor});
+    M.setSDKVersion(VersionTuple{osx_major, osx_minor});
   }
   const auto &metal_version = *metal_versions.find(target_air_version);
 #if FORCE_EMIT_BC50
@@ -823,7 +833,8 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
         static const std::unordered_map<uint32_t, const char *> ident_versions{
             {250, "Apple metal version 31001.638 (metalfe-31001.638.1)"},
             {260, "Apple metal version 32023.155 (metalfe-32023.155)"},
-            {270, "Apple metal version 32023.331 (metalfe-32023.331)"},
+            {270, "Apple metal version 32023.620 (metalfe-32023.620)"},
+            {280, "Apple metal version 32023.821 (metalfe-32023.821)"},
         };
         ident_op->replaceOperandWith(
             0, llvm::MDString::get(cloned_mod->getContext(),
@@ -1162,11 +1173,17 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   // header
   OS.write("MTLB", 4);
 
+  uint16_t container_version_bugfix = 7;
+  if (target_air_version >= 280) {
+    container_version_bugfix = 9;
+  } else if (target_air_version >= 270) {
+    container_version_bugfix = 8;
+  }
   metallib_version header{
       .container_version_major = 1,
       .is_macos_target = TT.isMacOSX(),
       .container_version_minor = 2,
-      .container_version_bugfix = uint16_t(target_air_version < 270 ? 7u : 8u),
+      .container_version_bugfix = container_version_bugfix,
       .file_type = 0,    // always "execute"
       .is_stub = false,  // never stub
       .is_64_bit = true, // always 64-bit

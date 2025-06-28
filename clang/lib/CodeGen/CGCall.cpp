@@ -469,18 +469,18 @@ uint32_t CodeGenTypes::getMetalVulkanImplicitArgCount(const FunctionDecl* FD) co
     if (FD->hasAttr<ComputeKernelAttr>() || FD->hasAttr<GraphicsTessellationControlShaderAttr>()) {
       return 10 + printf_arg;
     } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
-      return 2 + printf_arg;
+      return 4 + printf_arg;
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
       return 1 + printf_arg + (CodeGenOpts.GraphicsPrimitiveID ? 1 : 0) + (CodeGenOpts.GraphicsBarycentricCoord ? 1 : 0);
     } else if (FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
-      return 3 + printf_arg;
+      return 4 + printf_arg;
     }
   } else if(LangOpts.Vulkan) {
     const uint32_t printf_arg = (CodeGenOpts.VulkanSoftPrintf > 0 ? 1 : 0);
     if (FD->hasAttr<ComputeKernelAttr>()) {
       return 6 + printf_arg;
     } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
-      return 3 + printf_arg;
+      return 5 + printf_arg;
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
       return 3 + printf_arg + (CodeGenOpts.GraphicsPrimitiveID ? 1 : 0) + (CodeGenOpts.GraphicsBarycentricCoord ? 1 : 0);
     } else if (FD->hasAttr<GraphicsTessellationControlShaderAttr>()) {
@@ -568,7 +568,9 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
     } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
       // only vertex id and instance id for now:
       add_arg(Ctx.IntTy, "__metal__vertex_id__");
+      add_arg(Ctx.IntTy, "__metal__base_vertex_id__");
       add_arg(Ctx.IntTy, "__metal__instance_id__");
+      add_arg(Ctx.IntTy, "__metal__base_instance_id__");
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
       // optional: primitive id and barycentric coord
       if (CodeGenOpts.GraphicsPrimitiveID) {
@@ -586,6 +588,7 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       // patch id, instance id and position-in-patch:
       add_arg(Ctx.IntTy, "__metal__patch_id__");
       add_arg(Ctx.IntTy, "__metal__instance_id__");
+      add_arg(Ctx.IntTy, "__metal__base_instance_id__");
       // TODO: figure out a way to support both triangles and quads! -> for now, triangle only
       auto float3_type = Ctx.getExtVectorType(Ctx.FloatTy, 3);
       add_arg(float3_type, "__metal__position_in_patch__");
@@ -610,8 +613,10 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       // only vertex id + view index + instance id for now:
       auto int_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.IntTy, LangAS::vulkan_input));
       add_arg(int_ptr_type, "vulkan.vertex_index");
+      add_arg(int_ptr_type, "vulkan.base_vertex_index");
       add_arg(int_ptr_type, "vulkan.view_index");
       add_arg(int_ptr_type, "vulkan.instance_index");
+      add_arg(int_ptr_type, "vulkan.base_instance_index");
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
       auto int_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.IntTy, LangAS::vulkan_input));
 
@@ -3518,7 +3523,8 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
 			
 			if (field.field_decl) {
 				// array of images/buffers and singular images
-				if (field.type->isArrayImageType(false) || field.type->isArrayBufferType()) {
+				if (field.type->isArrayImageType(false) || field.type->isArrayBufferType()||
+					field.type->isArrayType()) {
 					LValue SubLV = EmitLValueForField(LV, field.field_decl, true);
 					Builder.CreateStore(&*AI, SubLV.getAddress(*this));
 				} else { // all else
@@ -5169,6 +5175,27 @@ public:
 
 } // namespace
 
+static llvm::Value* handle_call_arg_buffer_indirection(llvm::Value* V, llvm::Type* param_type, CGBuilderTy& Builder) {
+	auto base_alloca = dyn_cast_or_null<llvm::AllocaInst>(V);
+	if (!base_alloca) {
+		return nullptr;
+	}
+	
+	auto annotation_md = base_alloca->getMetadata(llvm::LLVMContext::MD_annotation);
+	if (!annotation_md || annotation_md->getNumOperands() == 0) {
+		return nullptr;
+	}
+	auto annotation_str = dyn_cast_or_null<llvm::MDString>(annotation_md->getOperand(0));
+	if (!annotation_str || !annotation_str->getString().equals("vulkan_arg_buffer")) {
+		return nullptr;
+	}
+	
+	// annotate bitcast with "vulkan_arg_buffer" for later fix-up
+	auto bc = Builder.CreateBitCast(V, param_type);
+	((llvm::Instruction*)bc)->addAnnotationMetadata("vulkan_arg_buffer");
+	return bc;
+}
+
 RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
                                  const CGCallee &Callee,
                                  ReturnValueSlot ReturnValue,
@@ -5502,6 +5529,8 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
             // it's not ideal to emit an address space cast at all,
             // but we have no other option here if src AS is 0
             V = Builder.CreateAddrSpaceCast(V, param_type);
+          } else if (auto arg_buffer_indirection = handle_call_arg_buffer_indirection(V, param_type, Builder); arg_buffer_indirection) {
+            V = arg_buffer_indirection;
           } else {
             V = Builder.CreateBitCast(V, param_type);
           }

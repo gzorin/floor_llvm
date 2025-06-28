@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ d6cff9039956d6f461625b01981c541eb724088c
+// @ ed18ccec1f8c87417af68252a0931121806798a0
 //
 //===----------------------------------------------------------------------===//
 
@@ -62,6 +62,11 @@ public:
   CFGNode *get_entry_block() const;
 
   bool rewrite_rov_lock_region();
+  void rewrite_auto_group_shared_barrier();
+  void flatten_subgroup_shuffles();
+
+  // For esoteric CFG workarounds.
+  void set_driver_version(uint32_t driver_id, uint32_t driver_version);
 
 private:
   CFGNode *entry_block;
@@ -89,8 +94,10 @@ private:
   void build_reachability();
   void visit_reachability(const CFGNode &node);
   bool query_reachability(const CFGNode &from, const CFGNode &to) const;
-  void structurize(unsigned pass);
-  void find_loops();
+  bool structurize(unsigned pass);
+  bool find_loops(unsigned pass);
+  bool rewrite_complex_loop_exits(CFGNode *node, CFGNode *merge,
+                                  std::vector<CFGNode *> &dominated_exits);
   bool rewrite_transposed_loops();
 
   struct LoopAnalysis {
@@ -120,6 +127,7 @@ private:
   static bool is_ordered(const CFGNode *a, const CFGNode *b, const CFGNode *c);
   bool serialize_interleaved_merge_scopes();
   void split_merge_scopes();
+  static CFGNode *rewind_candidate_split_node(CFGNode *node);
   void eliminate_degenerate_blocks();
   static bool ladder_chain_has_phi_dependencies(const CFGNode *chain,
                                                 const CFGNode *incoming);
@@ -135,6 +143,10 @@ private:
   header_and_merge_block_have_entry_exit_relationship(CFGNode *header,
                                                       CFGNode *merge) const;
   void fixup_broken_selection_merges(unsigned pass);
+
+  enum class SwitchProgressMode { Done, SimpleModify, IterativeModify };
+  SwitchProgressMode process_switch_blocks(unsigned pass);
+
   bool find_switch_blocks(unsigned pass);
   void hoist_switch_branches_to_frontier(CFGNode *node, CFGNode *merge,
                                          CFGNode *frontier);
@@ -238,6 +250,7 @@ private:
   void insert_phi(PHINode &node);
   void fixup_phi(PHINode &node);
   void cleanup_breaking_phi_constructs();
+  bool block_is_breaking_phi_construct(const CFGNode *node) const;
   bool cleanup_breaking_return_constructs();
   void eliminate_node_link_preds_to_succ(CFGNode *node);
   void prune_dead_preds();
@@ -280,5 +293,30 @@ private:
       const std::string &name);
 
   void propagate_branch_control_hints();
+
+  uint32_t driver_id{0u};
+  uint32_t driver_version{0u};
+
+  bool
+  find_single_entry_exit_lock_region(CFGNode *&idom, CFGNode *&pdom,
+                                     const std::vector<CFGNode *> &rov_blocks);
+  bool execution_path_is_single_entry_and_dominates_exit(CFGNode *idom,
+                                                         CFGNode *pdom);
+
+  void
+  collect_and_dispatch_control_flow(CFGNode *common_idom, CFGNode *common_pdom,
+                                    const std::vector<CFGNode *> &constructs,
+                                    bool collect_all_code_paths_to_pdom);
+
+  void collect_and_dispatch_control_flow_from_anchor(
+      CFGNode *anchor, CFGNode *common_pdom,
+      const std::vector<CFGNode *> &constructs);
+
+  void sink_ssa_constructs();
+  void sink_ssa_constructs_run(bool dry_run);
+
+  SpvInstructionFlags get_instruction_flags(const Instruction *instr);
+  void set_instruction_flags(Instruction *instr,
+                             const SpvInstructionFlags new_flags);
 };
 } // namespace llvm

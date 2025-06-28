@@ -1,7 +1,7 @@
 //===-- LibFloor.cpp ------------------------------------------------------===//
 //
 //  Flo's Open libRary (floor)
-//  Copyright (C) 2004 - 2024 Florian Ziesche
+//  Copyright (C) 2004 - 2025 Florian Ziesche
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -46,10 +46,12 @@ void llvm::initializeLibFloor(PassRegistry &Registry) {
   initializeSPIRFinalModulePass(Registry);
   initializeSPIRImagePass(Registry);
   initializeCFGStructurizationPass(Registry);
+  initializeVulkanEarlyArgBufferFunctionClonePass(Registry);
   initializeVulkanImagePass(Registry);
   initializeVulkanFinalPass(Registry);
   initializeVulkanBuiltinParamHandlingPass(Registry);
   initializeVulkanPreFinalPass(Registry);
+  initializeVulkanPreFinalPointerBCFixupPass(Registry);
   initializeVulkanFinalModuleCleanupPass(Registry);
   initializePropagateRangeInfoPass(Registry);
   initializeFMACombinerPass(Registry);
@@ -99,6 +101,10 @@ void LLVMAddCFGStructurizationPass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createCFGStructurizationPass());
 }
 
+void LLVMAddVulkanEarlyArgBufferFunctionClonePass(LLVMPassManagerRef PM) {
+  unwrap(PM)->add(createVulkanEarlyArgBufferFunctionClonePass());
+}
+
 void LLVMAddVulkanImagePass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createVulkanImagePass());
 }
@@ -113,6 +119,10 @@ void LLVMAddVulkanBuiltinParamHandlingPass(LLVMPassManagerRef PM) {
 
 void LLVMAddVulkanPreFinalPass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createVulkanPreFinalPass());
+}
+
+void LLVMAddVulkanPreFinalPointerBCFixupPass(LLVMPassManagerRef PM) {
+  unwrap(PM)->add(createVulkanPreFinalPointerBCFixupPass());
 }
 
 void LLVMAddVulkanFinalModuleCleanupPass(LLVMPassManagerRef PM) {

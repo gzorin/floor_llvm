@@ -7,7 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#if defined(FLOOR_COMPUTE_HOST_DEVICE) // we don't want this for other backends
+#if defined(FLOOR_DEVICE_HOST_COMPUTE_IS_DEVICE) || defined(FLOOR_COMPUTE_HOST_DEVICE) // we don't want this for other backends
 
 #if defined(__need_ptrdiff_t) || defined(__need_size_t) || \
     defined(__need_wchar_t) || defined(__need_NULL) || defined(__need_wint_t)

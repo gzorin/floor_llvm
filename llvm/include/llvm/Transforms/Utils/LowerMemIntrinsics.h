@@ -23,6 +23,7 @@ class MemMoveInst;
 class MemSetInst;
 class TargetTransformInfo;
 class Value;
+class Type;
 struct Align;
 
 /// Emit a loop implementing the semantics of llvm.memcpy where the size is not
@@ -31,7 +32,8 @@ void createMemCpyLoopUnknownSize(Instruction *InsertBefore, Value *SrcAddr,
                                  Value *DstAddr, Value *CopyLen,
                                  Align SrcAlign, Align DestAlign,
                                  bool SrcIsVolatile, bool DstIsVolatile,
-                                 const TargetTransformInfo &TTI);
+                                 const TargetTransformInfo &TTI,
+                                 Type *OverrideLoopOpType = nullptr);
 
 /// Emit a loop implementing the semantics of an llvm.memcpy whose size is a
 /// compile time constant. Loop is inserted at \p InsertBefore.
@@ -39,7 +41,8 @@ void createMemCpyLoopKnownSize(Instruction *InsertBefore, Value *SrcAddr,
                                Value *DstAddr, ConstantInt *CopyLen,
                                Align SrcAlign, Align DestAlign,
                                bool SrcIsVolatile, bool DstIsVolatile,
-                               const TargetTransformInfo &TTI);
+                               const TargetTransformInfo &TTI,
+                               Type *OverrideLoopOpType = nullptr);
 
 /// Expand \p MemCpy as a loop. \p MemCpy is not deleted.
 void expandMemCpyAsLoop(MemCpyInst *MemCpy, const TargetTransformInfo &TTI);
