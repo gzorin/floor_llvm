@@ -11,10 +11,12 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Bitcode/BitcodeWriterPass.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/Bitcode/MetalLibWriter.h"
 #include "../Writer50/ValueEnumerator50.h"
 #include "../Writer140/ValueEnumerator140.h"
 #include "llvm/IR/DebugInfoMetadata.h"
@@ -405,6 +407,279 @@ compress_source_archive(const void *archive_ptr, const uint32_t archive_size) {
   return {std::move(dst), dst_len};
 }
 
+namespace {
+
+// Descend a use operand to the GlobalValue leaves it reaches: a GlobalValue is
+// a leaf, a MetadataAsValue roots no reachability, and any other Constant is
+// descended through its operands (carrying the walk through a ConstantExpr to
+// the GlobalValue it names). Duplicated from llair's lib/Linker/Linker.cpp --
+// this file must not depend on llair.
+void visitReferencedGlobalValueOperand(
+    const Value *operand, function_ref<void(const GlobalValue &)> visit) {
+  if (auto *gv = dyn_cast<GlobalValue>(operand)) {
+    visit(*gv);
+    return;
+  }
+  if (isa<MetadataAsValue>(operand)) {
+    return;
+  }
+  if (auto *c = dyn_cast<Constant>(operand)) {
+    for (const auto &sub : c->operands()) {
+      visitReferencedGlobalValueOperand(sub.get(), visit);
+    }
+  }
+}
+
+// Every GlobalValue directly referenced by `root`'s definition: a function's
+// instruction operands, a global's initializer, an alias's aliasee. Attached
+// metadata is deliberately never walked.
+void forEachReferencedGlobalValue(
+    const GlobalValue &root, function_ref<void(const GlobalValue &)> visit) {
+  if (auto *f = dyn_cast<Function>(&root)) {
+    for (const auto &bb : *f) {
+      for (const auto &inst : bb) {
+        for (const auto &operand : inst.operands()) {
+          visitReferencedGlobalValueOperand(operand.get(), visit);
+        }
+      }
+    }
+  } else if (auto *gv = dyn_cast<GlobalVariable>(&root)) {
+    if (gv->hasInitializer()) {
+      visitReferencedGlobalValueOperand(gv->getInitializer(), visit);
+    }
+  } else if (auto *ga = dyn_cast<GlobalAlias>(&root)) {
+    if (const Constant *aliasee = ga->getAliasee()) {
+      visitReferencedGlobalValueOperand(aliasee, visit);
+    }
+  }
+}
+
+// Transitive closure of the GlobalValues reachable from `root`, over the same
+// forward reference edges the linker's pull follows (operands, initializer,
+// aliasee; metadata excluded), plus comdat groups pulled as a unit -- a
+// comdat is a module-level property, not a reference edge, so (unlike in
+// llair's Linker, which handles it in Linker::define) it is folded into the
+// worklist directly here.
+DenseSet<const GlobalValue *> reachableClosure(const GlobalValue &root) {
+  DenseSet<const GlobalValue *> seen;
+  SmallVector<const GlobalValue *, 32> worklist;
+
+  auto enqueue = [&](const GlobalValue *gv) {
+    if (seen.insert(gv).second) {
+      worklist.push_back(gv);
+    }
+  };
+
+  enqueue(&root);
+
+  while (!worklist.empty()) {
+    const GlobalValue *gv = worklist.pop_back_val();
+
+    forEachReferencedGlobalValue(
+        *gv, [&](const GlobalValue &ref) { enqueue(&ref); });
+
+    if (auto *go = dyn_cast<GlobalObject>(gv)) {
+      if (auto *comdat = go->getComdat()) {
+        for (const auto &sibling : go->getParent()->global_values()) {
+          auto *sgo = dyn_cast<GlobalObject>(&sibling);
+          if (sgo && sgo->getComdat() == comdat) {
+            enqueue(sgo);
+          }
+        }
+      }
+    }
+  }
+
+  return seen;
+}
+
+} // namespace
+
+std::unique_ptr<Module>
+llvm::buildEntryModule(const Module &M, const Function *entry,
+                       function_ref<bool(const GlobalValue *)> ShouldCloneDefinition,
+                       uint32_t target_air_version) {
+  // clone the module with the current entry point function and any global
+  // vars that we need
+  unordered_set<const Function *> funcs;
+  ValueToValueMapTy VMap;
+  auto cloned_mod = CloneModule(M, VMap, ShouldCloneDefinition);
+
+  // metallib uses the function name as the source file name
+  cloned_mod->setSourceFileName(entry->getName());
+
+  // update data layout
+  cloned_mod->setDataLayout(
+      "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-"
+      "f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:"
+      "128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:"
+      "1024-n8:16:32");
+
+  // remove all unused functions and global vars, since CloneModule only sets
+  // unused vars to external linkage and unused funcs are declarations only
+  // NOTE: this also removes entry points that are now unused (metadata is
+  // removed later)
+  llvm::legacy::PassManager mpm;
+
+  mpm.add(createInternalizePass([&entry](const GlobalValue& GV) -> bool {
+      return GV.getName() == entry->getName();
+  }));
+
+  mpm.add(createGlobalOptimizerPass());
+
+  // ShouldCloneDefinition leaves an unreferenced global as an external
+  // declaration rather than omitting it -- GlobalOpt alone does not erase
+  // those declarations, but the writer's per-entry metadata filters (function
+  // constants, sampler states, entry-point lists) key off "erased" via a
+  // null-operand check. GlobalDCE is what actually erases them.
+  mpm.add(createGlobalDCEPass());
+
+  mpm.run(*cloned_mod);
+
+  // * strip floor_* calling convention from all functions and their users (replace it with C CC)
+  for (auto func_iter = cloned_mod->begin(); func_iter != cloned_mod->end();) {
+    auto& func = *func_iter;
+
+    if (func.getCallingConv() != CallingConv::C) {
+      func.setCallingConv(CallingConv::C);
+      for (auto user : func.users()) {
+        if (auto CB = dyn_cast<CallBase>(user)) {
+          CB->setCallingConv(CallingConv::C);
+        }
+      }
+    }
+
+    ++func_iter;
+  }
+
+  // clean up metadata
+  // * metadata of all entry points that no longer exist
+  static constexpr const std::array<const char *, 3> entry_point_md_names{{
+      "air.kernel",
+      "air.vertex",
+      "air.fragment",
+  }};
+  for (const auto &entry_point_md_name : entry_point_md_names) {
+    if (auto func_entries =
+            cloned_mod->getNamedMetadata(entry_point_md_name)) {
+      vector<MDNode *> kept_nodes;
+      for (auto op_iter = func_entries->op_begin();
+           op_iter != func_entries->op_end(); ++op_iter) {
+        MDNode *node = *op_iter;
+        if (node->getNumOperands() < 3) {
+          continue;
+        }
+        if (node->getOperand(0).get() == nullptr) {
+          continue;
+        }
+        kept_nodes.emplace_back(node);
+      }
+
+      // need to drop all references to existing nodes, b/c we can't directly
+      // remove operands
+      func_entries->dropAllReferences();
+      if (kept_nodes.empty()) {
+        // remove air.sampler_states altogether
+        func_entries->eraseFromParent();
+      } else {
+        // now, only add ones we want to keep
+        for (auto node : kept_nodes) {
+          func_entries->addOperand(node);
+        }
+      }
+    }
+  }
+  // * sample states of entry points that no longer exist
+  if (auto sampler_states =
+          cloned_mod->getNamedMetadata("air.sampler_states")) {
+    vector<MDNode *> kept_nodes;
+    for (auto op_iter = sampler_states->op_begin();
+         op_iter != sampler_states->op_end(); ++op_iter) {
+      MDNode *node = *op_iter;
+      if (node->getNumOperands() != 2 ||
+          node->getOperand(1).get() == nullptr) {
+        continue;
+      }
+      kept_nodes.emplace_back(node);
+    }
+
+    // need to drop all references to existing nodes, b/c we can't directly
+    // remove operands
+    sampler_states->dropAllReferences();
+    if (kept_nodes.empty()) {
+      // remove air.sampler_states altogether
+      sampler_states->eraseFromParent();
+    } else {
+      // now, only add ones we want to keep
+      for (auto node : kept_nodes) {
+        sampler_states->addOperand(node);
+      }
+    }
+  }
+  // * set fake compiler ident
+  if (auto llvm_ident = cloned_mod->getNamedMetadata("llvm.ident")) {
+    if (MDNode *ident_op = llvm_ident->getOperand(0)) {
+      static const std::unordered_map<uint32_t, const char *> ident_versions{
+          {250, "Apple metal version 31001.638 (metalfe-31001.638.1)"},
+          {260, "Apple metal version 32023.155 (metalfe-32023.155)"},
+          {270, "Apple metal version 32023.620 (metalfe-32023.620)"},
+          {280, "Apple metal version 32023.821 (metalfe-32023.821)"},
+      };
+      ident_op->replaceOperandWith(
+          0, llvm::MDString::get(cloned_mod->getContext(),
+                                 ident_versions.at(target_air_version)));
+    }
+  }
+  // * kill other named metadata that is no longer needed
+  for (auto nmd_iter = cloned_mod->named_metadata_begin();
+       nmd_iter != cloned_mod->named_metadata_end();) {
+    if (nmd_iter->getName().startswith("floor.")) {
+      auto erase_nmd = &*nmd_iter++;
+      cloned_mod->eraseNamedMetadata(erase_nmd);
+    } else {
+      ++nmd_iter;
+    }
+  }
+
+  // modify local and constant memory GVs
+  const auto &DL = cloned_mod->getDataLayout();
+  for (auto I = cloned_mod->global_begin(), E = cloned_mod->global_end();
+       I != E;) {
+    GlobalVariable &GV = *I++;
+    if (GV.getAddressSpace() == 2 /* constant memory */ ||
+        GV.getAddressSpace() == 3 /* local memory */) {
+      auto value_type = GV.getValueType();
+      if (value_type && value_type->isSized() &&
+          DL.getTypeStoreSize(value_type) >= 16 && GV.getAlignment() < 16) {
+        // use at least 16-byte alignment
+        GV.setAlignment(MaybeAlign{16u});
+      }
+    }
+    if (GV.getAddressSpace() == 3 /* local memory */) {
+      // always use undef initializer (instead of zeroinitializer)
+      GV.setInitializer(UndefValue::get(GV.getValueType()));
+    }
+  }
+
+  return cloned_mod;
+}
+
+DenseSet<const GlobalValue *>
+llvm::computeStaticInitRoots(const Module &M) {
+  DenseSet<const GlobalValue *> roots;
+  for (const Function &f : M) {
+    if (f.getSection() == "air.static_init") {
+      auto closure = reachableClosure(f);
+      roots.insert(closure.begin(), closure.end());
+    }
+  }
+  if (auto *global_ctors = M.getNamedGlobal("llvm.global_ctors")) {
+    auto closure = reachableClosure(*global_ctors);
+    roots.insert(closure.begin(), closure.end());
+  }
+  return roots;
+}
+
 //
 void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   // get metal version
@@ -698,6 +973,8 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     }
   }
 
+  auto static_init_roots = computeStaticInitRoots(M);
+
   // create per-function modules and fill entries
   uint64_t entries_size = 0;
   uint64_t extended_md_data_size = 0;
@@ -717,160 +994,17 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     entry.metal_language_version.rev = metal_version.second.second[2];
     entry.emit_debug_info = emit_debug_info;
 
-    // clone the module with the current entry point function and any global
-    // vars that we need
-    unordered_set<const Function *> funcs;
-    ValueToValueMapTy VMap;
-    auto cloned_mod = CloneModule(M, VMap);
-
-    // metallib uses the function name as the source file name
-    cloned_mod->setSourceFileName(func->getName());
-
-    // update data layout
-    cloned_mod->setDataLayout(
-        "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-"
-        "f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:"
-        "128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:"
-        "1024-n8:16:32");
-
-    // remove all unused functions and global vars, since CloneModule only sets
-    // unused vars to external linkage and unused funcs are declarations only
-    // NOTE: this also removes entry points that are now unused (metadata is
-    // removed later)
-    llvm::legacy::PassManager mpm;
-
-    mpm.add(createInternalizePass([&func](const GlobalValue& GV) -> bool {
-        return GV.getName() == func->getName();
-    }));
-
-    mpm.add(createGlobalOptimizerPass());
-
-    mpm.run(*cloned_mod);
-
-    // * strip floor_* calling convention from all functions and their users (replace it with C CC)
-    for (auto func_iter = cloned_mod->begin(); func_iter != cloned_mod->end();) {
-      auto& func = *func_iter;
-
-      if (func.getCallingConv() != CallingConv::C) {
-        func.setCallingConv(CallingConv::C);
-        for (auto user : func.users()) {
-          if (auto CB = dyn_cast<CallBase>(user)) {
-            CB->setCallingConv(CallingConv::C);
-          }
-        }
-      }
-
-      ++func_iter;
-    }
-
-    // clean up metadata
-    // * metadata of all entry points that no longer exist
-    static constexpr const std::array<const char *, 3> entry_point_md_names{{
-        "air.kernel",
-        "air.vertex",
-        "air.fragment",
-    }};
-    for (const auto &entry_point_md_name : entry_point_md_names) {
-      if (auto func_entries =
-              cloned_mod->getNamedMetadata(entry_point_md_name)) {
-        vector<MDNode *> kept_nodes;
-        for (auto op_iter = func_entries->op_begin();
-             op_iter != func_entries->op_end(); ++op_iter) {
-          MDNode *node = *op_iter;
-          if (node->getNumOperands() < 3) {
-            continue;
-          }
-          if (node->getOperand(0).get() == nullptr) {
-            continue;
-          }
-          kept_nodes.emplace_back(node);
-        }
-
-        // need to drop all references to existing nodes, b/c we can't directly
-        // remove operands
-        func_entries->dropAllReferences();
-        if (kept_nodes.empty()) {
-          // remove air.sampler_states altogether
-          func_entries->eraseFromParent();
-        } else {
-          // now, only add ones we want to keep
-          for (auto node : kept_nodes) {
-            func_entries->addOperand(node);
-          }
-        }
-      }
-    }
-    // * sample states of entry points that no longer exist
-    if (auto sampler_states =
-            cloned_mod->getNamedMetadata("air.sampler_states")) {
-      vector<MDNode *> kept_nodes;
-      for (auto op_iter = sampler_states->op_begin();
-           op_iter != sampler_states->op_end(); ++op_iter) {
-        MDNode *node = *op_iter;
-        if (node->getNumOperands() != 2 ||
-            node->getOperand(1).get() == nullptr) {
-          continue;
-        }
-        kept_nodes.emplace_back(node);
-      }
-
-      // need to drop all references to existing nodes, b/c we can't directly
-      // remove operands
-      sampler_states->dropAllReferences();
-      if (kept_nodes.empty()) {
-        // remove air.sampler_states altogether
-        sampler_states->eraseFromParent();
-      } else {
-        // now, only add ones we want to keep
-        for (auto node : kept_nodes) {
-          sampler_states->addOperand(node);
-        }
-      }
-    }
-    // * set fake compiler ident
-    if (auto llvm_ident = cloned_mod->getNamedMetadata("llvm.ident")) {
-      if (MDNode *ident_op = llvm_ident->getOperand(0)) {
-        static const std::unordered_map<uint32_t, const char *> ident_versions{
-            {250, "Apple metal version 31001.638 (metalfe-31001.638.1)"},
-            {260, "Apple metal version 32023.155 (metalfe-32023.155)"},
-            {270, "Apple metal version 32023.620 (metalfe-32023.620)"},
-            {280, "Apple metal version 32023.821 (metalfe-32023.821)"},
-        };
-        ident_op->replaceOperandWith(
-            0, llvm::MDString::get(cloned_mod->getContext(),
-                                   ident_versions.at(target_air_version)));
-      }
-    }
-    // * kill other named metadata that is no longer needed
-    for (auto nmd_iter = cloned_mod->named_metadata_begin();
-         nmd_iter != cloned_mod->named_metadata_end();) {
-      if (nmd_iter->getName().startswith("floor.")) {
-        auto erase_nmd = &*nmd_iter++;
-        cloned_mod->eraseNamedMetadata(erase_nmd);
-      } else {
-        ++nmd_iter;
-      }
-    }
-
-    // modify local and constant memory GVs
-    const auto &DL = cloned_mod->getDataLayout();
-    for (auto I = cloned_mod->global_begin(), E = cloned_mod->global_end();
-         I != E;) {
-      GlobalVariable &GV = *I++;
-      if (GV.getAddressSpace() == 2 /* constant memory */ ||
-          GV.getAddressSpace() == 3 /* local memory */) {
-        auto value_type = GV.getValueType();
-        if (value_type && value_type->isSized() &&
-            DL.getTypeStoreSize(value_type) >= 16 && GV.getAlignment() < 16) {
-          // use at least 16-byte alignment
-          GV.setAlignment(MaybeAlign{16u});
-        }
-      }
-      if (GV.getAddressSpace() == 3 /* local memory */) {
-        // always use undef initializer (instead of zeroinitializer)
-        GV.setInitializer(UndefValue::get(GV.getValueType()));
-      }
-    }
+    // Clone only what `func` can reach: comdat groups pull as a unit, but
+    // metadata (e.g. the air.kernel/air.vertex/air.fragment lists themselves)
+    // must not root the walk, or every entry point would keep every other.
+    // static_init_roots is unioned in unconditionally -- see above.
+    auto reachable = reachableClosure(*func);
+    auto cloned_mod = buildEntryModule(
+        M, func,
+        [&reachable, &static_init_roots](const GlobalValue *gv) -> bool {
+          return reachable.count(gv) != 0 || static_init_roots.count(gv) != 0;
+        },
+        target_air_version);
 
     // extract tessellation info
     if (auto vertex_md = cloned_mod->getNamedMetadata("air.vertex");
