@@ -227,11 +227,12 @@ struct MetalMesh : public MeshShadingBasePass {
 					func_args = { mesh_arg, ConstantInt::get(builder->getInt32Ty(), idx), position_idx_arg, field };
 					break;
 			}
-			libfloor_utils::create_call(CB, *M, func_name, "", builder->getVoidTy(), func_arg_types, func_args, {
+			auto call = libfloor_utils::create_call(CB, *M, func_name, "", builder->getVoidTy(), func_arg_types, func_args, {
 				.is_argmem_only = true,
 				.is_nounwind = true,
 				.is_will_return = true,
 			});
+			call->setDebugLoc(CB.getDebugLoc());
 		});
 	}
 	
@@ -256,11 +257,12 @@ struct MetalMesh : public MeshShadingBasePass {
 					func_args = { mesh_arg, ConstantInt::get(builder->getInt32Ty(), idx), position_idx_arg, field };
 					break;
 			}
-			libfloor_utils::create_call(CB, *M, func_name, "", builder->getVoidTy(), func_arg_types, func_args, {
+			auto call = libfloor_utils::create_call(CB, *M, func_name, "", builder->getVoidTy(), func_arg_types, func_args, {
 				.is_argmem_only = true,
 				.is_nounwind = true,
 				.is_will_return = true,
 			});
+			call->setDebugLoc(CB.getDebugLoc());
 		});
 	}
 };
@@ -285,11 +287,12 @@ struct VulkanMesh : public MeshShadingBasePass {
 				ConstantInt::get(builder->getInt32Ty(), uint32_t(attr)), ConstantInt::get(builder->getInt32Ty(), idx),
 				position_idx_arg, field
 			};
-			libfloor_utils::create_call(CB, *M, func_name, "", builder->getVoidTy(), func_arg_types, func_args, {
+			auto call = libfloor_utils::create_call(CB, *M, func_name, "", builder->getVoidTy(), func_arg_types, func_args, {
 				.is_argmem_only = true,
 				.is_nounwind = true,
 				.is_will_return = true,
 			});
+			call->setDebugLoc(CB.getDebugLoc());
 		});
 	}
 	
@@ -306,11 +309,12 @@ struct VulkanMesh : public MeshShadingBasePass {
 				ConstantInt::get(builder->getInt32Ty(), uint32_t(attr)), ConstantInt::get(builder->getInt32Ty(), idx),
 				position_idx_arg, field
 			};
-			libfloor_utils::create_call(CB, *M, func_name, "", builder->getVoidTy(), func_arg_types, func_args, {
+			auto call = libfloor_utils::create_call(CB, *M, func_name, "", builder->getVoidTy(), func_arg_types, func_args, {
 				.is_argmem_only = true,
 				.is_nounwind = true,
 				.is_will_return = true,
 			});
+			call->setDebugLoc(CB.getDebugLoc());
 		});
 	}
 };

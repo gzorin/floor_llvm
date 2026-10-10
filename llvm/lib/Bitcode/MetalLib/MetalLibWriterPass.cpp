@@ -586,7 +586,8 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
 
   // if we're building with debug info, emit .metallib specific debug info
   const bool emit_debug_info =
-      (M.debug_compile_units_begin() != M.debug_compile_units_end());
+      (M.debug_compile_units_begin() != M.debug_compile_units_end() &&
+       function_count > 0);
 
   // handle source files / archive creation
   std::pair<std::unique_ptr<uint8_t[]>, uint32_t> source_archive_data{nullptr,
