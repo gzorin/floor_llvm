@@ -60,10 +60,13 @@ const CodeGenOptions &CodeGenTypes::getCodeGenOpts() const {
 
 void CodeGenTypes::addRecordTypeName(const RecordDecl *RD,
                                      llvm::StructType *Ty,
-                                     StringRef suffix) {
+                                     StringRef suffix, const bool is_io_type) {
   SmallString<256> TypeName;
   llvm::raw_svector_ostream OS(TypeName);
   OS << RD->getKindName() << '.';
+  if (is_io_type) {
+    OS << "floor.io.";
+  }
 
   // FIXME: We probably want to make more tweaks to the printing policy. For
   // example, we should probably enable PrintCanonicalTypes and
@@ -102,19 +105,31 @@ void CodeGenTypes::addRecordTypeName(const RecordDecl *RD,
 /// memory representation is usually i8 or i32, depending on the target.
 llvm::Type *CodeGenTypes::ConvertTypeForMem(QualType T, bool ForBitField,
                                             bool ForRecordField,
-                                            bool single_field_array_image_or_buffer_only) {
+                                            type_conversion_opts_t opts) {
+  const auto is_task_payload = T.getAddressSpace() == LangAS::task_payload;
+  opts.vector_compat_conversion |= is_task_payload; // always want this if task payload
+
   if (T->isConstantMatrixType()) {
     const Type *Ty = Context.getCanonicalType(T).getTypePtr();
     const ConstantMatrixType *MT = cast<ConstantMatrixType>(Ty);
     return llvm::ArrayType::get(ConvertType(MT->getElementType()),
                                 MT->getNumRows() * MT->getNumColumns());
-  } else if (T->isFloorArgBufferType()) {
+  } else if (T->isFloorArgBufferType() || is_task_payload) {
     if (auto io_type = convert_io_type_or_null(T, true); io_type) {
       return io_type;
     }
+  } else if (const auto cxx_rdecl = T->getAsCXXRecordDecl();
+             cxx_rdecl && opts.vector_compat_conversion && cxx_rdecl->hasAttr<VectorCompatAttr>()) {
+    return ConvertType(Context.get_compat_vector_type(cxx_rdecl));
   }
 
-  llvm::Type *R = ConvertType(T, !ForRecordField, single_field_array_image_or_buffer_only);
+  auto fwd_conv_opts = opts;
+  fwd_conv_opts.convert_array_image_or_buffer_type = !ForRecordField;
+  llvm::Type *R = ConvertType(T, fwd_conv_opts);
+  if (!R) {
+    assert(false && "type conversion failed");
+    return nullptr;
+  }
 
   // If this is a bool type, or a bit-precise integer type in a bitfield
   // representation, map this integer to the target-specified size.
@@ -146,9 +161,10 @@ llvm::Type* CodeGenTypes::convert_io_type_or_null(QualType Ty, bool indirect_io_
 /// isRecordLayoutComplete - Return true if the specified type is already
 /// completely laid out.
 bool CodeGenTypes::isRecordLayoutComplete(const Type *Ty) const {
-  llvm::DenseMap<const Type*, llvm::StructType *>::const_iterator I =
-  RecordDeclTypes.find(Ty);
-  return I != RecordDeclTypes.end() && !I->second->isOpaque();
+  const auto I = RecordDeclTypes.find(Ty);
+  const auto IOI = GraphicsIORecordDeclTypes.find(Ty);
+  return (I != RecordDeclTypes.end() && !I->second->isOpaque()) ||
+         (IOI != GraphicsIORecordDeclTypes.end() && !IOI->second->isOpaque());
 }
 
 static bool
@@ -313,7 +329,8 @@ void CodeGenTypes::UpdateCompletedType(const TagDecl *TD) {
 
   // Only complete it if we converted it already.  If we haven't converted it
   // yet, we'll just do it lazily.
-  if (RecordDeclTypes.count(Context.getTagDeclType(RD).getTypePtr()))
+  if (RecordDeclTypes.count(Context.getTagDeclType(RD).getTypePtr()) ||
+      GraphicsIORecordDeclTypes.count(Context.getTagDeclType(RD).getTypePtr()))
     ConvertRecordDeclType(RD);
 
   // If necessary, provide the full definition of a type only used with a
@@ -424,20 +441,37 @@ llvm::Type *CodeGenTypes::ConvertFunctionTypeInternal(QualType QFT) {
 }
 
 /// ConvertType - Convert the specified type to its LLVM form.
-llvm::Type *CodeGenTypes::ConvertType(QualType T, bool convert_array_image_or_buffer_type,
-                                      bool single_field_array_image_or_buffer_only) {
+llvm::Type *CodeGenTypes::ConvertType(QualType T, type_conversion_opts_t opts) {
   T = Context.getCanonicalType(T);
 
   const Type *Ty = T.getTypePtr();
 
+  // NOTE: any custom handling must be done *prior* to any cached type handling
+  //       also: don't cache anything if this is an I/O or vector compat conversion
+  const auto skip_cache = (opts.io_type_conversion || opts.vector_compat_conversion);
+
   // intercept image arrays before RT conversion
   // NOTE: we do not want this when this is part of a record/struct (default single_field_array_image_or_buffer_only == true)
-  if (convert_array_image_or_buffer_type && Ty->isArrayImageType(single_field_array_image_or_buffer_only))
+  if (opts.convert_array_image_or_buffer_type && Ty->isArrayImageType(opts.single_field_array_image_or_buffer_only)) {
     return ConvertArrayImageType(Ty);
+  }
 
   // same thing for buffer arrays (Vulkan only)
-  if (Context.getLangOpts().Vulkan && convert_array_image_or_buffer_type && Ty->isArrayBufferType())
+  if (Context.getLangOpts().Vulkan && opts.convert_array_image_or_buffer_type && Ty->isArrayBufferType()) {
     return ConvertArrayBufferType(Ty);
+  }
+
+  // and for arrays if specified
+  if (opts.convert_array_type && Ty->isAggregateArrayType()) {
+    return ConvertArrayType(Ty);
+  }
+
+  // handle vector compat conversions
+  if (opts.vector_compat_conversion) {
+    if (const auto cxx_rdecl = T->getAsCXXRecordDecl(); cxx_rdecl && cxx_rdecl->hasAttr<VectorCompatAttr>()) {
+      return ConvertType(Context.get_compat_vector_type(cxx_rdecl));
+    }
+  }
 
   // For the device-side compilation, CUDA device builtin surface/texture types
   // may be represented in different types.
@@ -455,7 +489,7 @@ llvm::Type *CodeGenTypes::ConvertType(QualType T, bool convert_array_image_or_bu
 
   // RecordTypes are cached and processed specially.
   if (const RecordType *RT = dyn_cast<RecordType>(Ty))
-    return ConvertRecordDeclType(RT->getDecl());
+    return ConvertRecordDeclType(RT->getDecl(), opts);
 
   // The LLVM type we return for a given Clang type may not always be the same,
   // most notably when dealing with recursive structs. We mark these potential
@@ -464,8 +498,9 @@ llvm::Type *CodeGenTypes::ConvertType(QualType T, bool convert_array_image_or_bu
   // recursive types with LLVM types, making this logic much simpler.
   llvm::Type *CachedType = nullptr;
   bool ShouldUseCache =
-      Ty->isBuiltinType() ||
-      (noRecordsBeingLaidOut() && FunctionsBeingProcessed.empty());
+      !skip_cache &&
+      (Ty->isBuiltinType() ||
+       (noRecordsBeingLaidOut() && FunctionsBeingProcessed.empty()));
   if (ShouldUseCache) {
     llvm::DenseMap<const Type *, llvm::Type *>::iterator TCI =
         TypeCache.find(Ty);
@@ -600,6 +635,8 @@ llvm::Type *CodeGenTypes::ConvertType(QualType T, bool convert_array_image_or_bu
     case BuiltinType::OCLQueue:
     case BuiltinType::OCLReserveID:
     case BuiltinType::OCLPatchControlPoint:
+    case BuiltinType::OCLMesh:
+    case BuiltinType::OCLMeshGridProperties:
       ResultType = CGM.getOpenCLRuntime().convertOpenCLSpecificType(Ty);
       break;
     case BuiltinType::SveInt8:
@@ -734,7 +771,7 @@ llvm::Type *CodeGenTypes::ConvertType(QualType T, bool convert_array_image_or_bu
   }
   case Type::ConstantArray: {
     const ConstantArrayType *A = cast<ConstantArrayType>(Ty);
-    llvm::Type *EltTy = ConvertTypeForMem(A->getElementType());
+    llvm::Type *EltTy = ConvertTypeForMem(A->getElementType(), false, false, opts);
 
     // Lower arrays of undefined struct type to arrays of i8 just to have a
     // concrete type.
@@ -960,12 +997,12 @@ handle_image_rdecl(ASTContext& Context, const RecordDecl *RD, llvm::StructType *
 }
 
 /// ConvertRecordDeclType - Lay out a tagged decl type like struct or union.
-llvm::StructType *CodeGenTypes::ConvertRecordDeclType(const RecordDecl *RD) {
+llvm::StructType *CodeGenTypes::ConvertRecordDeclType(const RecordDecl *RD, type_conversion_opts_t opts) {
   // TagDecl's are not necessarily unique, instead use the (clang)
   // type connected to the decl.
   const Type *Key = Context.getTagDeclType(RD).getTypePtr();
 
-  llvm::StructType *&Entry = RecordDeclTypes[Key];
+  llvm::StructType *&Entry = (!opts.io_type_conversion ? RecordDeclTypes[Key] : GraphicsIORecordDeclTypes[Key]);
 
   // we need to ensure that image-based types are always unique (for Metal)
   auto [is_new_image_rdecl, cache_func] = handle_image_rdecl(Context, RD, Entry);
@@ -973,7 +1010,10 @@ llvm::StructType *CodeGenTypes::ConvertRecordDeclType(const RecordDecl *RD) {
   // If we don't have a StructType at all yet, create the forward declaration.
   if (!Entry) {
     Entry = llvm::StructType::create(getLLVMContext());
-    addRecordTypeName(RD, Entry, "");
+    addRecordTypeName(RD, Entry, "", opts.io_type_conversion);
+    if (opts.io_type_conversion) {
+      Entry->setGraphicsIOType();
+    }
   }
   llvm::StructType *Ty = Entry;
 
@@ -998,12 +1038,12 @@ llvm::StructType *CodeGenTypes::ConvertRecordDeclType(const RecordDecl *RD) {
   if (const CXXRecordDecl *CRD = dyn_cast<CXXRecordDecl>(RD)) {
     for (const auto &I : CRD->bases()) {
       if (I.isVirtual()) continue;
-      ConvertRecordDeclType(I.getType()->castAs<RecordType>()->getDecl());
+      ConvertRecordDeclType(I.getType()->castAs<RecordType>()->getDecl(), opts);
     }
   }
 
   // Layout fields.
-  std::unique_ptr<CGRecordLayout> Layout = ComputeRecordLayout(RD, Ty);
+  std::unique_ptr<CGRecordLayout> Layout = ComputeRecordLayout(RD, Ty, opts);
   CGRecordLayouts[Key] = std::move(Layout);
 
   // We're done laying out this struct.
@@ -1020,7 +1060,7 @@ llvm::StructType *CodeGenTypes::ConvertRecordDeclType(const RecordDecl *RD) {
   // structs as well.
   if (RecordsBeingLaidOut.empty())
     while (!DeferredRecords.empty())
-      ConvertRecordDeclType(DeferredRecords.pop_back_val());
+      ConvertRecordDeclType(DeferredRecords.pop_back_val(), opts);
 
   // cache the image type
   if (is_new_image_rdecl && cache_func) {
@@ -1088,27 +1128,39 @@ llvm::Type *CodeGenTypes::ConvertArrayImageType(const Type* Ty) {
   return llvm::ArrayType::get(ConvertType(agg_img_fields[0].type), CAT->getSize().getZExtValue());
 }
 
-llvm::Type *CodeGenTypes::ConvertArrayBufferType(const Type* Ty) {
+template <bool is_array_of_buffers>
+static llvm::Type* ConvertArrayType(const Type* Ty, CodeGenTypes& CGT, ASTContext& Context) {
   // ptr to array of buffer
-  if (Ty->isPointerType() &&
-      Ty->getPointeeType()->isArrayType() &&
-      Ty->getPointeeType()->getAsArrayTypeUnsafe()->getElementType()->isPointerType() &&
-      Ty->getPointeeType()->getAsArrayTypeUnsafe()->getElementType()->getPointeeType().getAddressSpace() != LangAS::Default) {
-    auto converted_type = ConvertArrayBufferType(Ty->getPointeeType().getTypePtr());
-    if (!converted_type) {
-      return nullptr;
+  if constexpr (is_array_of_buffers) {
+    if (Ty->isPointerType() &&
+        Ty->getPointeeType()->isArrayType() &&
+        Ty->getPointeeType()->getAsArrayTypeUnsafe()->getElementType()->isPointerType() &&
+        Ty->getPointeeType()->getAsArrayTypeUnsafe()->getElementType()->getPointeeType().getAddressSpace() != LangAS::Default) {
+      auto converted_type = CGT.ConvertArrayBufferType(Ty->getPointeeType().getTypePtr());
+      if (!converted_type) {
+        return nullptr;
+      }
+      return llvm::PointerType::get(converted_type, 0);
     }
-    return llvm::PointerType::get(converted_type, 0);
   }
 
   // simple C-style array that contains a buffer
   if (Ty->isArrayType()) {
     const auto array_elem_type = Ty->getAsArrayTypeUnsafe()->getElementType();
-    if (array_elem_type->isPointerType() && array_elem_type->getPointeeType().getAddressSpace() != LangAS::Default) {
-      const ConstantArrayType *CAT = Context.getAsConstantArrayType(QualType(Ty, 0));
-      return llvm::ArrayType::get(ConvertType(array_elem_type, false, false) /* do not recursively convert this */, CAT->getSize().getZExtValue());
+    if constexpr (is_array_of_buffers) {
+      if (!array_elem_type->isPointerType() || array_elem_type->getPointeeType().getAddressSpace() == LangAS::Default) {
+        assert(false && "invalid array of buffers type");
+        return nullptr;
+      }
     }
-    assert(false && "invalid array of buffers type");
+
+    const ConstantArrayType *CAT = Context.getAsConstantArrayType(QualType(Ty, 0));
+    const type_conversion_opts_t conv_opts {
+      // do not recursively convert this
+      .convert_array_image_or_buffer_type = false,
+      .single_field_array_image_or_buffer_only = false,
+    };
+    return llvm::ArrayType::get(CGT.ConvertType(array_elem_type, conv_opts), CAT->getSize().getZExtValue());
   }
 
   // must be struct or class, union is not allowed
@@ -1126,33 +1178,108 @@ llvm::Type *CodeGenTypes::ConvertArrayBufferType(const Type* Ty) {
   // NOTE: contrary to images and aggregate images, we always want this to be a single field
   if (field_count != 1) return nullptr;
 
-  // field must be an array
+  // field must be an array (array of buffers / normal array) or nested type (normal array only)
   const QualType arr_field_type = decl->field_begin()->getType();
   const ConstantArrayType *CAT = Context.getAsConstantArrayType(arr_field_type);
-  if (!CAT) return nullptr;
+  if (!CAT) {
+    if constexpr (!is_array_of_buffers) { // nested
+      return ConvertArrayType<false>(arr_field_type.getTypePtr(), CGT, Context);
+    }
+    return nullptr;
+  }
 
   // element type must be a buffer
   const auto elem_type = arr_field_type->getAsArrayTypeUnsafe()->getElementType();
-  if (!elem_type->isPointerType()) {
-    return nullptr;
-  }
-  if (elem_type->getPointeeType().getAddressSpace() == LangAS::Default) {
-    return nullptr;
+  if constexpr (is_array_of_buffers) {
+    if (!elem_type->isPointerType()) {
+      return nullptr;
+    }
+    if (elem_type->getPointeeType().getAddressSpace() == LangAS::Default) {
+      return nullptr;
+    }
   }
 
   // got everything we need
-  return llvm::ArrayType::get(ConvertType(elem_type, false, false) /* do not recursively convert this */, CAT->getSize().getZExtValue());
+  const type_conversion_opts_t conv_opts {
+    // do not recursively convert this
+    .convert_array_image_or_buffer_type = false,
+    .single_field_array_image_or_buffer_only = false,
+  };
+  return llvm::ArrayType::get(CGT.ConvertType(elem_type, conv_opts), CAT->getSize().getZExtValue());
 }
 
+llvm::Type *CodeGenTypes::ConvertArrayBufferType(const Type* Ty) {
+  return ::ConvertArrayType<true>(Ty, *this, Context);
+}
+
+llvm::Type *CodeGenTypes::ConvertArrayType(const Type* Ty) {
+  return ::ConvertArrayType<false>(Ty, *this, Context);
+}
+
+const CodeGenTypes::flattened_entry_t* CodeGenTypes::find_flattened_entry(const RecordDecl* decl,
+																		  const llvm::Type* type,
+																		  const bool is_arg_buffer) const {
+	if (!type) {
+		return nullptr;
+	}
+	
+	const auto is_unnamed = (!isa<llvm::StructType>(type) ? false : !cast<llvm::StructType>(type)->hasName());
+	
+	const auto flat_rec_iter = flattened_records.find(decl);
+	if (flat_rec_iter == flattened_records.end()) {
+		return nullptr;
+	}
+	const auto& flat_rec = flat_rec_iter->second;
+	
+	// check direct match
+	if (is_arg_buffer) {
+		// can never be unnamed
+		if (!is_unnamed && flat_rec.arg_buffer.type == type) {
+			return &flat_rec.arg_buffer;
+		}
+	} else if (is_unnamed && flat_rec.unnamed.type == type) {
+		return &flat_rec.unnamed;
+	} else if (!is_unnamed && flat_rec.named.type == type) {
+		return &flat_rec.named;
+	}
+	
+	// check aliases
+	for (const auto& alias_decl : flat_rec.aliases) {
+		if (auto entry = find_flattened_entry(alias_decl, type, is_arg_buffer); entry) {
+			return entry;
+		}
+	}
+	
+	// check children (recursively)
+	for (const auto& child_decl : flat_rec.children) {
+		if (auto child_entry = find_flattened_entry(child_decl, type, is_arg_buffer); child_entry) {
+			return child_entry;
+		}
+	}
+	
+	return nullptr;
+}
 
 /// getCGRecordLayout - Return record layout info for the given record decl.
 const CGRecordLayout &
-CodeGenTypes::getCGRecordLayout(const RecordDecl *RD, llvm::Type* struct_type) {
-  // check if there is a flattened layout for this llvm struct type,
+CodeGenTypes::getCGRecordLayout(const RecordDecl *RD, llvm::Type* struct_type, const bool is_arg_buffer) {
+  // check if there is a flattened layout for this llvm (struct) type,
   // return it if so, otherwise continue as usual
-  if (struct_type != nullptr) {
-    const auto flat_layout = FlattenedCGRecordLayouts.lookup(struct_type);
-    if(flat_layout) return *flat_layout;
+  if (struct_type) {
+    if (const auto flat_entry = find_flattened_entry(RD, struct_type, is_arg_buffer); flat_entry) {
+      assert(flat_entry->record_layout);
+      return *flat_entry->record_layout;
+    }
+
+#ifndef NDEBUG
+    if (auto st_type = dyn_cast_or_null<llvm::StructType>(struct_type); st_type && st_type->hasName()) {
+      if (is_arg_buffer) {
+        assert(should_have_flattened_layout_arg_buf.count(st_type) == 0);
+      } else {
+        assert(should_have_flattened_layout.count(st_type) == 0);
+      }
+    }
+#endif
   }
 
   const Type *Key = Context.getTagDeclType(RD).getTypePtr();
@@ -1171,31 +1298,56 @@ CodeGenTypes::getCGRecordLayout(const RecordDecl *RD, llvm::Type* struct_type) {
   return *I->second;
 }
 
-llvm::Type* CodeGenTypes::getAnyFlattenedType(const CXXRecordDecl* D, const bool prefer_arg_buffer_type) const {
-  if (!prefer_arg_buffer_type) {
-    if (auto RT = getFlattenedRecordType(D); RT) {
-      return RT;
-    } else if (auto ABT = getFlattenedFloorArgBufferType(D); ABT) {
-      return ABT;
-    }
-  } else {
-    if (auto ABT = getFlattenedFloorArgBufferType(D); ABT) {
-      return ABT;
-    } else if (auto RT = getFlattenedRecordType(D); RT) {
-      return RT;
-    }
-  }
-  return nullptr;
+bool CodeGenTypes::is_flattened_struct_type(const RecordDecl* decl, const llvm::Type* Ty, const bool is_arg_buffer) const {
+	const auto entry = find_flattened_entry(decl, Ty, is_arg_buffer);
+#ifndef NDEBUG
+	if (!entry) {
+		if (auto st_type = dyn_cast_or_null<llvm::StructType>(Ty); st_type && st_type->hasName()) {
+			if (is_arg_buffer) {
+				assert(should_have_flattened_layout_arg_buf.count(st_type) == 0);
+			} else {
+				assert(should_have_flattened_layout.count(st_type) == 0);
+			}
+		}
+	}
+#endif
+	return (entry != nullptr);
 }
 
-llvm::Type* CodeGenTypes::getFlattenedRecordType(const CXXRecordDecl* D) const {
-  const auto iter = FlattenedRecords.find_as(D);
-  return (iter != FlattenedRecords.end() ? iter->second : nullptr);
+llvm::Type* CodeGenTypes::getAnyFlattenedType(const CXXRecordDecl* D, const bool prefer_arg_buffer_type) const {
+	const auto flat_rec_iter = flattened_records.find(D);
+	if (flat_rec_iter == flattened_records.end()) {
+		return nullptr;
+	}
+	const auto& flat_rec = flat_rec_iter->second;
+	
+	if (prefer_arg_buffer_type) {
+		if (flat_rec.arg_buffer.type) {
+			return flat_rec.arg_buffer.type;
+		}
+		return flat_rec.named.type;
+	} else {
+		if (flat_rec.named.type) {
+			return flat_rec.named.type;
+		}
+		return flat_rec.arg_buffer.type;
+	}
+}
+
+llvm::Type* CodeGenTypes::getFlattenedRecordType(const CXXRecordDecl* D, const bool is_unnamed) const {
+	const auto flat_rec_iter = flattened_records.find(D);
+	if (flat_rec_iter == flattened_records.end()) {
+		return nullptr;
+	}
+	return (is_unnamed ? flat_rec_iter->second.unnamed.type : flat_rec_iter->second.named.type);
 }
 
 llvm::Type* CodeGenTypes::getFlattenedFloorArgBufferType(const CXXRecordDecl* D) const {
-  const auto iter = FlattenedFloorArgBufferRecords.find_as(D);
-  return (iter != FlattenedFloorArgBufferRecords.end() ? iter->second : nullptr);
+	const auto flat_rec_iter = flattened_records.find(D);
+	if (flat_rec_iter == flattened_records.end()) {
+		return nullptr;
+	}
+	return flat_rec_iter->second.arg_buffer.type;
 }
 
 bool CodeGenTypes::isPointerZeroInitializable(QualType T) {

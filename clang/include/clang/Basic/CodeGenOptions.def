@@ -88,15 +88,24 @@ CODEGENOPT(EmitVersionIdentMetadata , 1, 1) ///< Emit compiler version metadata.
 CODEGENOPT(EmitGcovArcs      , 1, 0) ///< Emit coverage data files, aka. GCDA.
 CODEGENOPT(EmitGcovNotes     , 1, 0) ///< Emit coverage "notes" files, aka GCNO.
 CODEGENOPT(EmitOpenCLArgMetadata , 1, 0) ///< Emit OpenCL kernel arg metadata.
-CODEGENOPT(MetalIntelWorkarounds , 1, 0) ///< Enable Intel GPU specific fixes and workarounds.
 CODEGENOPT(MetalSoftPrintf , 1, 0) ///< Enables support of software printf emulation.
+CODEGENOPT(MetalRestrictedVectorization , 1, 0) ///< Enable restrictive scalar->vector transformations
 CODEGENOPT(SPIRIntelWorkarounds , 1, 0) ///< Enable Intel SPIR specific fixes and workarounds.
 VALUE_CODEGENOPT(VulkanIUBSize, 32, 256) ///< max supported size of Vulkan inline uniform blocks
 VALUE_CODEGENOPT(VulkanIUBCount, 32, 4) ///< max supported count of Vulkan inline uniform blocks
 CODEGENOPT(VulkanLLVMPreStructurizationPass , 1, 0) ///< Enable LLVM CFG structurization pass prior to actual structurization.
 CODEGENOPT(VulkanSoftPrintf , 1, 0) ///< Enables support of software printf emulation.
+CODEGENOPT(VulkanSubgroupUniformCF , 1, 0) ///< Enables support for SPV_KHR_subgroup_uniform_control_flow.
+CODEGENOPT(VulkanLowDescriptorSetCount , 1, 0) ///< Enables low descriptor set count handling.
+CODEGENOPT(VulkanPtrWorkarounds , 1, 0) ///< Enables Vulkan specific pointer workarounds.
+CODEGENOPT(VulkanUntypedPointers , 1, 0) ///< Enables support for SPV_KHR_untyped_pointers.
+CODEGENOPT(VulkanMeshShading , 1, 0) ///< Enables support for SPV_EXT_mesh_shader.
+CODEGENOPT(SPIRVVersion , 32, 0x10000) ///< SPIR-V target version (not used in containers)
 CODEGENOPT(GraphicsPrimitiveID , 1, 0) ///< Enables support for builtin primitive id.
 CODEGENOPT(GraphicsBarycentricCoord , 1, 0) ///< Enables support for builtin primitive id.
+CODEGENOPT(LibFloorErrorOnAlloca , 1, 0)
+CODEGENOPT(LibFloorErrorOnPtrTypeAlloca , 1, 0)
+CODEGENOPT(LibFloorErrorOnPtrIntCasts , 1, 0)
 CODEGENOPT(EmulatedTLS       , 1, 0) ///< Set by default or -f[no-]emulated-tls.
 CODEGENOPT(ExplicitEmulatedTLS , 1, 0) ///< Set if -f[no-]emulated-tls is used.
 /// Embed Bitcode mode (off/all/bitcode/marker).

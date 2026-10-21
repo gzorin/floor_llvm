@@ -1225,6 +1225,24 @@ def GraphicsTessellationEvaluationShader : DeclOrTypeAttr {
   let SimpleHandler = 1;
 }
 
+def GraphicsTaskShader : DeclOrTypeAttr {
+  let Spellings = [GNU<"task_shader">, CXX11<"","task_shader", 200809>];
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+
+def GraphicsMeshShader : DeclOrTypeAttr {
+  let Spellings = [GNU<"mesh_shader">, CXX11<"","mesh_shader", 200809>];
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+
+def FloorIOFunction : DeclOrTypeAttr {
+  let Spellings = [GNU<"floor_io_function">, CXX11<"","floor_io_function", 200809>];
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+
 // compute kernel dimensionality (1, 2 or 3)
 def ComputeKernelDim : DeclOrTypeAttr {
   let Spellings = [GNU<"kernel_dim">, CXX11<"","kernel_dim", 200809>];
@@ -1276,6 +1294,23 @@ def ComputeKernelSIMDWidth : DeclOrTypeAttr {
   }
   void setWidth(unsigned int simd_width_) {
     simd_width = simd_width_;
+  }
+  }];
+  let Subjects = SubjectList<[Function], ErrorDiag>;
+  let Documentation = [Undocumented];
+}
+
+def MeshMaxWorkGroups : DeclOrTypeAttr {
+  let Spellings = [GNU<"mesh_max_work_groups">, CXX11<"","mesh_max_work_groups", 200809>];
+  let Args = [ExprArgument<"Count">];
+  let TemplateDependent = 1;
+  let AdditionalMembers = [{
+  unsigned int max_work_groups { 0 };
+  auto getMaxWorkGroups() const {
+    return max_work_groups;
+  }
+  void setMaxWorkGroups(unsigned int max_work_groups_) {
+    max_work_groups = max_work_groups_;
   }
   }];
   let Subjects = SubjectList<[Function], ErrorDiag>;
@@ -1336,6 +1371,16 @@ def GenericAddressSpace : TypeAttr {
   let Documentation = [OpenCLAddressSpaceGenericDocs];
 }
 
+def MeshAddressSpace : TypeAttr {
+  let Spellings = [GNU<"mesh_as">, CXX11<"","mesh_as", 200809>];
+  let Documentation = [Undocumented];
+}
+
+def TaskPayloadAddressSpace : TypeAttr {
+  let Spellings = [GNU<"task_payload_as">, CXX11<"","task_payload_as", 200809>];
+  let Documentation = [Undocumented];
+}
+
 // CUDA address space attrs are not type attrs, so they need to be handled specially
 def CUDAShared : InheritableAttr {
   let Spellings = [GNU<"local_cuda">, CXX11<"","local_cuda", 200809>];
@@ -1346,6 +1391,11 @@ def CUDAShared : InheritableAttr {
 
 def FloorArgBuffer : DeclOrTypeAttr {
   let Spellings = [GNU<"floor_arg_buffer">, CXX11<"","floor_arg_buffer", 200809>];
+  let Documentation = [Undocumented];
+}
+
+def FloorCoherent : DeclOrTypeAttr {
+  let Spellings = [GNU<"floor_coherent">, CXX11<"","floor_coherent", 200809>];
   let Documentation = [Undocumented];
 }
 
@@ -1438,6 +1488,26 @@ def GraphicsVertexPosition : InheritableAttr {
 // vertex/point output size (used in vertex output structs)
 def GraphicsPointSize : InheritableAttr {
   let Spellings = [GNU<"point_size">, CXX11<"","point_size", 200809>];
+  let Documentation = [Undocumented];
+}
+
+// explicit vertex -> fragment flat interpolation
+def GraphicsInterpolateFlat : InheritableAttr {
+  let Spellings = [GNU<"flat">, CXX11<"","flat", 200809>];
+  let Documentation = [Undocumented];
+}
+
+// mesh shading is-primitive-culled flag
+def GraphicsPrimitiveCulled : InheritableAttr {
+  let Spellings = [GNU<"culled">, CXX11<"","culled", 200809>];
+  let Documentation = [Undocumented];
+}
+
+// mesh shading per-primitive interpolation flag (only required in Vulkan)
+def GraphicsPerPrimitive : InheritableAttr {
+  let Spellings = [GNU<"per_primitive">, CXX11<"","per_primitive", 200809>];
+  // specified on parent/containing struct member/field -> will propagate to all child fields
+  let Subjects = SubjectList<[Field]>;
   let Documentation = [Undocumented];
 }
 

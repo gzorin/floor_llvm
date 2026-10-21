@@ -5,10 +5,14 @@ add_llvm_component_library(LLVMLibFloor
   CUDAFinal.cpp
   CUDAImage.cpp
   FMACombiner.cpp
+  FloorModuleCleanup.cpp
   FloorImage.cpp
   LibFloor.cpp
+  MeshShading.cpp
   MetalFinal.cpp
   MetalImage.cpp
+  PointerBCFixup.cpp
+  PropagateCoherency.cpp
   PropagateRangeInfo.cpp
   SPIRFinal.cpp
   SPIRImage.cpp

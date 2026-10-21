@@ -1260,6 +1260,10 @@ static bool TryToShrinkGlobalToBoolean(GlobalVariable *GV, Constant *OtherVal) {
 
 static bool deleteIfDead(
     GlobalValue &GV, SmallPtrSetImpl<const Comdat *> &NotDiscardableComdats) {
+  if (GV.isRequired()) {
+    return false;
+  }
+
   GV.removeDeadConstantUsers();
 
   if (!GV.isDiscardableIfUnused() && !GV.isDeclaration())
@@ -1676,6 +1680,11 @@ static void RemoveAttribute(Function *F, Attribute::AttrKind A) {
 /// GHC, or anyregcc.
 static bool hasChangeableCC(Function *F) {
   CallingConv::ID CC = F->getCallingConv();
+
+  // always keep floor entry point and I/O function calling conventions
+  if (CallingConv::isFloorEntryPointOrIO(CC)) {
+    return false;
+  }
 
   // FIXME: Is it worth transforming x86_stdcallcc and x86_fastcallcc?
   if (CC != CallingConv::C && CC != CallingConv::X86_ThisCall)

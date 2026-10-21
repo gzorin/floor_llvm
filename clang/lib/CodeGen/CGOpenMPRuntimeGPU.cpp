@@ -3893,6 +3893,10 @@ void CGOpenMPRuntimeGPU::processRequiresDirective(
       case CudaArch::SM_101a:
       case CudaArch::SM_103:
       case CudaArch::SM_103a:
+      case CudaArch::SM_107:
+      case CudaArch::SM_107a:
+      case CudaArch::SM_110:
+      case CudaArch::SM_110a:
       case CudaArch::SM_120:
       case CudaArch::SM_120a:
       case CudaArch::SM_121:

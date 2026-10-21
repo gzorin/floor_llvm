@@ -464,7 +464,6 @@ void initializeWasmEHPreparePass(PassRegistry&);
 void initializeWholeProgramDevirtPass(PassRegistry&);
 void initializeWinEHPreparePass(PassRegistry&);
 void initializeWriteBitcodePassPass(PassRegistry&);
-void initializeWriteBitcodePass50Pass(PassRegistry&);
 void initializeWriteBitcodePass140Pass(PassRegistry&);
 void initializeWriteThinLTOBitcodePass(PassRegistry&);
 void initializeWriteThinLTOBitcode140Pass(PassRegistry&);
@@ -475,23 +474,27 @@ void initializeAddressSpaceFixPass(PassRegistry&);
 void initializeEverythingInlinerPass(PassRegistry&);
 void initializeCUDAImagePass(PassRegistry&);
 void initializeCUDAFinalPass(PassRegistry&);
-void initializeMetalFirstPass(PassRegistry&);
 void initializeMetalFinalPass(PassRegistry&);
 void initializeMetalFinalModuleCleanupPass(PassRegistry&);
+void initializeMetalMemopLoweringPass(PassRegistry&);
 void initializeMetalImagePass(PassRegistry&);
+void initializeMetalMeshPass(PassRegistry&);
 void initializeSPIRFinalPass(PassRegistry&);
 void initializeSPIRFinalModulePass(PassRegistry&);
 void initializeSPIRImagePass(PassRegistry&);
 void initializeCFGStructurizationPass(PassRegistry&);
 void initializeVulkanEarlyArgBufferFunctionClonePass(PassRegistry&);
 void initializeVulkanImagePass(PassRegistry&);
+void initializeVulkanMeshPass(PassRegistry&);
 void initializeVulkanFinalPass(PassRegistry&);
 void initializeVulkanBuiltinParamHandlingPass(PassRegistry&);
 void initializeVulkanPreFinalPass(PassRegistry&);
-void initializeVulkanPreFinalPointerBCFixupPass(PassRegistry&);
 void initializeVulkanFinalModuleCleanupPass(PassRegistry&);
+void initializePointerBCFixupPass(PassRegistry&);
+void initializePropagateCoherencyPass(PassRegistry&);
 void initializePropagateRangeInfoPass(PassRegistry&);
 void initializeFMACombinerPass(PassRegistry&);
+void initializeFloorModuleCleanupPass(PassRegistry&);
 
 } // end namespace llvm
 

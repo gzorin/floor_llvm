@@ -33,6 +33,9 @@ static const unsigned NVPTXAddrSpaceMap[] = {
     1, // opencl_global_device
     1, // opencl_global_host
     0, // vulkan_input
+    0, // vulkan_output
+    0, // metal_mesh
+    0, // task_payload
     1, // cuda_device
     4, // cuda_constant
     3, // cuda_shared
@@ -169,8 +172,11 @@ public:
 
   CallingConvCheckResult checkCallingConvention(CallingConv CC) const override {
     if (CC == CC_FloorFunction ||
+        CC == CC_FloorIOFunction ||
         CC == CC_FloorVertex ||
         CC == CC_FloorFragment ||
+        CC == CC_FloorTask ||
+        CC == CC_FloorMesh ||
         CC == CC_FloorKernel) {
         return CCCR_OK;
     }

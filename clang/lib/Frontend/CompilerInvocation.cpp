@@ -1837,8 +1837,8 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
   Opts.EmitOpenCLArgMetadata = (Args.hasArg(OPT_cl_kernel_arg_info) ||
                                 Args.hasArg(OPT_emit_spirv) ||
                                 Args.hasArg(OPT_emit_spirv_container));
-  Opts.MetalIntelWorkarounds = Args.hasArg(OPT_metal_intel_workarounds);
   Opts.MetalSoftPrintf = Args.hasArg(OPT_metal_soft_printf);
+  Opts.MetalRestrictedVectorization = Args.hasArg(OPT_metal_restrictive_vectorization);
   Opts.SPIRIntelWorkarounds = Args.hasArg(OPT_cl_spir_intel_workarounds);
   Opts.VulkanIUBSize = uint32_t(std::min(uint64_t(~0u),
       getLastArgUInt64Value(Args, OPT_vulkan_iub_size_EQ, 256)));
@@ -1846,11 +1846,20 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
       getLastArgUInt64Value(Args, OPT_vulkan_iub_count_EQ, 4)));
   Opts.VulkanLLVMPreStructurizationPass = Args.hasArg(OPT_vulkan_llvm_pre_structurization_pass);
   Opts.VulkanSoftPrintf = Args.hasArg(OPT_vulkan_soft_printf);
+  Opts.VulkanSubgroupUniformCF = Args.hasArg(OPT_vulkan_subgroup_uniform_cf);
+  Opts.VulkanLowDescriptorSetCount = Args.hasArg(OPT_vulkan_low_descriptor_set_count);
+  Opts.VulkanPtrWorkarounds = Args.hasArg(OPT_vulkan_ptr_workarounds);
+  Opts.VulkanUntypedPointers = Args.hasArg(OPT_vulkan_untyped_pointers);
+  Opts.VulkanMeshShading = Args.hasArg(OPT_vulkan_mesh_shading);
+  Opts.SPIRVVersion = getLastArgUInt64Value(Args, OPT_spirv_version_EQ, 0x10000u);
   Opts.SPIRCompileOptions = Args.getLastArgValue(OPT_cl_spir_compile_options).trim("\t\n\v\f\r\" ");
   Opts.GraphicsPrimitiveID = Args.hasArg(OPT_graphics_primitive_id);
   Opts.GraphicsBarycentricCoord = Args.hasArg(OPT_graphics_barycentric_coord);
   Opts.floor_generating_spirv = (Args.hasArg(OPT_emit_spirv) ||
                                  Args.hasArg(OPT_emit_spirv_container));
+  Opts.LibFloorErrorOnAlloca = Args.hasArg(OPT_floor_error_on_alloca);
+  Opts.LibFloorErrorOnPtrTypeAlloca = Args.hasArg(OPT_floor_error_on_ptr_type_alloca);
+  Opts.LibFloorErrorOnPtrIntCasts = Args.hasArg(OPT_floor_error_on_ptr_int_casts);
 
   if (Args.getLastArg(OPT_femulated_tls) ||
       Args.getLastArg(OPT_fno_emulated_tls)) {
@@ -2424,7 +2433,6 @@ static const auto &getFrontendActionTable() {
       {frontend::EmitAssembly, OPT_S},
       {frontend::EmitBC, OPT_emit_llvm_bc},
       {frontend::EmitBC32, OPT_emit_llvm_bc_32},
-      {frontend::EmitBC50, OPT_emit_llvm_bc_50},
       {frontend::EmitBC140, OPT_emit_llvm_bc_140},
       {frontend::EmitSPIRV, OPT_emit_spirv},
       {frontend::EmitSPIRVContainer, OPT_emit_spirv_container},
@@ -3172,7 +3180,7 @@ void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
       LangStd = LangStandard::lang_openclcpp10;
       break;
     case Language::Metal:
-      LangStd = LangStandard::lang_metal30;
+      LangStd = LangStandard::lang_metal32;
       break;
     case Language::Vulkan:
       LangStd = LangStandard::lang_vulkan13;
@@ -3256,23 +3264,20 @@ void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
     Opts.OpenCLCPlusPlusVersion = 202100;
 
   // as Metal is largely compiled as OpenCL, also enable + init opencl
-  if (LangStd == LangStandard::lang_metal30 ||
-      LangStd == LangStandard::lang_metal31 ||
-      LangStd == LangStandard::lang_metal32 ||
+  if (LangStd == LangStandard::lang_metal32 ||
       LangStd == LangStandard::lang_metal40 ||
+      LangStd == LangStandard::lang_metal41 ||
       IK.getLanguage() == Language::Metal) {
     Opts.Metal = 1;
     Opts.OpenCL = 1;
     Opts.OpenCLVersion = 120;
 
-    if (LangStd == LangStandard::lang_metal30)
-      Opts.MetalVersion = 300;
-    else if (LangStd == LangStandard::lang_metal31)
-      Opts.MetalVersion = 310;
-    else if (LangStd == LangStandard::lang_metal32)
+    if (LangStd == LangStandard::lang_metal32)
       Opts.MetalVersion = 320;
     else if (LangStd == LangStandard::lang_metal40)
       Opts.MetalVersion = 400;
+    else if (LangStd == LangStandard::lang_metal41)
+      Opts.MetalVersion = 410;
   }
 
   // as Vulkan is largely compiled as OpenCL, also enable + init opencl
@@ -4290,7 +4295,6 @@ static bool isStrictlyPreprocessorAction(frontend::ActionKind Action) {
   case frontend::EmitAssembly:
   case frontend::EmitBC:
   case frontend::EmitBC32:
-  case frontend::EmitBC50:
   case frontend::EmitBC140:
   case frontend::EmitSPIRV:
   case frontend::EmitSPIRVContainer:

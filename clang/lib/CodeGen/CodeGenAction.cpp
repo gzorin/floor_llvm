@@ -322,6 +322,17 @@ namespace clang {
       Ctx.setDiagnosticHandler(std::make_unique<ClangDiagnosticHandler>(
         CodeGenOpts, this));
 
+      // handle libfloor options for the backend / LLVM context
+      if (CodeGenOpts.LibFloorErrorOnAlloca) {
+        Ctx.get_libfloor_options().error_on_alloca = 1;
+      }
+      if (CodeGenOpts.LibFloorErrorOnPtrTypeAlloca) {
+        Ctx.get_libfloor_options().error_on_ptr_type_alloca = 1;
+      }
+      if (CodeGenOpts.LibFloorErrorOnPtrIntCasts) {
+        Ctx.get_libfloor_options().error_on_ptr_int_casts = 1;
+      }
+
       Expected<std::unique_ptr<llvm::ToolOutputFile>> OptRecordFileOrErr =
           setupLLVMOptimizationRemarks(
               Ctx, CodeGenOpts.OptRecordFile, CodeGenOpts.OptRecordPasses,
@@ -968,7 +979,6 @@ GetOutputStream(CompilerInstance &CI, StringRef InFile, BackendAction Action) {
     return CI.createDefaultOutputFile(false, InFile, "ll");
   case Backend_EmitBC:
   case Backend_EmitBC32:
-  case Backend_EmitBC50:
   case Backend_EmitBC140:
     return CI.createDefaultOutputFile(true, InFile, "bc");
   case Backend_EmitSPIRV:
@@ -1208,10 +1218,6 @@ EmitBCAction::EmitBCAction(llvm::LLVMContext *_VMContext)
 void EmitBC32Action::anchor() { }
 EmitBC32Action::EmitBC32Action(llvm::LLVMContext *_VMContext)
   : CodeGenAction(Backend_EmitBC32, _VMContext) {}
-
-void EmitBC50Action::anchor() { }
-EmitBC50Action::EmitBC50Action(llvm::LLVMContext *_VMContext)
-  : CodeGenAction(Backend_EmitBC50, _VMContext) {}
 
 void EmitBC140Action::anchor() { }
 EmitBC140Action::EmitBC140Action(llvm::LLVMContext *_VMContext)

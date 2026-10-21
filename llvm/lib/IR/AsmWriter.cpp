@@ -322,10 +322,13 @@ static void PrintCallingConv(unsigned cc, raw_ostream &Out) {
   case CallingConv::X86_64_SysV:   Out << "x86_64_sysvcc"; break;
   case CallingConv::Win64:         Out << "win64cc"; break;
   case CallingConv::FLOOR_FUNC:    Out << "floor_func"; break;
+  case CallingConv::FLOOR_IO_FUNC: Out << "floor_io_function"; break;
   case CallingConv::FLOOR_VERTEX:  Out << "floor_vertex"; break;
   case CallingConv::FLOOR_FRAGMENT:Out << "floor_fragment"; break;
   case CallingConv::FLOOR_TESS_CONTROL:  Out << "floor_tessellation_control"; break;
   case CallingConv::FLOOR_TESS_EVAL:     Out << "floor_tessellation_evaluation"; break;
+  case CallingConv::FLOOR_TASK:    Out << "floor_task"; break;
+  case CallingConv::FLOOR_MESH:    Out << "floor_mesh"; break;
   case CallingConv::FLOOR_KERNEL:  Out << "floor_kernel"; break;
   case CallingConv::Swift:         Out << "swiftcc"; break;
   case CallingConv::SwiftTail:     Out << "swifttailcc"; break;
@@ -3135,6 +3138,8 @@ static std::string getLinkageName(GlobalValue::LinkageTypes LT) {
     return "extern_weak";
   case GlobalValue::AvailableExternallyLinkage:
     return "available_externally";
+  case GlobalValue::ExternallyRequiredLinkage:
+    return "externally_required";
   }
   llvm_unreachable("invalid linkage");
 }

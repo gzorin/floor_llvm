@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ ed18ccec1f8c87417af68252a0931121806798a0
+// @ 09b2677af3535316a8b98ac0a4dd01b96577718b
 //
 //===----------------------------------------------------------------------===//
 
@@ -129,7 +129,7 @@ struct PHI {
 };
 
 struct Terminator {
-  enum class Type { Unreachable, Branch, Condition, Switch, Return, Kill, Exit };
+  enum class Type { Unreachable, Branch, Condition, Switch, Return, Kill, MeshEmitTasks, Exit };
 
   // NOTE: this may be nullptr for newly created conditions
   Instruction *terminator = nullptr;

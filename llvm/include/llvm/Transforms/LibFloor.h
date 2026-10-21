@@ -37,6 +37,23 @@ class FunctionPass;
 class ModulePass;
 class Pass;
 
+//! mesh shading attributes used for vertex and primitive data
+enum class MESH_ATTRIBUTE : uint32_t {
+	NONE = 0u,
+	POSITION = 1u,
+	POINT_SIZE = 2u,
+	CULLED = 3u,
+	__MAX_MESH_ATTRIBUTE
+};
+
+//! mesh shading primitive topology
+enum class MESH_TOPOLOGY : uint32_t {
+	POINT = 0u,
+	LINE = 1u,
+	TRIANGLE = 2u,
+	__MAX_MESH_TOPOLOGY
+};
+
 //===----------------------------------------------------------------------===//
 //
 // AddressSpaceFix - This pass fixes (intentionally) broken uses of addrspace
@@ -58,15 +75,9 @@ FunctionPass *createCUDAFinalPass();
 
 //===----------------------------------------------------------------------===//
 //
-// MetalFirst - This pass fixes Metal/AIR issues.
-//
-FunctionPass *createMetalFirstPass(const bool enable_intel_workarounds = false);
-
-//===----------------------------------------------------------------------===//
-//
 // MetalFinal - This pass fixes Metal/AIR issues.
 //
-FunctionPass *createMetalFinalPass(const bool enable_intel_workarounds = false);
+FunctionPass *createMetalFinalPass();
 
 //===----------------------------------------------------------------------===//
 //
@@ -77,9 +88,21 @@ ModulePass *createMetalFinalModuleCleanupPass();
 
 //===----------------------------------------------------------------------===//
 //
+// MetalMemopLowering - Lowers memops where beneficial.
+//
+FunctionPass *createMetalMemopLoweringPass();
+
+//===----------------------------------------------------------------------===//
+//
 // MetalImage - This pass applies Metal-specific floor image transformations.
 //
 FunctionPass *createMetalImagePass(const uint32_t image_capabilities = 0);
+
+//===----------------------------------------------------------------------===//
+//
+// MetalMesh - This pass perform Metal specific mesh shading lowering.
+//
+FunctionPass *createMetalMeshPass();
 
 //===----------------------------------------------------------------------===//
 //
@@ -120,6 +143,12 @@ FunctionPass *createVulkanImagePass(const uint32_t image_capabilities = 0);
 
 //===----------------------------------------------------------------------===//
 //
+// VulkanMesh - This pass perform Vulkan specific mesh shading lowering.
+//
+FunctionPass *createVulkanMeshPass();
+
+//===----------------------------------------------------------------------===//
+//
 // VulkanFinal - This pass fixes Vulkan/SPIR-V issues.
 //
 FunctionPass *createVulkanFinalPass();
@@ -140,16 +169,22 @@ FunctionPass *createVulkanPreFinalPass();
 
 //===----------------------------------------------------------------------===//
 //
-// VulkanPreFinalPointerBCFixup - This pass tries to fix invalid pointer
-// bitcasts prior to CFG structurization and VulkanFinal.
-//
-FunctionPass *createVulkanPreFinalPointerBCFixupPass();
-
-//===----------------------------------------------------------------------===//
-//
 // VulkanFinalModuleCleanup - This pass removes unused functions/etc.
 //
 ModulePass *createVulkanFinalModuleCleanupPass();
+
+//===----------------------------------------------------------------------===//
+//
+// PropagateCoherency - This pass propagates memory coherency and implements
+// backend specific transformations.
+//
+FunctionPass *createPropagateCoherencyPass();
+
+//===----------------------------------------------------------------------===//
+//
+// PointerBCFixup - This pass fixes/improves unfortunate pointer bitcasts.
+//
+FunctionPass *createPointerBCFixupPass();
 
 //===----------------------------------------------------------------------===//
 //
@@ -163,6 +198,12 @@ FunctionPass *createPropagateRangeInfoPass();
 // instructions to fma instructions.
 //
 FunctionPass *createFMACombinerPass();
+
+//===----------------------------------------------------------------------===//
+//
+// FloorModuleCleanup - Performs final module cleanup in all backends.
+//
+ModulePass *createFloorModuleCleanupPass();
 
 } // End llvm namespace
 

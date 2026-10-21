@@ -39,6 +39,9 @@
 #include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/Transforms/LibFloor/MetalTypes.h"
+#include "llvm/Transforms/LibFloor/metal_reflection.hpp"
+#include "llvm/Transforms/LibFloor/metal_reflection_parsing.hpp"
+#include "llvm/Transforms/LibFloor/metal_reflection_dumping.hpp"
 #include <system_error>
 #include <iostream>
 #include <fstream>
@@ -62,7 +65,13 @@ static cl::opt<bool>
 Force("f", cl::desc("Enable binary output on terminals"));
 
 static cl::opt<bool>
-DontPrint("disable-output", cl::desc("Don't output the .txt file"), cl::Hidden);
+DontPrint("disable-output", cl::desc("disable standard output (still prints errors)"), cl::init(false), cl::Hidden);
+
+static cl::opt<bool>
+ImmediatePrint("immediate-output", cl::desc("immediately write to standard output (incompatible with disable-output)"), cl::init(false), cl::Hidden);
+
+static cl::opt<bool>
+DisableReflection("disable-reflection", cl::desc("disable reflection parsing and printing"), cl::init(false));
 
 static cl::opt<bool>
 ShowAnnotations("show-annotations",
@@ -82,7 +91,7 @@ FuzzySearch("fuzzy",
             cl::desc("enable fuzzy searching of metallib data (MTLB blocks) in the input file"),
             cl::init(false));
 
-/* .metallib layout (as of Metal 2.4 / macOS 12.0)
+/* .metallib layout
  
  versioning:
  [magic: char[4] = MTLB]
@@ -111,11 +120,15 @@ FuzzySearch("fuzzy",
  
  additional program metadata (not included in "program metadata"!)
  [optional: embedded source code: char[4] = "HSRD"]
- 	[tag length: uint16_t = 16]
+    [tag length: uint16_t = 16]
     [embedded source code offset: uint64_t]
     [embedded source code length: uint64_t]
+ [optional: dynamic header: char[4] = "HYDN"]
+    [tag length: uint16_t = 16]
+    [dynamic header offset: uint64_t]
+    [dynamic header length: uint64_t]
  [optional: metallib UUID: char[4] = "UUID"]
- 	[tag length: uint16_t = 16]
+    [tag length: uint16_t = 16]
     [UUID: uint8_t[16]]
  [additional program metadata terminator: char[4] = "ENDT"]
  
@@ -123,7 +136,13 @@ FuzzySearch("fuzzy",
  [debug metadata ...]
  
  bitcode:
- [LLVM 5.0/14.0 bitcode binaries ...]
+ [LLVM 5.0 (Metal 3.0) / 14.0 (Metal 3.1+) bitcode binaries ...]
+ 
+ (opt) dynamic header:
+ [metallib name tag: char[4] = "NAME"]
+   [tag length: uint16_t = dynamic]
+   [\0-terminated metallib file name...]
+   [ENDT]
  
  (opt) embedded source code:
  [source archive count: uint32_t]
@@ -140,11 +159,16 @@ FuzzySearch("fuzzy",
  (opt) reflection list:
  [reflection list entry count: uint32_t]
  reflection list:
-    [reflection list entry length: uint32_t]
+    [reflection list entry length: uint32_t] // NOTE: program reflection offset point here
     [reflection list entry...]
-        [tag: char[4] = RBUF]
+        [tag: char[4] = "RBUF"]
         [tag length: uint32_t]
-        [RBUF data...]
+        [(opt) zero-padding for 16-byte alignment]
+        [reflection/AIRR data] // NOTE: uses a flatbuffers format
+            [root offset: uint32_t]
+            [magic: char[4] = "AIRR"]
+            [data...]
+        [ENDT]
  */
 
 //
@@ -193,13 +217,6 @@ static_assert(sizeof(metallib_header) == 4 + sizeof(metallib_version) + sizeof(u
 struct metallib_program_info {
 	uint32_t length; // including length itself
 	
-	enum class PROGRAM_TYPE : uint8_t {
-		VERTEX = 0,
-		FRAGMENT = 1,
-		KERNEL = 2,
-		NONE = 255
-	};
-	
 	struct version_info {
 		uint32_t major : 16;
 		uint32_t minor : 8;
@@ -224,14 +241,10 @@ struct metallib_program_info {
 		std::vector<function_constant> function_constants;
 	};
 	
-	struct reflection_entry {
-		int _not_implemented_yet = 0;
-	};
-	
 	struct entry {
 		uint32_t length;
 		string name; // NOTE: limited to 65536 - 1 ('\0')
-		PROGRAM_TYPE type { PROGRAM_TYPE::NONE };
+		FUNCTION_TYPE type { FUNCTION_TYPE::NONE };
 		uint8_t sha256_hash[32] {
 			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -255,7 +268,7 @@ struct metallib_program_info {
 		std::optional<debug_entry> debug;
 		std::optional<extended_md_entry> extended_md;
 		std::optional<uint64_t> reflection_offset;
-		std::optional<reflection_entry> reflection;
+		std::optional<metal::reflection::reflection_t> reflection;
 	};
 	vector<entry> entries;
 };
@@ -338,7 +351,7 @@ struct MetalLibDisDiagnosticHandler : public DiagnosticHandler {
 };
 } // end anon namespace
 
-static void hex_dump(raw_fd_ostream& os, const char* ptr, const size_t length, const char* name) {
+static void hex_dump(raw_ostream& os, const char* ptr, const size_t length, const char* name) {
 	os << '\n' << name << ":\n";
 	static constexpr const uint32_t row_width = 16;
 	for (uint32_t row = 0, row_count = ((length + row_width - 1) / row_width); row < row_count; ++row) {
@@ -370,8 +383,51 @@ static void hex_dump(raw_fd_ostream& os, const char* ptr, const size_t length, c
 	}
 }
 
-static Expected<bool> parse_metallib(const std::span<const char> data_span, std::unique_ptr<ToolOutputFile>& Out, char* call_bin) {
-	auto& os = Out->os();
+//! parses RBUF contents
+static Expected<bool> parse_reflection_buffer(std::span<const uint8_t> refl_buf, std::optional<metal::reflection::reflection_t>& refl_entry) {
+	// skip initial zero padding (AIRR data is always 16-byte aligned inside the metallib)
+	// NOTE: not checking the alignment requirement here, since our data might not actually be aligned to 16 bytes (just 4),
+	//       and our parser technically doesn't need any alignment at all
+	while (!refl_buf.empty() && refl_buf[0] == 0) {
+		refl_buf = refl_buf.subspan(1);
+	}
+	if (refl_buf.empty()) {
+		return make_error<StringError>("invalid initial zero padding", inconvertibleErrorCode());
+	}
+	assert((uintptr_t(refl_buf.data()) % 4u) == 0u);
+	
+	// must have 32-bit offset + AIRR magic
+	if (refl_buf.size_bytes() < 8) {
+		return make_error<StringError>("invalid reflection start block", inconvertibleErrorCode());
+	}
+	
+	using table_vtable_t = metal::reflection::table_vtable_t;
+	using table_root_t = metal::reflection::table_root_t;
+	
+	const auto refl_root_offset = *(const uint32_t*)refl_buf.data();
+	if (refl_root_offset + sizeof(table_root_t) >= refl_buf.size_bytes()) {
+		return make_error<StringError>("invalid reflection root offset", inconvertibleErrorCode());
+	}
+	
+	if (strncmp((const char*)refl_buf.data() + 4, "AIRR", 4) != 0) {
+		return make_error<StringError>("invalid reflection magic", inconvertibleErrorCode());
+	}
+	
+	// get the root node + its vtable
+	const auto& refl_root = *(const table_root_t*)(refl_buf.data() + refl_root_offset);
+	const auto refl_vtable_offset = int(refl_root_offset) - refl_root.vtable_offset;
+	if (refl_vtable_offset < 0 || uint32_t(refl_vtable_offset) + sizeof(table_vtable_t) >= refl_buf.size_bytes()) {
+		return make_error<StringError>("invalid reflection root vtable offset", inconvertibleErrorCode());
+	}
+	const auto& refl_vtable = *(const table_vtable_t*)(refl_buf.data() + refl_vtable_offset);
+	
+	// parse all reflection
+	refl_entry = metal::reflection::parse_reflection(refl_root, refl_vtable, refl_buf);
+	
+	return true;
+}
+
+static Expected<bool> parse_metallib(const std::span<const char> data_span, char* call_bin, raw_ostream& os) {
 	const auto data = data_span.data();
 	const auto buffer_size = data_span.size_bytes();
 	
@@ -494,6 +550,7 @@ static Expected<bool> parse_metallib(const std::span<const char> data_span, std:
 		hex_dump(os, extended_md_ptr, header.header_control.extended_md_length, "extended metadata");
 		hex_dump(os, debug_ptr, header.header_control.debug_length, "debug metadata");
 	}
+	os.flush();
 	
 	for(uint32_t i = 0; i < program_count; ++i) {
 		auto& entry = info.entries[i];
@@ -520,7 +577,14 @@ static Expected<bool> parse_metallib(const std::span<const char> data_span, std:
 					break;
 				}
 				case TAG_TYPE::TYPE: {
-					entry.type = *(const metallib_program_info::PROGRAM_TYPE*)program_ptr;
+					using underlying_func_type = underlying_type_t<FUNCTION_TYPE>;
+					const auto func_type_val = *(const underlying_func_type*)program_ptr;
+					if (func_type_val > underlying_func_type(FUNCTION_TYPE::OBJECT) &&
+						func_type_val < underlying_func_type(FUNCTION_TYPE::NONE)) {
+						return make_error<StringError>("unknown function type: " + to_string(func_type_val),
+													   inconvertibleErrorCode());
+					}
+					entry.type = std::bit_cast<FUNCTION_TYPE>(func_type_val);
 					break;
 				}
 				case TAG_TYPE::HASH: {
@@ -842,7 +906,6 @@ static Expected<bool> parse_metallib(const std::span<const char> data_span, std:
 											   inconvertibleErrorCode());
 			}
 			
-			metallib_program_info::reflection_entry refl_entry {};
 			auto refl_ptr = &data[*refl_list_offset + *entry.reflection_offset];
 			const auto refl_len = *(const uint32_t*)refl_ptr;
 			const auto refl_end_ptr = refl_ptr + refl_len;
@@ -870,9 +933,23 @@ static Expected<bool> parse_metallib(const std::span<const char> data_span, std:
 				
 				switch (tag) {
 					case TAG_TYPE::RBUF: {
-						// TODO: handle this
-						// NOTE: this contains AIRR and the actual reflection data
+						if (!DisableReflection) {
+							const std::span refl_buf { (const uint8_t*)refl_ptr, tag_length };
+							if (auto success = parse_reflection_buffer(refl_buf, entry.reflection); !success) {
+								std::string err_msg;
+								handleAllErrors(success.takeError(), [&](ErrorInfoBase &EIB) {
+									err_msg += EIB.message();
+								});
+								return make_error<StringError>("failed to parse reflection list: " + err_msg,
+															   inconvertibleErrorCode());
+							}
+						}
 						break;
+					}
+					case TAG_TYPE::RBUZ: {
+						// NOTE/TODO: this seems to be bzip compressed data
+						return make_error<StringError>("compressed reflection list not yet supported",
+													   inconvertibleErrorCode());
 					}
 					case TAG_TYPE::END: {
 						found_end_tag = true;
@@ -887,11 +964,6 @@ static Expected<bool> parse_metallib(const std::span<const char> data_span, std:
 			if (!found_end_tag) {
 				return make_error<StringError>("reached the end of the reflection list data, but no end tag was found",
 											   inconvertibleErrorCode());
-			}
-			
-			// only set this reflection list entry if it actually contains anything
-			if (refl_entry._not_implemented_yet) {
-				entry.reflection = std::move(refl_entry);
 			}
 		}
 	}
@@ -962,7 +1034,7 @@ static Expected<bool> parse_metallib(const std::span<const char> data_span, std:
 	}
 	
 	//
-	for(const auto& prog : info.entries) {
+	for (const auto& prog : info.entries) {
 		if (!FunctionFilter.empty()) {
 			if (!prog.name.starts_with(FunctionFilter)) {
 				continue;
@@ -975,17 +1047,35 @@ static Expected<bool> parse_metallib(const std::span<const char> data_span, std:
 		os << "[program]" << '\n';
 		os << "\tname: " << prog.name << '\n';
 		os << "\ttype: ";
-		switch(prog.type) {
-			case metallib_program_info::PROGRAM_TYPE::FRAGMENT:
+		switch (prog.type) {
+			case FUNCTION_TYPE::FRAGMENT:
 				os << "fragment";
 				break;
-			case metallib_program_info::PROGRAM_TYPE::VERTEX:
+			case FUNCTION_TYPE::VERTEX:
 				os << "vertex";
 				break;
-			case metallib_program_info::PROGRAM_TYPE::KERNEL:
+			case FUNCTION_TYPE::KERNEL:
 				os << "kernel";
 				break;
-			case metallib_program_info::PROGRAM_TYPE::NONE:
+			case FUNCTION_TYPE::UNQUALIFIED:
+				os << "unqualified";
+				break;
+			case FUNCTION_TYPE::VISIBLE:
+				os << "visible";
+				break;
+			case FUNCTION_TYPE::EXTERN:
+				os << "extern";
+				break;
+			case FUNCTION_TYPE::INTERSECTION:
+				os << "intersection";
+				break;
+			case FUNCTION_TYPE::MESH:
+				os << "mesh";
+				break;
+			case FUNCTION_TYPE::OBJECT:
+				os << "object";
+				break;
+			case FUNCTION_TYPE::NONE:
 				os << "NONE";
 				break;
 		}
@@ -1063,9 +1153,6 @@ static Expected<bool> parse_metallib(const std::span<const char> data_span, std:
 				}
 			}
 		}
-		if (prog.reflection_offset) {
-			os << "\treflection offset: " << *prog.reflection_offset << '\n';
-		}
 		if (prog.debug) {
 			os << "\tdebug:\n";
 			if (!prog.debug->source_file_name.empty()) {
@@ -1078,6 +1165,13 @@ static Expected<bool> parse_metallib(const std::span<const char> data_span, std:
 				os << "\t\tdependent file: " << prog.debug->dependent_file << '\n';
 			}
 		}
+		if (prog.reflection_offset) {
+			os << "\treflection offset: " << *prog.reflection_offset << '\n';
+		}
+		if (prog.reflection) {
+			os << "\treflection:\n";
+			metal::reflection::dump(*prog.reflection, os, 2u);
+		}
 		os << '\n';
 		
 		// output LLVM IR
@@ -1086,7 +1180,7 @@ static Expected<bool> parse_metallib(const std::span<const char> data_span, std:
 		LLVMContext Context;
 		Context.setDiagnosticHandler(std::make_unique<MetalLibDisDiagnosticHandler>(call_bin));
 		auto bc_mod = parseBitcodeFile(*bc_mem, Context);
-		if(bc_mod) {
+		if (bc_mod) {
 			std::unique_ptr<AssemblyAnnotationWriter> Annotator;
 			if (ShowAnnotations) {
 				Annotator.reset(new CommentWriter());
@@ -1095,11 +1189,7 @@ static Expected<bool> parse_metallib(const std::span<const char> data_span, std:
 			if ((*bc_mod)->materializeAll()) {
 				return make_error<StringError>("failed to materialize", inconvertibleErrorCode());
 			}
-			(*bc_mod)->print(Out->os(), Annotator.get(), PreserveAssemblyUseListOrder);
-			
-			if(Out->os().has_error()) {
-				Out->os().clear_error();
-			}
+			(*bc_mod)->print(os, Annotator.get(), PreserveAssemblyUseListOrder);
 		} else {
 			os << "bc parse error" << '\n';
 			// TODO: better error handling
@@ -1110,13 +1200,15 @@ static Expected<bool> parse_metallib(const std::span<const char> data_span, std:
 			});
 			return make_error<StringError>("failed to parse bitcode module", inconvertibleErrorCode());
 		}
+		
+		os.flush();
 	}
 	
 	return true;
 }
 
-static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>& Out) {
-	auto& os = Out->os();
+static Expected<bool> disassembleInputFile(char** argv, std::unique_ptr<ToolOutputFile>& Out, const bool dont_print,
+										   const bool immediate_print) {
 	ErrorOr<std::unique_ptr<MemoryBuffer>> input_data = MemoryBuffer::getFileOrSTDIN(InputFilename);
 	if (!input_data) {
 		return errorCodeToError(input_data.getError());
@@ -1124,8 +1216,13 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	const auto& buffer = (*input_data)->getBuffer();
 	const auto& data = buffer.data();
 	
+	std::string output;
+	raw_string_ostream str_os(output);
+	auto& os = (!immediate_print ? (raw_ostream&)str_os : (raw_ostream&)Out->os());
+	
+	Expected<bool> ret { make_error<StringError>("", inconvertibleErrorCode()) };
 	if (!FuzzySearch) {
-		return parse_metallib(std::span<const char> { data, buffer.size() }, Out, argv[0]);
+		ret = parse_metallib(std::span<const char> { data, buffer.size() }, argv[0], os);
 	} else {
 		const std::string_view mtlb_header { "MTLB"sv };
 		auto cur_data_span = std::span<const char> { data, buffer.size() };
@@ -1140,14 +1237,20 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 			total_offset += start_offset;
 			os << ">> found metal library @offset: rel " << start_offset << ", abs " << total_offset << "\n";
 			cur_data_span = cur_data_span.subspan(start_offset);
-			if (parse_metallib(cur_data_span, Out, argv[0])) {
+			if (parse_metallib(cur_data_span, argv[0], os)) {
 				found_any = true;
 			}
 			// offset span by 4 so that we don't match the same metallib
 			cur_data_span = cur_data_span.subspan(4);
 		}
-		return found_any;
+		ret = found_any;
 	}
+	
+	if (!dont_print && !immediate_print) {
+		Out->os() << output;
+	}
+	
+	return ret;
 }
 
 static ExitOnError ExitOnErr;
@@ -1162,6 +1265,11 @@ int main(int argc, char **argv) {
       std::make_unique<MetalLibDisDiagnosticHandler>(argv[0]));
 
   cl::ParseCommandLineOptions(argc, argv, ".metallib -> .txt disassembler\n");
+
+  if (ImmediatePrint && DontPrint) {
+    errs() << "incompatible options: can't use both immediate-output and disable-output\n";
+    return -1;
+  }
 
   // Just use stdout.  We won't actually print anything on it.
   if (DontPrint)
@@ -1184,7 +1292,7 @@ int main(int argc, char **argv) {
     return -1;
   }
 
-  Expected<bool> SuccessOrErr = openInputFile(argv, Out);
+  Expected<bool> SuccessOrErr = disassembleInputFile(argv, Out, DontPrint, ImmediatePrint);
   if (!SuccessOrErr) {
     handleAllErrors(SuccessOrErr.takeError(), [&](ErrorInfoBase &EIB) {
       errs() << argv[0] << ": ";

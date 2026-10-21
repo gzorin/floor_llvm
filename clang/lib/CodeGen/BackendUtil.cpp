@@ -513,7 +513,6 @@ static bool actionRequiresCodeGen(BackendAction Action) {
           Action != Backend_EmitBC &&
           Action != Backend_EmitLL &&
           Action != Backend_EmitBC32 &&
-          Action != Backend_EmitBC50 &&
           Action != Backend_EmitBC140 &&
           Action != Backend_EmitSPIRV &&
           Action != Backend_EmitSPIRVContainer &&
@@ -788,7 +787,6 @@ void EmitAssemblyHelper::CreatePasses(legacy::PassManager &MPM,
   
   // only enable this for Metal/AIR
   PMBuilder.EnableMetalPasses = LangOpts.Metal;
-  PMBuilder.EnableMetalIntelWorkarounds = CodeGenOpts.MetalIntelWorkarounds;
   
   // only enable this for OpenCL/SPIR and Vulkan/SPIR-V (don't want this for Metal)
   PMBuilder.EnableSPIRPasses = (LangOpts.OpenCL &&
@@ -1145,10 +1143,6 @@ void EmitAssemblyHelper::EmitAssemblyWithLegacyPassManager(
     PerModulePasses.add(createBitcode32WriterPass(*OS));
     break;
 
-  case Backend_EmitBC50:
-    PerModulePasses.add(createBitcode50WriterPass(*OS));
-    break;
-
   case Backend_EmitBC140:
     if (CodeGenOpts.PrepareForThinLTO && !CodeGenOpts.DisableLLVMPasses) {
       if (!CodeGenOpts.ThinLinkBitcodeFile.empty()) {
@@ -1183,7 +1177,7 @@ void EmitAssemblyHelper::EmitAssemblyWithLegacyPassManager(
     break;
 
   case Backend_EmitSPIRV:
-    PerModulePasses.add(createSPIRVWriterPass(*OS));
+    PerModulePasses.add(createSPIRVWriterPass(*OS, CodeGenOpts.SPIRVVersion));
     break;
 
   case Backend_EmitSPIRVContainer:
@@ -1614,17 +1608,6 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
   case Backend_EmitBC32:
     MPM.addPass(Bitcode32WriterPass(*OS));
     break;
-
-  case Backend_EmitBC50: {
-    bool EmitLTOSummary =
-        (CodeGenOpts.PrepareForLTO &&
-         !CodeGenOpts.DisableLLVMPasses &&
-         llvm::Triple(TheModule->getTargetTriple()).getVendor() !=
-             llvm::Triple::Apple);
-    MPM.addPass(BitcodeWriterPass50(*OS, CodeGenOpts.EmitLLVMUseLists,
-                                    EmitLTOSummary));
-    break;
-  }
 
   case Backend_EmitBC140:
     if (CodeGenOpts.PrepareForThinLTO && !CodeGenOpts.DisableLLVMPasses) {

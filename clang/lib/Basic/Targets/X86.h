@@ -33,6 +33,9 @@ static const unsigned X86AddrSpaceMap[] = {
     0,   // opencl_global_device
     0,   // opencl_global_host
     0,   // vulkan_input
+    0,   // vulkan_output
+    0,   // metal_mesh
+    0,   // task_payload
     0,   // cuda_device
     0,   // cuda_constant
     0,   // cuda_shared
@@ -363,7 +366,15 @@ public:
     case CC_Swift:
     case CC_X86Pascal:
     case CC_IntelOclBicc:
+    case CC_FloorFunction:
+    case CC_FloorIOFunction:
     case CC_FloorKernel:
+    case CC_FloorVertex:
+    case CC_FloorFragment:
+    case CC_FloorTessControl:
+    case CC_FloorTessEval:
+    case CC_FloorTask:
+    case CC_FloorMesh:
       return CCCR_OK;
     case CC_SwiftAsync:
       return CCCR_Error;
@@ -734,7 +745,15 @@ public:
     case CC_PreserveMost:
     case CC_PreserveAll:
     case CC_X86RegCall:
+    case CC_FloorFunction:
+    case CC_FloorIOFunction:
     case CC_FloorKernel:
+    case CC_FloorVertex:
+    case CC_FloorFragment:
+    case CC_FloorTessControl:
+    case CC_FloorTessEval:
+    case CC_FloorTask:
+    case CC_FloorMesh:
       return CCCR_OK;
     default:
       return CCCR_Warning;
@@ -811,7 +830,15 @@ public:
     case CC_Swift:
     case CC_SwiftAsync:
     case CC_X86RegCall:
+    case CC_FloorFunction:
+    case CC_FloorIOFunction:
     case CC_FloorKernel:
+    case CC_FloorVertex:
+    case CC_FloorFragment:
+    case CC_FloorTessControl:
+    case CC_FloorTessEval:
+    case CC_FloorTask:
+    case CC_FloorMesh:
       return CCCR_OK;
     default:
       return CCCR_Warning;

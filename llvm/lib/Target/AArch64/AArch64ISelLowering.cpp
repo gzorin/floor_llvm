@@ -5341,11 +5341,14 @@ CCAssignFn *AArch64TargetLowering::CCAssignFnForCall(CallingConv::ID CC,
   case CallingConv::SwiftTail:
   case CallingConv::Tail:
   case CallingConv::FLOOR_FUNC:
+  case CallingConv::FLOOR_IO_FUNC:
   case CallingConv::FLOOR_KERNEL:
   case CallingConv::FLOOR_VERTEX:
   case CallingConv::FLOOR_FRAGMENT:
   case CallingConv::FLOOR_TESS_CONTROL:
   case CallingConv::FLOOR_TESS_EVAL:
+  case CallingConv::FLOOR_TASK:
+  case CallingConv::FLOOR_MESH:
     if (Subtarget->isTargetWindows() && IsVarArg)
       return CC_AArch64_Win64_VarArg;
     if (!Subtarget->isTargetDarwin())

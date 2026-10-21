@@ -256,22 +256,26 @@ namespace {
       (void) llvm::createAddressSpaceFixPass();
       (void) llvm::createCUDAImagePass(0);
       (void) llvm::createCUDAFinalPass();
-      (void) llvm::createMetalFirstPass(false);
-      (void) llvm::createMetalFinalPass(false);
+      (void) llvm::createMetalFinalPass();
       (void) llvm::createMetalFinalModuleCleanupPass();
+      (void) llvm::createMetalMemopLoweringPass();
       (void) llvm::createMetalImagePass(0);
+      (void) llvm::createMetalMeshPass();
       (void) llvm::createSPIRFinalPass();
       (void) llvm::createSPIRFinalModulePass();
       (void) llvm::createSPIRImagePass(0, false);
       (void) llvm::createCFGStructurizationPass();
       (void) llvm::createVulkanEarlyArgBufferFunctionClonePass();
       (void) llvm::createVulkanImagePass();
+      (void) llvm::createVulkanMeshPass();
       (void) llvm::createVulkanFinalPass();
       (void) llvm::createVulkanPreFinalPass();
-      (void) llvm::createVulkanPreFinalPointerBCFixupPass();
       (void) llvm::createVulkanFinalModuleCleanupPass();
+      (void) llvm::createPointerBCFixupPass();
+      (void) llvm::createPropagateCoherencyPass();
       (void) llvm::createPropagateRangeInfoPass();
       (void) llvm::createFMACombinerPass();
+      (void) llvm::createFloorModuleCleanupPass();
     }
   } ForcePassLinking; // Force link by creating a global definition.
 }

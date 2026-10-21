@@ -3727,7 +3727,13 @@ static Address emitArraySubscriptGEP(CodeGenFunction &CGF, Address addr,
                                                         idx, DbgInfo);
   }
 
-  return Address(eltPtr, CGF.ConvertTypeForMem(eltType), eltAlign);
+  // handle use and conversion of graphics I/O types
+  const auto elem_type = eltPtr->getType()->getPointerElementType();
+  const auto st_elem_type = dyn_cast_or_null<llvm::StructType>(elem_type);
+  const type_conversion_opts_t conv_opts {
+    .io_type_conversion = (st_elem_type && st_elem_type->isGraphicsIOType()),
+  };
+  return Address(eltPtr, CGF.ConvertTypeForMem(eltType, conv_opts), eltAlign);
 }
 
 LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
@@ -4335,8 +4341,8 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
   Address Addr = base.getAddress(*this);
   llvm::Type* elem_type = Addr.getType()->getPointerElementType();
   const RecordDecl *rec = field->getParent();
-  const CGRecordLayout &RL = CGM.getTypes().getCGRecordLayout(rec, elem_type);
-  const auto is_flattened_struct = CGM.getTypes().is_flattened_struct_type(elem_type);
+  const auto is_flattened_struct = CGM.getTypes().is_flattened_struct_type(rec, elem_type, is_floor_arg_buffer);
+  const CGRecordLayout &RL = CGM.getTypes().getCGRecordLayout(rec, elem_type, is_floor_arg_buffer);
 
   if (field->isBitField()) {
     const CGBitFieldInfo &Info = RL.getBitFieldInfo(field);
@@ -4483,8 +4489,21 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
   // for both unions and structs.  A union needs a bitcast, a struct element
   // will need a bitcast if the LLVM type laid out doesn't match the desired
   // type.
+  // NOTE: for libfloor graphics types: we need to a) take care of special Vulkan argument buffer handling,
+  //       and b) take *very* special care of graphics I/O type conversions -> we only want to enable this
+  //       when we know that the contained type is an I/O type (struct.floor.io.*) or we're in a flattened struct,
+  //       otherwise normal conversion has to be used instead
   const auto is_vk_arg_buffer = (is_floor_arg_buffer && getLangOpts().Vulkan);
-  auto llvm_elem_type = CGM.getTypes().ConvertTypeForMem(FieldType, false, false, !is_vk_arg_buffer);
+  const auto contains_io_type = Addr.getType()->getPointerElementType()->containsGraphicsIOType() || is_flattened_struct;
+  const type_conversion_opts_t conv_opts {
+    .io_type_conversion = contains_io_type,
+    .convert_array_image_or_buffer_type = false,
+    // convert top level types containing arrays directly to arrays
+    .convert_array_type = is_vk_arg_buffer && is_flattened_struct,
+    .single_field_array_image_or_buffer_only = !is_vk_arg_buffer,
+    .vector_compat_conversion = contains_io_type,
+  };
+  auto llvm_elem_type = CGM.getTypes().ConvertTypeForMem(FieldType, false, false, conv_opts);
   // for expanded Vulkan argument buffers, we need to take care of additional type/value conversion/handling
   if (getLangOpts().Vulkan) {
 	  bool is_base_load = false;
@@ -4719,18 +4738,74 @@ EmitConditionalOperatorLValue(const AbstractConditionalOperator *expr) {
   if (lhs && rhs) {
     Address lhsAddr = lhs->getAddress(*this);
     Address rhsAddr = rhs->getAddress(*this);
-    llvm::PHINode *phi = Builder.CreatePHI(lhsAddr.getType(), 2, "cond-lvalue");
-    phi->addIncoming(lhsAddr.getPointer(), lhsBlock);
-    phi->addIncoming(rhsAddr.getPointer(), rhsBlock);
-    Address result(phi, lhsAddr.getElementType(),
-                   std::min(lhsAddr.getAlignment(), rhsAddr.getAlignment()));
-    AlignmentSource alignSource =
-      std::max(lhs->getBaseInfo().getAlignmentSource(),
-               rhs->getBaseInfo().getAlignmentSource());
-    TBAAAccessInfo TBAAInfo = CGM.mergeTBAAInfoForConditionalOperator(
-        lhs->getTBAAInfo(), rhs->getTBAAInfo());
-    return MakeAddrLValue(result, expr->getType(), LValueBaseInfo(alignSource),
-                          TBAAInfo);
+    auto lhs_ptr = lhsAddr.getPointer();
+    auto rhs_ptr = rhsAddr.getPointer();
+    if (lhs_ptr->getType()->getPointerAddressSpace() !=
+            rhs_ptr->getType()->getPointerAddressSpace() &&
+        (CGM.getLangOpts().OpenCL || getLangOpts().Vulkan ||
+         getLangOpts().Metal)) {
+      // pointer address spaces don't match: if we run into this situation, we
+      // have a big problem, since we can't have a PHI (or later users) with
+      // more than one address space (also: AddressSpaceFix can't run at this
+      // point in time yet)
+      // -> work around this by emitting loads from both addresses, storing it
+      // into a tmp alloca, then using the alloca as a new pointer/lvalue (and
+      // hope this gets cleaned up during optimization)
+      assert(lhsAddr.getElementType() == rhsAddr.getElementType());
+      auto ld_type = lhsAddr.getElementType();
+
+      llvm::Instruction *ld_lhs = nullptr;
+      if (isa<llvm::Instruction>(lhs_ptr)) {
+        ld_lhs = new llvm::LoadInst(
+            ld_type, lhs_ptr, "phi_ld_lhs",
+            cast<llvm::Instruction>(lhs_ptr)->getNextNonDebugInstruction());
+      } else {
+        ld_lhs = new llvm::LoadInst(ld_type, lhs_ptr, "phi_ld_lhs",
+                                    lhsBlock->getTerminator());
+      }
+
+      llvm::Instruction *ld_rhs = nullptr;
+      if (isa<llvm::Instruction>(rhs_ptr)) {
+        ld_rhs = new llvm::LoadInst(
+            ld_type, rhs_ptr, "phi_ld_rhs",
+            cast<llvm::Instruction>(rhs_ptr)->getNextNonDebugInstruction());
+      } else {
+        ld_rhs = new llvm::LoadInst(ld_type, rhs_ptr, "phi_ld_rhs",
+                                    rhsBlock->getTerminator());
+      }
+
+      llvm::PHINode *phi = Builder.CreatePHI(ld_type, 2, "cond-lvalue");
+      phi->addIncoming(ld_lhs, lhsBlock);
+      phi->addIncoming(ld_rhs, rhsBlock);
+
+      Address tmp_alloca =
+          CreateDefaultAlignTempAlloca(ld_type, "phi_as_fixup");
+      Builder.CreateStore(phi, tmp_alloca, false);
+
+      Address result(tmp_alloca.getPointer(), ld_type,
+                     std::min(lhsAddr.getAlignment(), rhsAddr.getAlignment()));
+      AlignmentSource alignSource =
+          std::max(lhs->getBaseInfo().getAlignmentSource(),
+                   rhs->getBaseInfo().getAlignmentSource());
+      TBAAAccessInfo TBAAInfo = CGM.mergeTBAAInfoForConditionalOperator(
+          lhs->getTBAAInfo(), rhs->getTBAAInfo());
+      return MakeAddrLValue(result, expr->getType(),
+                            LValueBaseInfo(alignSource), TBAAInfo);
+    } else {
+      llvm::PHINode *phi =
+          Builder.CreatePHI(lhsAddr.getType(), 2, "cond-lvalue");
+      phi->addIncoming(lhsAddr.getPointer(), lhsBlock);
+      phi->addIncoming(rhsAddr.getPointer(), rhsBlock);
+      Address result(phi, lhsAddr.getElementType(),
+                     std::min(lhsAddr.getAlignment(), rhsAddr.getAlignment()));
+      AlignmentSource alignSource =
+          std::max(lhs->getBaseInfo().getAlignmentSource(),
+                   rhs->getBaseInfo().getAlignmentSource());
+      TBAAAccessInfo TBAAInfo = CGM.mergeTBAAInfoForConditionalOperator(
+          lhs->getTBAAInfo(), rhs->getTBAAInfo());
+      return MakeAddrLValue(result, expr->getType(),
+                            LValueBaseInfo(alignSource), TBAAInfo);
+    }
   } else {
     assert((lhs || rhs) &&
            "both operands of glvalue conditional are throw-expressions?");

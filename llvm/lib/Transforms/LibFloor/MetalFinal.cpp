@@ -33,6 +33,8 @@
 #include "llvm/Analysis/BasicAliasAnalysis.h"
 #include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/Analysis/TargetTransformInfo.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/CallingConv.h"
@@ -64,6 +66,7 @@
 #include "llvm/Transforms/LibFloor.h"
 #include "llvm/Transforms/LibFloor/FloorUtils.h"
 #include "llvm/Transforms/LibFloor/MetalTypes.h"
+#include "llvm/Transforms/Utils/LowerMemIntrinsics.h"
 #include <algorithm>
 #include <cstdarg>
 #include <memory>
@@ -86,54 +89,123 @@ using namespace llvm;
 #endif
 
 namespace {
-	// MetalFirst
-	struct MetalFirst : public FunctionPass, InstVisitor<MetalFirst> {
-		friend class InstVisitor<MetalFirst>;
+	// MetalMemopLowering
+	// NOTE: also see VulkanPreFinal, the main difference here is that Metal/AIR supports LLVM memops, so we can fall back to them if needed
+	struct MetalMemopLowering : public FunctionPass, InstVisitor<MetalMemopLowering> {
+		friend class InstVisitor<MetalMemopLowering>;
 		
 		static char ID; // Pass identification, replacement for typeid
-		const bool enable_intel_workarounds;
 		
 		Module* M { nullptr };
 		LLVMContext* ctx { nullptr };
+		Function* func { nullptr };
 		
 		bool was_modified { false };
-		bool is_vertex_func { false };
-		bool is_fragment_func { false };
-		bool is_kernel_func { false };
-		bool is_tess_control_func { false };
-		bool is_tess_eval_func { false };
 		
-		MetalFirst(const bool enable_intel_workarounds_ = false) :
-		FunctionPass(ID),
-		enable_intel_workarounds(enable_intel_workarounds_) {
-			initializeMetalFirstPass(*PassRegistry::getPassRegistry());
+		// gathered memory intrinsics
+		std::vector<MemIntrinsic*> mem_instrs;
+		
+		MetalMemopLowering() : FunctionPass(ID) {
+			initializeMetalMemopLoweringPass(*PassRegistry::getPassRegistry());
+		}
+		
+		void getAnalysisUsage(AnalysisUsage &AU) const override {
+			AU.addRequired<AAResultsWrapperPass>();
+			AU.addRequired<GlobalsAAWrapperPass>();
+			AU.addRequired<AssumptionCacheTracker>();
+			AU.addRequired<TargetLibraryInfoWrapperPass>();
+			AU.addRequired<AssumptionCacheTracker>();
+			AU.addRequired<DominatorTreeWrapperPass>();
+			AU.addRequired<TargetTransformInfoWrapperPass>();
 		}
 		
 		bool runOnFunction(Function &F) override {
-			// exit if empty function
-			if(F.empty()) return false;
+			if (F.empty()) {
+				return false;
+			}
 			
-			//
 			M = F.getParent();
 			ctx = &M->getContext();
+			func = &F;
 			
-			is_vertex_func = F.getCallingConv() == CallingConv::FLOOR_VERTEX;
-			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
-			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
-			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
-			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
-			
-			// NOTE: for now, this is no longer needed
 			was_modified = false;
-			//visit(F);
+			mem_instrs.clear();
+			
+			visit(F);
+			
+			if (!mem_instrs.empty()) {
+				lower_mem_instructions();
+			}
 			
 			return was_modified;
 		}
 		
 		// InstVisitor overrides...
-		using InstVisitor<MetalFirst>::visit;
-		void visit(Instruction& /* I */) {
-			//InstVisitor<MetalFirst>::visit(I);
+		using InstVisitor<MetalMemopLowering>::visit;
+		void visit(Instruction& I) {
+			InstVisitor<MetalMemopLowering>::visit(I);
+		}
+		
+		void visitMemIntrinsic(MemIntrinsic& I) {
+			mem_instrs.push_back(&I);
+		}
+		
+		void lower_mem_instructions() {
+			for (auto& mem_instr : mem_instrs) {
+				if (auto memcpy_instr = dyn_cast_or_null<MemCpyInst>(mem_instr)) {
+					was_modified |= lower_memcpy(*memcpy_instr);
+				} else if (auto memmove_instr = dyn_cast_or_null<MemMoveInst>(mem_instr)) {
+					// ignore
+					(void)memmove_instr;
+				} else if (auto memset_instr = dyn_cast_or_null<MemSetInst>(mem_instr)) {
+					was_modified |= lower_memset(*memset_instr);
+				} else {
+					// ignore
+				}
+			}
+		}
+		
+		//! tries to lower "memcpy_instr" to LLVM instructions,
+		//! returns true if the lowering happened
+		bool lower_memcpy(MemCpyInst& memcpy_instr) {
+			auto [src, dst, const_len_op, len_op, override_loop_op_type, _, __] = libfloor_utils::compute_memop_lower_info(*M, memcpy_instr);
+			if (!src || !dst || !len_op) {
+				return false;
+			}
+			
+			const TargetTransformInfo& TTI = getAnalysis<TargetTransformInfoWrapperPass>().getTTI(*func);
+			if (!const_len_op) {
+				// -> on Metal, llvm.memcpy is supported, and we should use it if the copy length is dynamic
+				return false;
+			}
+			
+			createMemCpyLoopKnownSize(&memcpy_instr, src, dst, const_len_op,
+									  memcpy_instr.getSourceAlign().valueOrOne(), memcpy_instr.getDestAlign().valueOrOne(),
+									  memcpy_instr.isVolatile(), memcpy_instr.isVolatile(), TTI, override_loop_op_type);
+			memcpy_instr.eraseFromParent();
+			
+			return true;
+		}
+		
+		//! tries to lower "memset_instr" to LLVM instructions,
+		//! returns true if the lowering happened
+		bool lower_memset(MemSetInst& memset_instr) {
+			auto [src, dst, const_len_op, len_op, override_loop_op_type, _, __] = libfloor_utils::compute_memop_lower_info(*M, memset_instr);
+			if (!src || !dst || !len_op) {
+				return false;
+			}
+			
+			if (!const_len_op) {
+				// -> on Metal, llvm.memset is supported, and we should use it if the copy length is dynamic
+				return false;
+			}
+			
+			createMemSetLoopKnownSize(&memset_instr, dst, const_len_op, src,
+									  memset_instr.getDestAlign().valueOrOne(),
+									  memset_instr.isVolatile(), override_loop_op_type);
+			memset_instr.eraseFromParent();
+			
+			return true;
 		}
 	};
 	
@@ -142,7 +214,6 @@ namespace {
 		friend class InstVisitor<MetalFinal>;
 		
 		static char ID; // Pass identification, replacement for typeid
-		const bool enable_intel_workarounds;
 		
 		std::shared_ptr<llvm::IRBuilder<>> builder;
 		
@@ -157,6 +228,8 @@ namespace {
 		bool is_fragment_func { false };
 		bool is_tess_control_func { false };
 		bool is_tess_eval_func { false };
+		bool is_task_func { false };
+		bool is_mesh_func { false };
 		
 		struct per_function_state_t {
 			uint32_t kernel_dim { 1 };
@@ -166,6 +239,17 @@ namespace {
 				return (kernel_local_size[0] != 0 &&
 						kernel_local_size[1] != 0 &&
 						kernel_local_size[2] != 0);
+			}
+			uint32_t fixed_local_size_extent() const {
+				assert(has_fixed_local_size());
+				uint32_t extent = kernel_local_size[0];
+				if (kernel_dim >= 2) {
+					extent *= kernel_local_size[1];
+				}
+				if (kernel_dim >= 3) {
+					extent *= kernel_local_size[2];
+				}
+				return extent;
 			}
 			
 			// added kernel function args
@@ -188,6 +272,7 @@ namespace {
 			
 			// added fragment function args
 			Argument* point_coord { nullptr };
+			Argument* front_facing { nullptr };
 			Argument* primitive_id { nullptr };
 			Argument* barycentric_coord { nullptr };
 			
@@ -199,9 +284,7 @@ namespace {
 			Argument* soft_printf { nullptr };
 		} state;
 		
-		MetalFinal(const bool enable_intel_workarounds_ = false) :
-		FunctionPass(ID),
-		enable_intel_workarounds(enable_intel_workarounds_) {
+		MetalFinal() : FunctionPass(ID) {
 			initializeMetalFinalPass(*PassRegistry::getPassRegistry());
 		}
 		
@@ -213,6 +296,17 @@ namespace {
 		}
 		
 		enum METAL_KERNEL_ARG_REV_IDX : int32_t {
+			METAL_GLOBAL_ID = -10,
+			METAL_GLOBAL_SIZE = -9,
+			METAL_LOCAL_ID = -8,
+			METAL_LOCAL_SIZE = -7,
+			METAL_GROUP_ID = -6,
+			METAL_GROUP_SIZE = -5,
+			METAL_SUB_GROUP_ID = -4,
+			METAL_SUB_GROUP_LOCAL_ID = -3,
+			METAL_SUB_GROUP_SIZE = -2,
+			METAL_NUM_SUB_GROUPS = -1,
+			
 			METAL_KERNEL_ARG_COUNT = 10,
 		};
 		
@@ -226,9 +320,10 @@ namespace {
 		};
 		
 		enum METAL_FRAGMENT_ARG_REV_IDX : int32_t {
-			METAL_POINT_COORD = -1,
+			METAL_POINT_COORD = -2,
+			METAL_FRONT_FACING = -1,
 			
-			METAL_FRAGMENT_ARG_COUNT = 1,
+			METAL_FRAGMENT_ARG_COUNT = 2,
 		};
 		
 		enum METAL_TESS_EVAL_ARG_REV_IDX : int32_t {
@@ -242,7 +337,9 @@ namespace {
 		
 		bool runOnFunction(Function &F) override {
 			// exit if empty function
-			if(F.empty()) return false;
+			if (F.empty()) {
+				return false;
+			}
 			
 			//
 			M = F.getParent();
@@ -251,6 +348,16 @@ namespace {
 			builder = std::make_shared<llvm::IRBuilder<>>(*ctx);
 			state = {};
 			metal_version = metal::get_metal_version(*M);
+			uint32_t implicit_arg_count = 0u; // not including soft-printf
+			
+			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
+			is_vertex_func = F.getCallingConv() == CallingConv::FLOOR_VERTEX;
+			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
+			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
+			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
+			is_task_func = F.getCallingConv() == CallingConv::FLOOR_TASK;
+			is_mesh_func = F.getCallingConv() == CallingConv::FLOOR_MESH;
+			assert(is_kernel_func || is_vertex_func || is_fragment_func || is_tess_control_func || is_tess_eval_func || is_task_func || is_mesh_func);
 			
 			for(auto& instr : F.getEntryBlock().getInstList()) {
 				if(!isa<AllocaInst>(instr)) {
@@ -278,19 +385,17 @@ namespace {
 			}
 			
 			// get args if this is a kernel function
-			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
-			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
-			if(is_kernel_func || is_tess_control_func) {
+			if (is_kernel_func || is_tess_control_func || is_task_func || is_mesh_func) {
 				auto kernel_dim_node = F.getMetadata("kernel_dim");
 				assert(kernel_dim_node);
 				if (kernel_dim_node->getNumOperands() > 0) {
 					auto& op = kernel_dim_node->getOperand(0);
 					state.kernel_dim = (uint32_t)mdconst::extract<ConstantInt>(op)->getZExtValue();
-					assert((is_kernel_func && state.kernel_dim >= 1 && state.kernel_dim <= 3) ||
+					assert(((is_kernel_func || is_task_func || is_mesh_func) && state.kernel_dim >= 1 && state.kernel_dim <= 3) ||
 						   (is_tess_control_func && state.kernel_dim == 1));
 				}
 				
-				if (is_kernel_func) {
+				if (is_kernel_func || is_task_func || is_mesh_func) {
 					auto kernel_simd_width_node = F.getMetadata("kernel_simd_width");
 					if (kernel_simd_width_node && kernel_simd_width_node->getNumOperands() == 1) {
 						auto& op = kernel_simd_width_node->getOperand(0);
@@ -322,17 +427,26 @@ namespace {
 					if (has_soft_printf) {
 						state.soft_printf = get_arg_by_idx(rev_idx--);
 					}
+					
+					implicit_arg_count = METAL_KERNEL_ARG_COUNT;
 				} else {
-					errs() << "invalid " << (is_kernel_func ? "kernel" : "tessellation-control");
+					errs() << "invalid ";
+					if (is_kernel_func) {
+						errs() << "kernel";
+					} else if (is_tess_eval_func) {
+						errs() << "tessellation-eval";
+					} else if (is_task_func) {
+						errs() << "task";
+					} else if (is_mesh_func) {
+						errs() << "mesh";
+					}
 					errs() << " function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
 				}
 			}
 			
 			// get args if this is a vertex function
-			is_vertex_func = F.getCallingConv() == CallingConv::FLOOR_VERTEX;
 			if(is_vertex_func) {
 				if (F.arg_size() >= METAL_VERTEX_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
-					// TODO: this should be optional / only happen on request
 					state.vertex_id = get_arg_by_idx(METAL_VERTEX_ID);
 					state.base_vertex_id = get_arg_by_idx(METAL_BASE_VERTEX_ID);
 					state.instance_id = get_arg_by_idx(METAL_VS_INSTANCE_ID);
@@ -340,16 +454,16 @@ namespace {
 					if (has_soft_printf) {
 						state.soft_printf = get_arg_by_idx(-(METAL_VERTEX_ARG_COUNT + 1));
 					}
+					
+					implicit_arg_count = METAL_VERTEX_ARG_COUNT;
 				} else {
 					errs() << "invalid vertex function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
 				}
 			}
 			
 			// get args if this is a tessellation evaluation function
-			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
 			if(is_tess_eval_func) {
 				if (F.arg_size() >= METAL_TESS_EVAL_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
-					// TODO: this should be optional / only happen on request
 					state.patch_id = get_arg_by_idx(METAL_PATCH_ID);
 					state.instance_id = get_arg_by_idx(METAL_TES_INSTANCE_ID);
 					state.base_instance_id = get_arg_by_idx(METAL_TES_BASE_INSTANCE_ID);
@@ -357,17 +471,20 @@ namespace {
 					if (has_soft_printf) {
 						state.soft_printf = get_arg_by_idx(-(METAL_TESS_EVAL_ARG_COUNT + 1));
 					}
+					
+					implicit_arg_count = METAL_TESS_EVAL_ARG_COUNT;
 				} else {
 					errs() << "invalid tessellation-evaluation function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
 				}
 			}
 			
 			// get args if this is a fragment function
-			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
 			if(is_fragment_func) {
-				const uint32_t opt_arg_count = (has_soft_printf ? 1u : 0u) + (has_primitive_id ? 1u : 0u) + (has_barycentric_coord ? 1u : 0u);
+				const uint32_t opt_builtin_arg_count = (has_primitive_id ? 1u : 0u) + (has_barycentric_coord ? 1u : 0u);
+				const uint32_t opt_arg_count = (has_soft_printf ? 1u : 0u) + opt_builtin_arg_count;
 				if (F.arg_size() >= METAL_FRAGMENT_ARG_COUNT + opt_arg_count) {
 					state.point_coord = get_arg_by_idx(METAL_POINT_COORD);
+					state.front_facing = get_arg_by_idx(METAL_FRONT_FACING);
 					
 					// NOTE: reverse order!
 					uint32_t opt_arg_counter = 1;
@@ -380,19 +497,28 @@ namespace {
 					if (has_soft_printf) {
 						state.soft_printf = get_arg_by_idx(-(METAL_FRAGMENT_ARG_COUNT + opt_arg_counter++));
 					}
+					
+					implicit_arg_count = METAL_FRAGMENT_ARG_COUNT + opt_builtin_arg_count;
 				} else {
 					errs() << "invalid fragment function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
 				}
 			}
 			
 			// update function signature / param list
-			if (is_kernel_func || is_vertex_func || is_fragment_func || is_tess_control_func || is_tess_eval_func) {
+			{
 				std::vector<Type*> param_types;
 				for (auto& arg : F.args()) {
-					// replace noalias LLVM attribute with "air-buffer-no-alias" string attribute on Metal 3.1+
-					if (metal_version >= 310 && arg.hasAttribute(Attribute::NoAlias)) {
-						arg.addAttr(llvm::Attribute::get(*ctx, "air-buffer-no-alias"));
+					// replace noalias LLVM attribute with "air-buffer-no-alias" string attribute
+					if (arg.hasAttribute(Attribute::NoAlias)) {
+						if (const auto address_space = arg.getType()->getPointerAddressSpace();
+							address_space >= uint32_t(metal::ADDRESS_SPACE::GLOBAL) &&
+							address_space <= uint32_t(metal::ADDRESS_SPACE::LOCAL)) {
+							arg.addAttr(llvm::Attribute::get(*ctx, "air-buffer-no-alias"));
+						}
 						arg.removeAttr(Attribute::NoAlias);
+					}
+					if (arg.getType()->isPointerTy()) {
+						arg.addAttr(llvm::Attribute::NoCapture);
 					}
 					param_types.push_back(arg.getType());
 				}
@@ -400,16 +526,21 @@ namespace {
 				F.mutateType(PointerType::get(new_func_type, 0));
 				F.mutateFunctionType(new_func_type);
 				
-				// always remove "norecurse" and "min-legal-vector-width" on Metal < 3.1
-				if (metal_version < 310) {
-					F.removeFnAttr(Attribute::NoRecurse);
-				}
-				F.removeFnAttr("min-legal-vector-width");
+				// generally remove this
+				F.removeFnAttr("less-precise-fpmad");
 				
-				// set our own "min-legal-vector-width" attribute on Metal 3.1+
-				if (metal_version >= 310) {
-					F.addFnAttr(llvm::Attribute::get(*ctx, "min-legal-vector-width", "64"));
+				// add "max-work-group-size" attribute
+				if (is_kernel_func || is_task_func || is_mesh_func) {
+					if (state.kernel_local_size[0] > 0 && state.kernel_local_size[1] > 0 && state.kernel_local_size[2] > 0) {
+						F.addFnAttr(llvm::Attribute::get(*ctx, "max-work-group-size",
+														 std::to_string(state.kernel_local_size[0] *
+																		state.kernel_local_size[1] *
+																		state.kernel_local_size[2])));
+					}
 				}
+				
+				// add "no-builtins"
+				F.addFnAttr("no-builtins");
 			}
 			
 			// visit everything in this function
@@ -417,8 +548,161 @@ namespace {
 			DBG(errs() << "in func: "; errs().write_escaped(F.getName()) << '\n';)
 			visit(F);
 			
+			// strip unused implicit function arguments + update metadata
+			strip_implicit_args(F, implicit_arg_count);
+			
 			// always modified
-			return was_modified || is_kernel_func || is_vertex_func || is_fragment_func || is_tess_control_func || is_tess_eval_func;
+			(void)was_modified;
+			return true;
+		}
+		
+		void strip_implicit_args(Function& F, const uint32_t implicit_arg_count) {
+			assert(implicit_arg_count > 0u);
+			assert(F.arg_size() >= implicit_arg_count);
+			
+			std::vector<Type*> arg_types;
+			std::vector<Argument*> args;
+			const auto old_attrs = F.getAttributes();
+			std::vector<AttributeSet> old_args_attrs;
+			const uint32_t first_implicit_arg_idx = F.arg_size() - implicit_arg_count;
+			std::vector<bool> implicit_arg_usage;
+			uint32_t arg_idx = 0u;
+			bool needs_update = false;
+			for (auto arg_iter = F.arg_begin(); arg_iter != F.arg_end(); ++arg_iter, ++arg_idx) {
+				if (arg_idx >= first_implicit_arg_idx) {
+					const auto is_unused = (arg_iter->uses().empty() && arg_iter->users().empty());
+					//llvm::dbgs() << arg_iter->getName() << ": " << (is_unused ? "unused" : "used") << "\n";
+					if (is_unused) {
+						needs_update = true;
+						implicit_arg_usage.emplace_back(false);
+						continue;
+					} else {
+						implicit_arg_usage.emplace_back(true);
+					}
+				}
+				arg_types.push_back(arg_iter->getType());
+				args.push_back(&*arg_iter);
+				old_args_attrs.push_back(old_attrs.getParamAttrs(arg_idx));
+			}
+			
+			if (!needs_update) {
+				return;
+			}
+			
+			auto new_func_type = FunctionType::get(F.getReturnType(), arg_types, false);
+			F.mutateType(PointerType::get(new_func_type, 0));
+			F.mutateFunctionType(new_func_type);
+			
+			// changing function arguments is a bit more complicated
+			const auto arg_count = uint32_t(args.size());
+			std::vector<AttributeSet> arg_attrs(arg_count);
+			if (arg_count > 0) {
+				auto new_args = std::allocator<Argument>().allocate(arg_count);
+				auto new_args_ptr = new_args;
+				auto old_args_ptr = args.data();
+				for (uint32_t arg_idx = 0u; arg_idx < arg_count; ++arg_idx, ++old_args_ptr, ++new_args_ptr) {
+					new (new_args_ptr) Argument(arg_types[arg_idx], "", &F, arg_idx);
+					(*old_args_ptr)->replaceAllUsesWith(new_args_ptr);
+					new_args_ptr->takeName(*old_args_ptr);
+					arg_attrs[arg_idx] = old_args_attrs[arg_idx];
+				}
+				F.replace_arguments(new_args, arg_count);
+			} else {
+				F.clear_arguments();
+			}
+			
+			// replace/update attributes
+			auto new_attrs = AttributeList::get(*ctx, old_attrs.getFnAttrs(), old_attrs.getRetAttrs(), arg_attrs);
+			F.setAttributes(new_attrs);
+			
+			// update AIR metadata
+			StringRef func_type_md_name;
+			if (is_kernel_func) {
+				func_type_md_name = "air.kernel";
+			} else if (is_vertex_func || is_tess_eval_func) {
+				func_type_md_name = "air.vertex";
+			} else if (is_fragment_func) {
+				func_type_md_name = "air.fragment";
+			} else if (is_task_func) {
+				func_type_md_name = "air.object";
+			} else if (is_mesh_func) {
+				func_type_md_name = "air.mesh";
+			} else {
+				assert(false);
+			}
+			auto func_md = M->getNamedMetadata(func_type_md_name);
+			assert(func_md);
+			bool did_update_md = false;
+			for (const auto& func_op : func_md->operands()) {
+				assert(func_op->getNumOperands() > 0);
+				
+				const auto func_op_const = dyn_cast_or_null<llvm::ConstantAsMetadata>(func_op->getOperand(0));
+				if (!func_op_const) {
+					llvm::errs() << "invalid function metadata\n";
+					assert(false);
+					return;
+				}
+				const auto func = dyn_cast_or_null<llvm::Function>(func_op_const->getValue());
+				if (!func) {
+					llvm::errs() << "invalid function metadata\n";
+					assert(false);
+					return;
+				}
+				if (func != &F) {
+					continue;
+				}
+				
+				assert(func_op->getNumOperands() >= 3);
+				auto args_md = dyn_cast_or_null<llvm::MDNode>(func_op->getOperand(2));
+				if (!args_md) {
+					llvm::errs() << "invalid function arguments metadata\n";
+					assert(false);
+					return;
+				}
+				
+				// implicit args are always at the end
+				const auto first_implicit_arg_md_idx = args_md->getNumOperands() - implicit_arg_count;
+				SmallVector<llvm::Metadata*, 8> new_md_args;
+				auto args_md_iter = args_md->op_begin();
+				uint32_t implicit_arg_remap_idx = 0u;
+				for (uint32_t arg_md_idx = 0u; arg_md_idx < args_md->getNumOperands(); ++arg_md_idx, ++args_md_iter) {
+					if (arg_md_idx < first_implicit_arg_md_idx) {
+						new_md_args.emplace_back(*args_md_iter);
+						continue;
+					}
+					
+					const auto arg_md_node = dyn_cast_or_null<llvm::MDNode>(*args_md_iter);
+					const auto implicit_arg_idx = arg_md_idx - first_implicit_arg_md_idx;
+					const bool is_used = implicit_arg_usage[implicit_arg_idx];
+					
+					if (arg_md_idx == first_implicit_arg_md_idx) {
+						// retrieve the argument index -> this will be the base index
+						const auto arg_idx_cnst = dyn_cast_or_null<llvm::ConstantAsMetadata>(arg_md_node->getOperand(0));
+						const auto arg_idx_cnst_int = llvm::dyn_cast_or_null<llvm::ConstantInt>(arg_idx_cnst->getValue());
+						implicit_arg_remap_idx = arg_idx_cnst_int->getZExtValue();
+					}
+					
+					if (is_used) {
+						SmallVector<llvm::Metadata*, 8> implicit_arg_fields;
+						implicit_arg_fields.push_back(llvm::ConstantAsMetadata::get(builder->getInt32(implicit_arg_remap_idx++)));
+						for (uint32_t copy_idx = 1u, idx_count = arg_md_node->getNumOperands(); copy_idx < idx_count; ++copy_idx) {
+							implicit_arg_fields.push_back(arg_md_node->getOperand(copy_idx));
+						}
+						new_md_args.emplace_back(llvm::MDNode::get(*ctx, implicit_arg_fields));
+					}
+				}
+				
+				auto new_args_md = llvm::MDNode::get(*ctx, new_md_args);
+				func_op->replaceOperandWith(2, new_args_md);
+				
+				did_update_md = true;
+				break;
+			}
+			if (!did_update_md) {
+				llvm::errs() << "failed to update function metadata\n";
+				assert(false);
+				return;
+			}
 		}
 		
 		// InstVisitor overrides...
@@ -433,32 +717,12 @@ namespace {
 			InstVisitor<MetalFinal>::visit(I);
 		}
 		
-		static std::optional<std::string> get_suffix_for_type(llvm::Type* type, const bool is_signed) {
-			std::string ret = ".";
-			auto elem_type = type;
-			if (auto vec_type = dyn_cast_or_null<FixedVectorType>(type); vec_type) {
-				elem_type = vec_type->getElementType();
-				ret += "v" + std::to_string(vec_type->getNumElements());
+		void visitBinaryOperator(BinaryOperator& I) {
+			// remove "nuw" and "nsw" from binary ops (not used by Metal)
+			if (isa<OverflowingBinaryOperator>(I)) {
+				I.setHasNoUnsignedWrap(false);
+				I.setHasNoSignedWrap(false);
 			}
-			switch (elem_type->getTypeID()) {
-				case llvm::Type::IntegerTyID:
-					ret += (is_signed ? "s." : "u.");
-					ret += "i" + std::to_string(cast<IntegerType>(type)->getBitWidth());
-					break;
-				// NOTE: we generally omit the ".f" here, because it's usually not wanted
-				case llvm::Type::HalfTyID:
-					ret += "f16";
-					break;
-				case llvm::Type::FloatTyID:
-					ret += "f32";
-					break;
-				case llvm::Type::DoubleTyID:
-					ret += "f64";
-					break;
-				default:
-					return {};
-			}
-			return ret;
 		}
 		
 		void visitIntrinsicInst(IntrinsicInst &I) {
@@ -475,17 +739,25 @@ namespace {
 				case Intrinsic::lifetime_start:
 				case Intrinsic::lifetime_end:
 				case Intrinsic::assume:
-					I.eraseFromParent();
-					was_modified = true;
-					break;
 				case Intrinsic::memcpy:
 				case Intrinsic::memset:
-				case Intrinsic::memmove:
+				case Intrinsic::fshl:
+				case Intrinsic::fshr:
 				case Intrinsic::dbg_addr:
 				case Intrinsic::dbg_label:
 				case Intrinsic::dbg_value:
 				case Intrinsic::dbg_declare:
 					// pass
+					break;
+					
+				case Intrinsic::uadd_sat:
+				case Intrinsic::usub_sat:
+				case Intrinsic::ushl_sat:
+				case Intrinsic::sadd_sat:
+				case Intrinsic::ssub_sat:
+				case Intrinsic::sshl_sat:
+					// NOTE: I'm not 100% sure these are all allowed, but since some of them are allowed,
+					//       I'm assuming this whole family of intrinsics is allowed
 					break;
 					
 				// single arguments cases
@@ -514,7 +786,7 @@ namespace {
 							return;
 					}
 					
-					auto suffix = get_suffix_for_type(op_val->getType(), is_signed);
+					auto suffix = metal::get_metal_suffix_for_type(op_val->getType(), is_signed);
 					if (!suffix) {
 						ctx->emitError(&I, "unexpected type in intrinsic:\n" + print_instr(I));
 						return;
@@ -577,7 +849,7 @@ namespace {
 							return;
 					}
 					
-					auto suffix = get_suffix_for_type(op_lhs->getType(), is_signed);
+					auto suffix = metal::get_metal_suffix_for_type(op_lhs->getType(), is_signed);
 					if (!suffix) {
 						ctx->emitError(&I, "unexpected type in intrinsic:\n" + print_instr(I));
 						return;
@@ -605,7 +877,7 @@ namespace {
 					auto op_2 = I.getOperand(2);
 					
 					// create AIR function name
-					auto suffix = get_suffix_for_type(op_0->getType(), true);
+					auto suffix = metal::get_metal_suffix_for_type(op_0->getType(), true);
 					if (!suffix) {
 						ctx->emitError(&I, "unexpected type in intrinsic:\n" + print_instr(I));
 						return;
@@ -626,57 +898,6 @@ namespace {
 					break;
 				}
 					
-#if 0 // TODO: implement these
-				case Intrinsic::vector_reduce_fadd: {
-					auto init = I.getOperand(0);
-					auto vec = I.getOperand(1);
-					const auto vec_type = dyn_cast_or_null<FixedVectorType>(vec->getType());
-					if (!vec_type) {
-						ctx->emitError(&I, "expected vector type in operand #1:\n" + print_instr(I));
-						return;
-					}
-					const auto elem_type = vec_type->getElementType();
-					if (!elem_type->isFloatTy()) {
-						ctx->emitError(&I, "expected element type of vector to be f32:\n" + print_instr(I));
-					}
-					
-					const auto width = vec_type->getNumElements();
-					if (width != 1 && width != 2 && width != 3 && width != 4 && width != 8 && width != 16) {
-						ctx->emitError(&I, "unexpected vector width " + std::to_string(width) + ":\n" + print_instr(I));
-						return;
-					}
-					
-					SmallVector<llvm::Type*, 2> func_arg_types;
-					SmallVector<llvm::Value*, 2> func_args;
-					func_arg_types.push_back(vec_type);
-					func_arg_types.push_back(vec_type);
-					func_args.push_back(vec);
-					func_args.push_back(ConstantVector::getSplat(ElementCount::getFixed(width), ConstantFP::get(elem_type, 1.0)));
-					
-					// -> build get func name
-					const std::string get_func_name = "air.dot.v" + std::to_string(width) + "f32";
-					
-					AttrBuilder attr_builder;
-					attr_builder.addAttribute(llvm::Attribute::NoUnwind);
-					attr_builder.addAttribute(llvm::Attribute::ReadOnly);
-					auto func_attrs = AttributeList::get(*ctx, ~0, attr_builder);
-					
-					// create the air call
-					const auto func_type = llvm::FunctionType::get(elem_type, func_arg_types, false);
-					builder->SetInsertPoint(&I);
-					llvm::CallInst* get_call = builder->CreateCall(M->getOrInsertFunction(get_func_name, func_type, func_attrs), func_args);
-					get_call->setDoesNotThrow();
-					get_call->setOnlyReadsMemory();
-					get_call->setDebugLoc(I.getDebugLoc()); // keep debug loc
-					
-					// TODO: handle "init" if not 0
-					
-					I.replaceAllUsesWith(get_call);
-					I.eraseFromParent();
-					was_modified = true;
-					break;
-				}
-#endif
 				case Intrinsic::vector_reduce_add:
 				case Intrinsic::vector_reduce_and:
 				case Intrinsic::vector_reduce_fadd:
@@ -690,10 +911,16 @@ namespace {
 				case Intrinsic::vector_reduce_umax:
 				case Intrinsic::vector_reduce_umin:
 				case Intrinsic::vector_reduce_xor:
-				default: {
+					ctx->emitError(&I, "unknown/unhandled vector reduce intrinsic (should have been expanded):\n" + print_instr(I));
+					break;
+					
+				case Intrinsic::memmove:
+					ctx->emitError(&I, "unknown/unhandled memmove intrinsic (should have been expanded):\n" + print_instr(I));
+					break;
+					
+				default:
 					ctx->emitError(&I, "unknown/unhandled intrinsic:\n" + print_instr(I));
 					break;
-				}
 			}
 		}
 		
@@ -704,7 +931,9 @@ namespace {
 				!is_vertex_func &&
 				!is_fragment_func &&
 				!is_tess_control_func &&
-				!is_tess_eval_func) {
+				!is_tess_eval_func &&
+				!is_task_func &&
+				!is_mesh_func) {
 				return;
 			}
 			
@@ -795,13 +1024,7 @@ namespace {
 				// if both the SIMD width and the local size are fixed, we also have a fixed #sub-groups,
 				// because the local size extent must be a multiple of the SIMD width
 				if (state.kernel_simd_width > 0 && state.has_fixed_local_size()) {
-					uint32_t local_size_extent = state.kernel_local_size[0];
-					if (state.kernel_dim > 1) {
-						local_size_extent *= state.kernel_local_size[1];
-					}
-					if (state.kernel_dim > 2) {
-						local_size_extent *= state.kernel_local_size[2];
-					}
+					uint32_t local_size_extent = state.fixed_local_size_extent();
 					assert((local_size_extent % state.kernel_simd_width) == 0u);
 					id = ConstantInt::get(Type::getInt32Ty(*ctx), local_size_extent / state.kernel_simd_width);
 				} else {
@@ -884,9 +1107,19 @@ namespace {
 				I.eraseFromParent();
 				return;
 			}
+			else if(func_name == "floor.get_front_facing.bool") {
+				if(state.front_facing == nullptr) {
+					DBG(printf("failed to get front_facing arg, probably not in a fragment function?\n"); fflush(stdout);)
+					return;
+				}
+				
+				I.replaceAllUsesWith(state.front_facing);
+				I.eraseFromParent();
+				return;
+			}
 			else if(func_name == "floor.builtin.get_printf_buffer") {
 				if(state.soft_printf == nullptr) {
-					DBG(printf("failed to get printf_buffer arg, probably not in a kernel/vertex/fragment/tessellation function?\n"); fflush(stdout);)
+					DBG(printf("failed to get printf_buffer arg, probably not in a kernel/vertex/fragment/tessellation/task/mesh function?\n"); fflush(stdout);)
 					return;
 				}
 				
@@ -925,7 +1158,7 @@ namespace {
 					discard_func->addFnAttr(Attribute::NoReturn);
 					auto discard_call = CallInst::Create(func_type, discard_func, "", &I);
 					discard_call->setDebugLoc(I.getDebugLoc());
-				} else if (is_kernel_func || is_tess_control_func || func->getReturnType()->isVoidTy()) {
+				} else if (is_kernel_func || is_tess_control_func || is_task_func || is_mesh_func || func->getReturnType()->isVoidTy()) {
 					assert(func->getReturnType()->isVoidTy());
 					ReturnInst::Create(*ctx, I.getParent());
 				} else {
@@ -956,14 +1189,20 @@ namespace {
 			
 			// replace call with vector load / elem extraction from the appropriate vector
 			Value* repl = nullptr;
+			uint32_t dim_idx = 0u;
 			if (get_from_vector) {
-				const auto dim_idx = get_dim_idx(I.getOperand(0), &I);
+				dim_idx = get_dim_idx(I.getOperand(0), &I);
 				repl = builder->CreateExtractElement(id, dim_idx);
 			} else {
 				repl = id;
 			}
 			I.replaceAllUsesWith(repl);
 			I.eraseFromParent();
+			
+			// add metadata
+			if (func_name == "floor.get_local_id.i32" && state.has_fixed_local_size()) {
+				libfloor_utils::add_range_info(*ctx, *(llvm::Instruction*)repl, 0u, state.kernel_local_size[dim_idx]);
+			}
 		}
 		
 		// performs some simple air.* call checks (e.g. if the call is valid in the current function type)
@@ -1106,173 +1345,6 @@ namespace {
 			scalar_or_vector_conversion<Instruction::SIToFP>(I);
 		}
 		
-		// metal can only handle i32 indices
-		void visitExtractElement(ExtractElementInst& EEI) {
-			const auto idx_op = EEI.getIndexOperand();
-			const auto idx_type = idx_op->getType();
-			if(!idx_type->isIntegerTy(32)) {
-				if(const auto const_idx_op = dyn_cast_or_null<ConstantInt>(idx_op)) {
-					EEI.setOperand(1 /* idx op */, builder->getInt32((int32_t)const_idx_op->getValue().getZExtValue()));
-				}
-				else {
-					builder->SetInsertPoint(&EEI);
-					const auto i32_index = builder->CreateIntCast(idx_op, builder->getInt32Ty(), false);
-					EEI.setOperand(1 /* idx op */, i32_index);
-				}
-				was_modified = true;
-			}
-		}
-		
-		// metal can only handle i32 indices
-		void visitInsertElement(InsertElementInst& IEI) {
-			const auto idx_op = IEI.llvm::User::getOperand(2);
-			const auto idx_type = idx_op->getType();
-			if(!idx_type->isIntegerTy(32)) {
-				if(const auto const_idx_op = dyn_cast_or_null<ConstantInt>(idx_op)) {
-					IEI.setOperand(2 /* idx op */, builder->getInt32((int32_t)const_idx_op->getValue().getZExtValue()));
-				}
-				else {
-					builder->SetInsertPoint(&IEI);
-					const auto i32_index = builder->CreateIntCast(idx_op, builder->getInt32Ty(), false);
-					IEI.setOperand(2 /* idx op */, i32_index);
-				}
-				was_modified = true;
-			}
-		}
-		
-		void visitAllocaInst(AllocaInst &AI) {
-			if(!enable_intel_workarounds) return;
-			DBG(errs() << "alloca: " << AI << ", " << *AI.getType() << "\n";)
-			
-			BasicAAResult BAR(createLegacyPMBasicAAResult(*this, *func));
-			AAResults AA(createLegacyPMAAResults(*this, *func, BAR));
-			
-			// recursively find all users of this alloca + store all select and phi instructions that select/choose based on the alloca pointer
-			std::vector<Instruction*> users;
-			std::unordered_set<Instruction*> visited;
-			// -> collect users
-			std::function<void(Instruction&)> collect_users_cb = [&collect_users_cb, &AI, &AA, &visited, &users](Instruction& instr) {
-				const auto has_visited = visited.insert(&instr);
-				if (!has_visited.second) {
-					return;
-				}
-				
-				// TODO: ideally, we want to track all GEPs and bitcasts to/of the alloca and only add select/phi instructions that
-				//       either use these or directly use the alloca (and not all pointers) - for now, AA will do
-				if (SelectInst* SI = dyn_cast<SelectInst>(&instr)) {
-					DBG(errs() << ">> select: " << *SI << "\n";)
-					DBG(errs() << "cond: " << *SI->getCondition() << "\n";)
-					DBG(errs() << "ops: " << *SI->getTrueValue() << ", " << *SI->getFalseValue() << "\n";)
-					
-					// skip immediately if not a pointer type
-					if (SI->getTrueValue()->getType()->isPointerTy() /* false val has the same type */) {
-						// check if either true or false alias with our alloca
-						const auto aa_res_true = AA.alias(SI->getTrueValue(), &AI);
-						const auto aa_res_false = AA.alias(SI->getFalseValue(), &AI);
-						DBG(errs() << "aa: " << aa_res_true << ", " << aa_res_false << "\n";)
-						if (aa_res_true != AliasResult::NoAlias ||
-							aa_res_false != AliasResult::NoAlias) {
-							// if so, add this select
-							users.push_back(SI);
-						}
-					}
-				} else if (PHINode* PHI = dyn_cast<PHINode>(&instr)) {
-					DBG(errs() << ">> phi: " << *PHI << "\n";)
-					DBG(errs() << "type: " << *PHI->getType() << "\n";)
-					
-					// skip immediately if not a pointer type
-					if (PHI->getType()->isPointerTy()) {
-						// check if it aliases with our alloca
-						const auto aa_res = AA.alias(PHI, &AI);
-						DBG(errs() << "aa: " << aa_res << "\n";)
-						if (aa_res != AliasResult::NoAlias) {
-							// if so, add this phi node
-							users.push_back(PHI);
-						}
-					}
-				}
-				
-				libfloor_utils::for_all_instruction_users(instr, collect_users_cb);
-			};
-			libfloor_utils::for_all_instruction_users(AI, collect_users_cb);
-			
-			DBG({
-				errs() << "####### users ##\n";
-				for(const auto& user : users) {
-					errs() << "user: " << *user << "\n";
-				}
-				errs() << "\n";
-			})
-			
-			// select replacement strategy:
-			// * create a tmp alloca that will later hold the selected data
-			// * replace the select with two branches (true/false)
-			// * depending on the select condition, branch to either true/false branch
-			// * inside these branches, store the corresponding true/false value into our tmp alloca, then branch back to after the select
-			// * remove the select
-			const auto select_replace = [&](SelectInst* SI) {
-				builder->SetInsertPoint(alloca_insert);
-				auto tmp_alloca = builder->CreateAlloca(AI.getType()->getPointerElementType(), nullptr, "sel_tmp");
-				tmp_alloca->setAlignment(AI.getAlign());
-				
-				// create our branch condition and true/false blocks that will replace the select
-				auto bb_true = BasicBlock::Create(*ctx, "sel.true", func);
-				auto bb_false = BasicBlock::Create(*ctx, "sel.false", func);
-				builder->SetInsertPoint(SI);
-				builder->CreateCondBr(SI->getCondition(), bb_true, bb_false);
-				
-				// split block before the select instruction so that we can branch back to it later
-				auto bb_start = SI->getParent();
-				auto bb_end = SI->getParent()->splitBasicBlock(SI);
-				// remove automatically inserted branch instruction from parent, since we already have a branch instruction
-				bb_start->getTerminator()->eraseFromParent();
-				
-				// create true/false branches that will copy the true/false data to our tmp alloca accordingly
-				// -> true branch
-				builder->SetInsertPoint(bb_true);
-				builder->CreateStore(builder->CreateLoad(SI->getTrueValue()->getType()->getPointerElementType(), SI->getTrueValue()), tmp_alloca);
-				builder->CreateBr(bb_end);
-				
-				// -> false branch
-				builder->SetInsertPoint(bb_false);
-				builder->CreateStore(builder->CreateLoad(SI->getFalseValue()->getType()->getPointerElementType(), SI->getFalseValue()), tmp_alloca);
-				builder->CreateBr(bb_end);
-				
-				// cleanup, replace select instruction with our new alloca
-				SI->replaceAllUsesWith(tmp_alloca);
-				SI->eraseFromParent();
-			};
-			
-			// phi replacement strategy:
-			// * create a tmp alloca (pointer), this will be used to store all phi pointers
-			// * iterate over all incoming values/pointers, then create a store of their pointer to the tmp pointer in their originating block
-			// * create a load from the tmp alloca and replace all uses of the phi node with it
-			// NOTE: loads and stores are volatile, so that no optimization can do any re-phi-ification(tm) later on
-			const auto phi_replace = [&](PHINode* PHI) {
-				auto phi_tmp_alloca = new AllocaInst(PHI->getType(), 0, nullptr, PHI->getName() + ".tmp", alloca_insert);
-				
-				for(uint32_t i = 0; i < PHI->getNumIncomingValues(); ++i) {
-					auto origin = PHI->getIncomingBlock(i);
-					new StoreInst(PHI->getIncomingValue(i), phi_tmp_alloca, true, origin->getTerminator());
-				}
-				
-				auto load_repl = new LoadInst(PHI->getType(), phi_tmp_alloca, PHI->getName() + ".repl", true,
-											  PHI->getParent()->getFirstNonPHI());
-				PHI->replaceAllUsesWith(load_repl);
-				PHI->eraseFromParent();
-			};
-			
-			for(const auto& user : users) {
-				if(SelectInst* SI = dyn_cast<SelectInst>(user)) {
-					select_replace(SI);
-				}
-				else if(PHINode* PHI = dyn_cast<PHINode>(user)) {
-					phi_replace(PHI);
-				}
-			}
-			was_modified = !users.empty();
-		}
-		
 	};
 	
 	// MetalFinalModuleCleanup:
@@ -1334,7 +1406,7 @@ namespace {
 					continue;
 				}
 				
-				// we already emit the correct texture opaque texture type name -> find the corresponding Metal struct name
+				// we already emit the correct opaque texture type name -> find the corresponding Metal struct name
 				static const std::unordered_map<std::string, std::string> metal_name_lut {
 					{ "struct._texture_1d_t", "struct.metal::texture1d" },
 					{ "struct._texture_1d_array_t", "struct.metal::texture1d_array" },
@@ -1369,12 +1441,13 @@ namespace {
 			M = &Mod;
 			ctx = &M->getContext();
 			
-			bool module_modified = run_metal_name_replacement();
+			// revert data layout back to the one used by Metal
+			Mod.setDataLayout("e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32");
 			
-			// * strip floor_* calling convention from all functions and their users (replace it with C CC)
-			// * kill all functions named floor.*
-			// * strip debug info from declarations
+			run_metal_name_replacement();
+			
 			for (auto func_iter = Mod.begin(); func_iter != Mod.end();) {
+				// kill all functions named floor.*
 				auto& func = *func_iter;
 				if (func.getName().startswith("floor.")) {
 					if (func.getNumUses() != 0) {
@@ -1382,10 +1455,10 @@ namespace {
 					}
 					++func_iter; // inc before erase
 					func.eraseFromParent();
-					module_modified = true;
 					continue;
 				}
 				
+				// strip floor_* calling convention from all functions and their users (replace it with C CC)
 				if (func.getCallingConv() != CallingConv::C) {
 					func.setCallingConv(CallingConv::C);
 					for (auto user : func.users()) {
@@ -1393,35 +1466,51 @@ namespace {
 							CB->setCallingConv(CallingConv::C);
 						}
 					}
-					module_modified = true;
 				}
 				
+				// remove dso_local from all functions
+				func.setDSOLocal(false);
+				
+				// strip debug info from declarations
 				if (func.isDeclaration()) {
 					if (DISubprogram* sub_prog_dbg = func.getSubprogram(); sub_prog_dbg) {
 						func.setSubprogram(nullptr);
-						module_modified = true;
 					}
+				}
+				
+				// remove floor and frontend specific metadata
+				if (func.hasMetadata("kernel_dim")) {
+					func.eraseMetadata(ctx->getMDKindID("kernel_dim"));
+				}
+				if (func.hasMetadata("reqd_work_group_size")) {
+					func.eraseMetadata(ctx->getMDKindID("reqd_work_group_size"));
 				}
 				
 				++func_iter;
 			}
-			return module_modified;
+			return true;
 		}
 		
 	};
 	
 }
 
-char MetalFirst::ID = 0;
-FunctionPass *llvm::createMetalFirstPass(const bool enable_intel_workarounds) {
-	return new MetalFirst(enable_intel_workarounds);
+char MetalMemopLowering::ID = 0;
+FunctionPass *llvm::createMetalMemopLoweringPass() {
+	return new MetalMemopLowering();
 }
-INITIALIZE_PASS_BEGIN(MetalFirst, "MetalFirst", "MetalFirst Pass", false, false)
-INITIALIZE_PASS_END(MetalFirst, "MetalFirst", "MetalFirst Pass", false, false)
+INITIALIZE_PASS_BEGIN(MetalMemopLowering, "MetalMemopLowering", "MetalMemopLowering Pass", false, false)
+INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(GlobalsAAWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
+INITIALIZE_PASS_DEPENDENCY(CallGraphWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
+INITIALIZE_PASS_END(MetalMemopLowering, "MetalMemopLowering", "MetalMemopLowering Pass", false, false)
 
 char MetalFinal::ID = 0;
-FunctionPass *llvm::createMetalFinalPass(const bool enable_intel_workarounds) {
-	return new MetalFinal(enable_intel_workarounds);
+FunctionPass *llvm::createMetalFinalPass() {
+	return new MetalFinal();
 }
 INITIALIZE_PASS_BEGIN(MetalFinal, "MetalFinal", "MetalFinal Pass", false, false)
 INITIALIZE_PASS_END(MetalFinal, "MetalFinal", "MetalFinal Pass", false, false)

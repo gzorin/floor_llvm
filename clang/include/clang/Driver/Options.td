@@ -5943,6 +5943,12 @@ def floor_function_info : Joined<["-"], "floor-function-info=">,
   HelpText<"floor function info output file">;
 def floor_image_capabilities : Joined<["-"], "floor-image-capabilities=">,
   HelpText<"image read and write capabilities">;
+def floor_error_on_alloca : Flag<["-"], "floor-error-on-alloca">,
+  HelpText<"emit an error when there still is an alloca at the end of all optimizations">;
+def floor_error_on_ptr_type_alloca : Flag<["-"], "floor-error-on-ptr-type-alloca">,
+  HelpText<"emit an error when there still is an alloca with a pointer type at the end of all optimizations">;
+def floor_error_on_ptr_int_casts : Flag<["-"], "floor-error-on-ptr-int-casts">,
+  HelpText<"emit an error when there is any inttoptr or ptrtoint instruction">;
 
 //===----------------------------------------------------------------------===//
 // OpenCL Options
@@ -5961,6 +5967,8 @@ def cl_verify_spir : Flag<["-"], "cl-verify-spir">,
   HelpText<"OpenCL/SPIR only. Runs the Khronos SPIR verifier on the final LLVM IR.">;
 def cl_spir_intel_workarounds : Flag<["-"], "cl-spir-intel-workarounds">,
   HelpText<"Enable Intel SPIR specific fixes and workarounds">;
+def spirv_version_EQ : Joined<["-"], "spirv-version=">,
+  HelpText<"Sets the OpenCL SPIR-V version number">;
 
 //===----------------------------------------------------------------------===//
 // CUDA Options
@@ -5983,10 +5991,10 @@ def fno_cuda_host_device_constexpr : Flag<["-"], "fno-cuda-host-device-constexpr
 // AIR/Metal Options
 //===----------------------------------------------------------------------===//
 
-def metal_intel_workarounds : Flag<["-"], "metal-intel-workarounds">,
-  HelpText<"Enable Intel GPU specific fixes and workarounds">;
 def metal_soft_printf : Flag<["-"], "metal-soft-printf">,
   HelpText<"Enables support of software printf emulation">;
+def metal_restrictive_vectorization : Flag<["-"], "metal-restrictive-vectorization">,
+  HelpText<"Restrict scalar->vector transformations">;
 
 //===----------------------------------------------------------------------===//
 // Vulkan Options
@@ -6000,8 +6008,16 @@ def vulkan_llvm_pre_structurization_pass : Flag<["-"], "vulkan-llvm-pre-structur
   HelpText<"Enable LLVM CFG structurization pass prior to actual structurization">;
 def vulkan_soft_printf : Flag<["-"], "vulkan-soft-printf">,
   HelpText<"Enables support of software printf emulation">;
-def vulkan_descriptor_buffer_support : Flag<["-"], "vulkan-descriptor-buffer-support">,
-  HelpText<"Enable Vulkan descriptor buffer specific code generation">;
+def vulkan_subgroup_uniform_cf : Flag<["-"], "vulkan-subgroup-uniform-cf">,
+  HelpText<"Enables support of SPV_KHR_subgroup_uniform_control_flow">;
+def vulkan_low_descriptor_set_count : Flag<["-"], "vulkan-low-descriptor-set-count">,
+  HelpText<"Enables low descriptor set count handling">;
+def vulkan_ptr_workarounds : Flag<["-"], "vulkan-ptr-workarounds">,
+  HelpText<"Enables Vulkan specific pointer workarounds">;
+def vulkan_untyped_pointers : Flag<["-"], "vulkan-untyped-pointers">,
+  HelpText<"Enables support of SPV_KHR_untyped_pointers">;
+def vulkan_mesh_shading : Flag<["-"], "vulkan-mesh-shading">,
+  HelpText<"Enables support of SPV_EXT_mesh_shader">;
 
 //===----------------------------------------------------------------------===//
 // Graphics Options

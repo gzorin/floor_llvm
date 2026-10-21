@@ -180,6 +180,8 @@ enum OpenCLTypeKind : uint8_t {
   OCLTK_ReserveID,
   OCLTK_Sampler,
   OCLTK_PatchControlPoint,
+  OCLTK_Mesh,
+  OCLTK_MeshGridProperties,
 };
 
 /// Exposes information about the current target.
@@ -1503,7 +1505,15 @@ public:
       default:
         return CCCR_Warning;
       case CC_C:
+      case CC_FloorFunction:
+      case CC_FloorIOFunction:
       case CC_FloorKernel:
+      case CC_FloorVertex:
+      case CC_FloorFragment:
+      case CC_FloorTessControl:
+      case CC_FloorTessEval:
+      case CC_FloorTask:
+      case CC_FloorMesh:
         return CCCR_OK;
     }
   }

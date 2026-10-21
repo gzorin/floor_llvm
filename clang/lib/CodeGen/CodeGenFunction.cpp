@@ -211,12 +211,12 @@ CodeGenFunction::MakeNaturalAlignPointeeAddrLValue(llvm::Value *V, QualType T) {
 }
 
 
-llvm::Type *CodeGenFunction::ConvertTypeForMem(QualType T) {
-  return CGM.getTypes().ConvertTypeForMem(T);
+llvm::Type *CodeGenFunction::ConvertTypeForMem(QualType T, type_conversion_opts_t opts) {
+  return CGM.getTypes().ConvertTypeForMem(T, false, false, opts);
 }
 
-llvm::Type *CodeGenFunction::ConvertType(QualType T) {
-  return CGM.getTypes().ConvertType(T);
+llvm::Type *CodeGenFunction::ConvertType(QualType T, type_conversion_opts_t opts) {
+  return CGM.getTypes().ConvertType(T, opts);
 }
 
 TypeEvaluationKind CodeGenFunction::getEvaluationKind(QualType type) {
@@ -611,7 +611,9 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
       !FD->hasAttr<GraphicsVertexShaderAttr>() &&
 	  !FD->hasAttr<GraphicsFragmentShaderAttr>() &&
 	  !FD->hasAttr<GraphicsTessellationControlShaderAttr>() &&
-	  !FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
+	  !FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>() &&
+	  !FD->hasAttr<GraphicsTaskShaderAttr>() &&
+	  !FD->hasAttr<GraphicsMeshShaderAttr>()) {
     return;
   }
 
@@ -622,24 +624,70 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
 
   // initial air info
   if (CGM.getLangOpts().Metal) {
-	  // only do this once (air.version is set once further down below)
+	  // only do this once
 	  if (!CGM.getModule().getNamedMetadata("air.version")) {
-		  // AIR limits
-		  llvm::NamedMDNode *ModuleFlags = CGM.getModule().getOrInsertModuleFlagsMetadata();
-		  static const std::vector<std::pair<std::string, int>> limits {
-			  { "air.max_device_buffers", 31 },
-			  { "air.max_constant_buffers", 31 },
-			  { "air.max_threadgroup_buffers", 31 },
-			  { "air.max_textures", 128 },
-			  { "air.max_read_write_textures", 8 },
-			  { "air.max_samplers", 16 },
-		  };
-		  for (const auto& limit : limits) {
-			  SmallVector <llvm::Metadata*, 3> air_limit;
-			  air_limit.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(7)));
-			  air_limit.push_back(llvm::MDString::get(Context, limit.first));
-			  air_limit.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(limit.second)));
-			  ModuleFlags->addOperand(llvm::MDNode::get(Context, air_limit));
+		  // figure out which metal versions we should emit
+		  llvm::NamedMDNode *AIRVersion = CGM.getModule().getOrInsertNamedMetadata("air.version");
+		  std::array<uint32_t, 3> metal_version;
+		  std::array<uint32_t, 3> metal_language_version;
+		  const auto full_version = CGM.getLangOpts().MetalVersion;
+		  assert(full_version >= 320);
+		  metal_language_version = {{ full_version / 100u, (full_version % 100u) / 10u, full_version % 10u }};
+		  if (full_version >= 410) {
+			  // Metal 4.1 uses an "air.version" of 2.9.0
+			  metal_version = {{ 2u, 9u, 0u }};
+		  } else if (full_version >= 400) {
+			  // Metal 4.0 uses an "air.version" of 2.8.0
+			  metal_version = {{ 2u, 8u, 0u }};
+		  } else if (full_version >= 320) {
+			  // Metal 3.2 uses an "air.version" of 2.7.0
+			  metal_version = {{ 2u, 7u, 0u }};
+		  }
+		  
+		  SmallVector <llvm::Metadata*, 3> air_version;
+		  air_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_version[0])));
+		  air_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_version[1])));
+		  air_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_version[2])));
+		  AIRVersion->addOperand(llvm::MDNode::get(Context, air_version));
+		  
+		  llvm::NamedMDNode *AIRLangVersion = CGM.getModule().getOrInsertNamedMetadata("air.language_version");
+		  SmallVector <llvm::Metadata*, 4> air_lang_version;
+		  air_lang_version.push_back(llvm::MDString::get(Context, "Metal"));
+		  air_lang_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_language_version[0])));
+		  air_lang_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_language_version[1])));
+		  air_lang_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_language_version[2])));
+		  AIRLangVersion->addOperand(llvm::MDNode::get(Context, air_lang_version));
+		  
+		  // insert compile options
+		  llvm::NamedMDNode *AIRCompOpts = CGM.getModule().getOrInsertNamedMetadata("air.compile_options");
+		  AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.denorms_disable")));
+		  AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.fast_math_enable")));
+		  AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.framebuffer_fetch_enable")));
+		  
+		  // emit debug info
+		  if (CGM.getCodeGenOpts().getDebugInfo() != codegenoptions::NoDebugInfo) {
+			  // emit "air.source_file_name"
+			  llvm::NamedMDNode *AIRSourceFile = CGM.getModule().getOrInsertNamedMetadata("air.source_file_name");
+			  SmallVector <llvm::Metadata*, 1> air_source_file;
+			  std::string src_file_name_str = CGM.getModule().getSourceFileName();
+			  SmallVector<char> src_file_name(src_file_name_str.size());
+			  src_file_name.assign(src_file_name_str.begin(), src_file_name_str.end());
+			  CGM.getContext().getSourceManager().getFileManager().makeAbsolutePath(src_file_name);
+			  src_file_name_str.resize(src_file_name.size(), '\0');
+			  src_file_name_str.assign(src_file_name.begin(), src_file_name.end());
+			  air_source_file.push_back(llvm::MDString::get(Context, src_file_name_str.data()));
+			  AIRSourceFile->addOperand(llvm::MDNode::get(Context, air_source_file));
+			  
+			  // emit "llvm_utils.workingdir"
+			  std::string_view src_file_name_view(src_file_name.data(), src_file_name.size());
+			  const auto last_slash_pos = src_file_name_view.rfind('/');
+			  if (last_slash_pos != std::string::npos) {
+				  llvm::NamedMDNode *workingdir_md = CGM.getModule().getOrInsertNamedMetadata("llvm_utils.workingdir");
+				  SmallVector <llvm::Metadata*, 1> workingdir;
+				  const std::string working_dir_str(src_file_name.data(), last_slash_pos);
+				  workingdir.push_back(llvm::MDString::get(Context, working_dir_str));
+				  workingdir_md->addOperand(llvm::MDNode::get(Context, workingdir));
+			  }
 		  }
 	  }
   }
@@ -692,18 +740,6 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
                     llvm::MDNode::get(Context, AttrMDArgs));
   }
 
-  if (const ComputeKernelDimAttr *A = FD->getAttr<ComputeKernelDimAttr>()) {
-    llvm::Metadata *AttrMDArgs[] = {
-        llvm::ConstantAsMetadata::get(Builder.getInt32(A->getDim()))};
-    Fn->setMetadata("kernel_dim", llvm::MDNode::get(Context, AttrMDArgs));
-  }
-
-  if (const ComputeKernelSIMDWidthAttr *A = FD->getAttr<ComputeKernelSIMDWidthAttr>()) {
-    llvm::Metadata *AttrMDArgs[] = {
-        llvm::ConstantAsMetadata::get(Builder.getInt32(A->getWidth()))};
-    Fn->setMetadata("kernel_simd_width", llvm::MDNode::get(Context, AttrMDArgs));
-  }
-
   if (FD->getAttr<GraphicsEarlyFragmentTestsAttr>()) {
     Fn->setMetadata("early_fragment_tests", llvm::MDNode::get(Context,
         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::IntegerType::get(Context, 32), 1))));
@@ -715,12 +751,28 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
     MainMetadataNode = CGM.getModule().getOrInsertNamedMetadata("opencl.kernels");
   } else {
     // NOTE: tess control acts as a kernel, tess eval as a vertex shader
-    MainMetadataNode = CGM.getModule().getOrInsertNamedMetadata(
-      (FD->hasAttr<GraphicsVertexShaderAttr>() ||
-       FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>() ? "air.vertex" :
-       (FD->hasAttr<GraphicsFragmentShaderAttr>() ? "air.fragment" : "air.kernel")));
+    const char* node_name = nullptr;
+    if (FD->hasAttr<GraphicsVertexShaderAttr>() ||
+        FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
+      node_name = "air.vertex";
+    } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
+      node_name = "air.fragment";
+    } else if (FD->hasAttr<GraphicsTaskShaderAttr>()) {
+      node_name = "air.object";
+    } else if (FD->hasAttr<GraphicsMeshShaderAttr>()) {
+      node_name = "air.mesh";
+    } else {
+      node_name = "air.kernel";
+    }
+    MainMetadataNode = CGM.getModule().getOrInsertNamedMetadata(node_name);
   }
   MainMetadataNode->addOperand(kernelMDNode);
+
+  // metadata post main metadata node
+  if (CGM.getLangOpts().Metal) {
+    // insert empty sampler state, this will be filled in by MetalImage later on
+    CGM.getModule().getOrInsertNamedMetadata("air.sampler_states");
+  }
 
   // add soft-printf info
   if (CGM.getCodeGenOpts().MetalSoftPrintf > 0 || CGM.getCodeGenOpts().VulkanSoftPrintf > 0) {
@@ -735,85 +787,34 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
     CGM.getModule().getOrInsertNamedMetadata("floor.barycentric_coord");
   }
 
+  // add Vulkan subgroup uniform control flow info
+  if (CGM.getCodeGenOpts().VulkanSubgroupUniformCF) {
+    CGM.getModule().getOrInsertNamedMetadata("floor.vulkan_subgroup_uniform_cf");
+  }
+
+  // add Vulkan low descriptor set count info
+  if (CGM.getCodeGenOpts().VulkanLowDescriptorSetCount) {
+    CGM.getModule().getOrInsertNamedMetadata("floor.vulkan_low_descriptor_set_count");
+  }
+
+  // add Vulkan pointer workarounds info
+  if (CGM.getCodeGenOpts().VulkanPtrWorkarounds) {
+    CGM.getModule().getOrInsertNamedMetadata("floor.vulkan_ptr_workarounds");
+  }
+
+  // add Vulkan untyped pointers info
+  if (CGM.getCodeGenOpts().VulkanUntypedPointers) {
+    CGM.getModule().getOrInsertNamedMetadata("floor.vulkan_untyped_pointers");
+  }
+
+  // add Vulkan mesh shading info
+  if (CGM.getCodeGenOpts().VulkanMeshShading) {
+    CGM.getModule().getOrInsertNamedMetadata("floor.vulkan_mesh_shading");
+  }
+
   // signal that we're generating SPIR-V in the end
   if (CGM.getCodeGenOpts().floor_generating_spirv > 0) {
     CGM.getModule().getOrInsertNamedMetadata("floor.generating_spirv");
-  }
-
-  // additional air info
-  if (CGM.getLangOpts().Metal) {
-	  // only do this once
-	  if (!CGM.getModule().getNamedMetadata("air.version")) {
-		  // insert compile options
-		  llvm::NamedMDNode *AIRCompOpts = CGM.getModule().getOrInsertNamedMetadata("air.compile_options");
-		  AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.denorms_disable")));
-		  AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.fast_math_enable")));
-		  AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.framebuffer_fetch_enable")));
-		  
-		  // figure out which metal versions we should emit
-		  llvm::NamedMDNode *AIRVersion = CGM.getModule().getOrInsertNamedMetadata("air.version");
-		  std::array<uint32_t, 3> metal_version;
-		  std::array<uint32_t, 3> metal_language_version;
-		  const auto full_version = CGM.getLangOpts().MetalVersion;
-		  assert(full_version >= 300);
-		  metal_language_version = {{ full_version / 100u, (full_version % 100u) / 10u, full_version % 10u }};
-		  if (full_version >= 400) {
-			  // Metal 4.0 uses an "air.version" of 2.8.0
-			  metal_version = {{ 2u, 8u, 0u }};
-		  } else if (full_version >= 320) {
-			  // Metal 3.2 uses an "air.version" of 2.7.0
-			  metal_version = {{ 2u, 7u, 0u }};
-		  } else if (full_version >= 310) {
-			  // Metal 3.1 uses an "air.version" of 2.6.0
-			  metal_version = {{ 2u, 6u, 0u }};
-		  } else {
-			  // Metal 3.0 uses an "air.version" of 2.5.0
-			  metal_version = {{ 2u, 5u, 0u }};
-		  }
-		  
-		  SmallVector <llvm::Metadata*, 3> air_version;
-		  air_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_version[0])));
-		  air_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_version[1])));
-		  air_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_version[2])));
-		  AIRVersion->addOperand(llvm::MDNode::get(Context, air_version));
-		  
-		  llvm::NamedMDNode *AIRLangVersion = CGM.getModule().getOrInsertNamedMetadata("air.language_version");
-		  SmallVector <llvm::Metadata*, 4> air_lang_version;
-		  air_lang_version.push_back(llvm::MDString::get(Context, "Metal"));
-		  air_lang_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_language_version[0])));
-		  air_lang_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_language_version[1])));
-		  air_lang_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_language_version[2])));
-		  AIRLangVersion->addOperand(llvm::MDNode::get(Context, air_lang_version));
-		  
-		  // insert empty sampler state, this will be filled in by MetalImage later on
-		  CGM.getModule().getOrInsertNamedMetadata("air.sampler_states");
-		  
-		  // emit debug info
-		  if (CGM.getCodeGenOpts().getDebugInfo() != codegenoptions::NoDebugInfo) {
-			  // emit "air.source_file_name"
-			  llvm::NamedMDNode *AIRSourceFile = CGM.getModule().getOrInsertNamedMetadata("air.source_file_name");
-			  SmallVector <llvm::Metadata*, 1> air_source_file;
-			  std::string src_file_name_str = CGM.getModule().getSourceFileName();
-			  SmallVector<char> src_file_name(src_file_name_str.size());
-			  src_file_name.assign(src_file_name_str.begin(), src_file_name_str.end());
-			  CGM.getContext().getSourceManager().getFileManager().makeAbsolutePath(src_file_name);
-			  src_file_name_str.resize(src_file_name.size(), '\0');
-			  src_file_name_str.assign(src_file_name.begin(), src_file_name.end());
-			  air_source_file.push_back(llvm::MDString::get(Context, src_file_name_str.data()));
-			  AIRSourceFile->addOperand(llvm::MDNode::get(Context, air_source_file));
-			  
-			  // emit "llvm_utils.workingdir"
-			  std::string_view src_file_name_view(src_file_name.data(), src_file_name.size());
-			  const auto last_slash_pos = src_file_name_view.rfind('/');
-			  if (last_slash_pos != std::string::npos) {
-				  llvm::NamedMDNode *workingdir_md = CGM.getModule().getOrInsertNamedMetadata("llvm_utils.workingdir");
-				  SmallVector <llvm::Metadata*, 1> workingdir;
-				  const std::string working_dir_str(src_file_name.data(), last_slash_pos);
-				  workingdir.push_back(llvm::MDString::get(Context, working_dir_str));
-				  workingdir_md->addOperand(llvm::MDNode::get(Context, workingdir));
-			  }
-		  }
-	  }
   }
 
   // additional vulkan info

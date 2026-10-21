@@ -113,8 +113,8 @@ namespace {
 		bool is_kernel_func { false };
 		bool is_vertex_func { false };
 		bool is_fragment_func { false };
-		bool is_tess_control_func { false };
-		bool is_tess_eval_func { false };
+		bool is_task_func { false };
+		bool is_mesh_func { false };
 		
 		struct per_function_state_t {
 			uint32_t kernel_dim { 1 };
@@ -125,8 +125,19 @@ namespace {
 						kernel_local_size[1] != 0 &&
 						kernel_local_size[2] != 0);
 			}
+			uint32_t fixed_local_size_extent() const {
+				assert(has_fixed_local_size());
+				uint32_t extent = kernel_local_size[0];
+				if (kernel_dim >= 2) {
+					extent *= kernel_local_size[1];
+				}
+				if (kernel_dim >= 3) {
+					extent *= kernel_local_size[2];
+				}
+				return extent;
+			}
 			
-			// added kernel function args
+			// added kernel/task/mesh function args
 			Argument* group_id { nullptr };
 			Argument* group_size { nullptr };
 			GlobalVariable* local_size { nullptr };
@@ -136,7 +147,7 @@ namespace {
 			Argument* num_sub_groups { nullptr };
 			
 			// added general shader function args
-			Argument* view_index { nullptr };
+			Argument* view_index { nullptr }; // VS/FS/MS
 			
 			// added vertex function args
 			Argument* vertex_id { nullptr };
@@ -146,11 +157,10 @@ namespace {
 			
 			// added fragment function args
 			Argument* point_coord { nullptr };
+			Argument* front_facing { nullptr };
 			Argument* frag_coord { nullptr };
 			Argument* primitive_id { nullptr };
 			Argument* barycentric_coord { nullptr };
-			
-			// TODO: tessellation args!
 			
 			// any function args
 			Argument* soft_printf { nullptr };
@@ -194,6 +204,29 @@ namespace {
 			VULKAN_KERNEL_ARG_COUNT = 6,
 		};
 		
+		enum VULKAN_TASK_ARG_REV_IDX : int32_t {
+			VULKAN_TASK_GROUP_ID = -6,
+			VULKAN_TASK_GROUP_SIZE = -5,
+			VULKAN_TASK_SUB_GROUP_ID = -4,
+			VULKAN_TASK_SUB_GROUP_LOCAL_ID = -3,
+			VULKAN_TASK_SUB_GROUP_SIZE = -2,
+			VULKAN_TASK_NUM_SUB_GROUPS = -1,
+			
+			VULKAN_TASK_ARG_COUNT = 6,
+		};
+		
+		enum VULKAN_MESH_ARG_REV_IDX : int32_t {
+			VULKAN_MESH_GROUP_ID = -7,
+			VULKAN_MESH_GROUP_SIZE = -6,
+			VULKAN_MESH_SUB_GROUP_ID = -5,
+			VULKAN_MESH_SUB_GROUP_LOCAL_ID = -4,
+			VULKAN_MESH_SUB_GROUP_SIZE = -3,
+			VULKAN_MESH_NUM_SUB_GROUPS = -2,
+			VULKAN_MESH_VIEW_INDEX = -1,
+			
+			VULKAN_MESH_ARG_COUNT = 7,
+		};
+		
 		enum VULKAN_VERTEX_ARG_REV_IDX : int32_t {
 			VULKAN_VERTEX_ID = -5,
 			VULKAN_BASE_VERTEX_ID = -4,
@@ -205,11 +238,12 @@ namespace {
 		};
 		
 		enum VULKAN_FRAGMENT_ARG_REV_IDX : int32_t {
-			VULKAN_POINT_COORD = -3,
-			VULKAN_FRAG_COORD = -2,
-			VULKAN_FRAGMENT_VIEW_INDEX = -1,
+			VULKAN_POINT_COORD = -4,
+			VULKAN_FRAG_COORD = -3,
+			VULKAN_FRAGMENT_VIEW_INDEX = -2,
+			VULKAN_FRONT_FACING = -1,
 			
-			VULKAN_FRAGMENT_ARG_COUNT = 3,
+			VULKAN_FRAGMENT_ARG_COUNT = 4,
 		};
 		
 		// TODO: tessellation arg enums/handling
@@ -223,13 +257,13 @@ namespace {
 			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
 			is_vertex_func = F.getCallingConv() == CallingConv::FLOOR_VERTEX;
 			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
-			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
-			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
+			is_task_func = F.getCallingConv() == CallingConv::FLOOR_TASK;
+			is_mesh_func = F.getCallingConv() == CallingConv::FLOOR_MESH;
 			if (!is_kernel_func &&
 				!is_vertex_func &&
 				!is_fragment_func &&
-				!is_tess_control_func &&
-				!is_tess_eval_func) {
+				!is_task_func &&
+				!is_mesh_func) {
 				return false;
 			}
 			
@@ -263,34 +297,31 @@ namespace {
 			
 			DBG(errs() << "> adding built-in args ...\n";)
 			// add args if this is a kernel function
-			if (is_kernel_func /* || is_tess_control_func */) {
+			if (is_kernel_func || is_task_func || is_mesh_func) {
 				auto kernel_dim_node = F.getMetadata("kernel_dim");
 				assert(kernel_dim_node);
 				if (kernel_dim_node->getNumOperands() > 0) {
 					auto& op = kernel_dim_node->getOperand(0);
 					state.kernel_dim = (uint32_t)mdconst::extract<ConstantInt>(op)->getZExtValue();
-					assert((is_kernel_func && state.kernel_dim >= 1 && state.kernel_dim <= 3) ||
-						   (is_tess_control_func && state.kernel_dim == 1));
+					assert(state.kernel_dim >= 1 && state.kernel_dim <= 3);
 				}
 				
-				if (is_kernel_func) {
-					auto kernel_simd_width_node = F.getMetadata("kernel_simd_width");
-					if (kernel_simd_width_node && kernel_simd_width_node->getNumOperands() == 1) {
-						auto& op = kernel_simd_width_node->getOperand(0);
-						state.kernel_simd_width = (uint32_t)mdconst::extract<ConstantInt>(op)->getZExtValue();
-						assert(state.kernel_simd_width >= 1 && state.kernel_simd_width <= 128);
-					}
-					
-					MDNode* wg_size_node = func->getMetadata("reqd_work_group_size");
-					if (wg_size_node && wg_size_node->getNumOperands() == 3) {
-						state.kernel_local_size[0] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(0))->getZExtValue();
-						state.kernel_local_size[1] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(1))->getZExtValue();
-						state.kernel_local_size[2] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(2))->getZExtValue();
-						assert(state.kernel_local_size[0] > 0 && state.kernel_local_size[1] > 0 && state.kernel_local_size[2] > 0);
-					}
+				auto kernel_simd_width_node = F.getMetadata("kernel_simd_width");
+				if (kernel_simd_width_node && kernel_simd_width_node->getNumOperands() == 1) {
+					auto& op = kernel_simd_width_node->getOperand(0);
+					state.kernel_simd_width = (uint32_t)mdconst::extract<ConstantInt>(op)->getZExtValue();
+					assert(state.kernel_simd_width >= 1 && state.kernel_simd_width <= 128);
 				}
 				
-				if (F.arg_size() >= VULKAN_KERNEL_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
+				MDNode* wg_size_node = func->getMetadata("reqd_work_group_size");
+				if (wg_size_node && wg_size_node->getNumOperands() == 3) {
+					state.kernel_local_size[0] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(0))->getZExtValue();
+					state.kernel_local_size[1] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(1))->getZExtValue();
+					state.kernel_local_size[2] = mdconst::extract<ConstantInt>(wg_size_node->getOperand(2))->getZExtValue();
+					assert(state.kernel_local_size[0] > 0 && state.kernel_local_size[1] > 0 && state.kernel_local_size[2] > 0);
+				}
+				
+				if (is_kernel_func && F.arg_size() >= VULKAN_KERNEL_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
 					state.group_id = get_arg_by_idx(VULKAN_GROUP_ID);
 					state.group_size = get_arg_by_idx(VULKAN_GROUP_SIZE);
 					state.sub_group_id = get_arg_by_idx(VULKAN_SUB_GROUP_ID);
@@ -300,8 +331,29 @@ namespace {
 					if (has_soft_printf) {
 						state.soft_printf = get_arg_by_idx(-(VULKAN_KERNEL_ARG_COUNT + 1));
 					}
+				} else if (is_task_func && F.arg_size() >= VULKAN_TASK_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
+					state.group_id = get_arg_by_idx(VULKAN_TASK_GROUP_ID);
+					state.group_size = get_arg_by_idx(VULKAN_TASK_GROUP_SIZE);
+					state.sub_group_id = get_arg_by_idx(VULKAN_TASK_SUB_GROUP_ID);
+					state.sub_group_local_id = get_arg_by_idx(VULKAN_TASK_SUB_GROUP_LOCAL_ID);
+					state.sub_group_size = get_arg_by_idx(VULKAN_TASK_SUB_GROUP_SIZE);
+					state.num_sub_groups = get_arg_by_idx(VULKAN_TASK_NUM_SUB_GROUPS);
+					if (has_soft_printf) {
+						state.soft_printf = get_arg_by_idx(-(VULKAN_TASK_ARG_COUNT + 1));
+					}
+				} else if (is_mesh_func && F.arg_size() >= VULKAN_MESH_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
+					state.group_id = get_arg_by_idx(VULKAN_MESH_GROUP_ID);
+					state.group_size = get_arg_by_idx(VULKAN_MESH_GROUP_SIZE);
+					state.sub_group_id = get_arg_by_idx(VULKAN_MESH_SUB_GROUP_ID);
+					state.sub_group_local_id = get_arg_by_idx(VULKAN_MESH_SUB_GROUP_LOCAL_ID);
+					state.sub_group_size = get_arg_by_idx(VULKAN_MESH_SUB_GROUP_SIZE);
+					state.num_sub_groups = get_arg_by_idx(VULKAN_MESH_NUM_SUB_GROUPS);
+					state.view_index = get_arg_by_idx(VULKAN_MESH_VIEW_INDEX);
+					if (has_soft_printf) {
+						state.soft_printf = get_arg_by_idx(-(VULKAN_MESH_ARG_COUNT + 1));
+					}
 				} else {
-					errs() << "invalid kernel function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
+					errs() << "invalid kernel/task/mesh function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
 				}
 			}
 			
@@ -329,6 +381,7 @@ namespace {
 					state.point_coord = get_arg_by_idx(VULKAN_POINT_COORD);
 					state.frag_coord = get_arg_by_idx(VULKAN_FRAG_COORD);
 					state.view_index = get_arg_by_idx(VULKAN_FRAGMENT_VIEW_INDEX);
+					state.front_facing = get_arg_by_idx(VULKAN_FRONT_FACING);
 					
 					// NOTE: reverse order!
 					uint32_t opt_arg_counter = 1;
@@ -348,7 +401,7 @@ namespace {
 			
 			// emit local size variable for this function (initialized externally at "run-time" / SPIR-V spec)
 			// NOTE: if the function has a reqd_work_group_size (constant required work-group size), we don't need this
-			if (is_kernel_func && !func->hasFnAttribute("reqd_work_group_size")) {
+			if ((is_kernel_func || is_task_func || is_mesh_func) && !func->hasFnAttribute("reqd_work_group_size")) {
 				auto local_size_type = llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 3);
 				state.local_size = new GlobalVariable(*M,
 													  local_size_type,
@@ -477,13 +530,7 @@ namespace {
 						// if both the SIMD width and the local size are fixed, we also have a fixed #sub-groups,
 						// because the local size extent must be a multiple of the SIMD width
 						if (state.kernel_simd_width > 0 && state.has_fixed_local_size()) {
-							uint32_t local_size_extent = state.kernel_local_size[0];
-							if (state.kernel_dim > 1) {
-								local_size_extent *= state.kernel_local_size[1];
-							}
-							if (state.kernel_dim > 2) {
-								local_size_extent *= state.kernel_local_size[2];
-							}
+							uint32_t local_size_extent = state.fixed_local_size_extent();
 							assert((local_size_extent % state.kernel_simd_width) == 0u);
 							return ConstantInt::get(Type::getInt32Ty(*ctx), local_size_extent / state.kernel_simd_width);
 						}
@@ -525,6 +572,10 @@ namespace {
 					auto sgid = get_id<id::sub_group_id>(0);
 					auto sgsize = get_id<id::sub_group_size>(0);
 					auto linear_idx = builder->CreateAdd(builder->CreateMul(sgid, sgsize), sglid, "local_linear_id");
+					// set range metadata on local_linear_id when we have a fixed local size
+					if (state.has_fixed_local_size()) {
+						libfloor_utils::add_range_info(*ctx, *(llvm::Instruction*)linear_idx, 0u, state.fixed_local_size_extent());
+					}
 					
 					const auto handle_const_2D_lsize = [this, &linear_idx](const uint32_t lsize_x, Value* const_lsize_0, uint32_t dim) {
 						// NOTE: since the SIMD width must be a power-of-two and work-group X dim must be a multiple of it
@@ -746,6 +797,12 @@ namespace {
 					return;
 				}
 				I.replaceAllUsesWith(builder->CreateLoad(state.point_coord->getType()->getPointerElementType(), state.point_coord, "point_coord"));
+			} else if (func_name == "floor.builtin.front_facing.bool") {
+				if(state.front_facing == nullptr) {
+					DBG(printf("failed to get front_facing arg, probably not in a fragment function?\n"); fflush(stdout);)
+					return;
+				}
+				I.replaceAllUsesWith(builder->CreateLoad(state.front_facing->getType()->getPointerElementType(), state.front_facing, "front_facing"));
 			} else if (func_name == "floor.builtin.frag_coord.float4") {
 				llvm::errs() << "direct use of frag coord is not allowed: in function" << func->getName() << "\n";
 				return;
@@ -913,8 +970,8 @@ namespace {
 		bool is_kernel_func { false };
 		bool is_vertex_func { false };
 		bool is_fragment_func { false };
-		bool is_tess_control_func { false };
-		bool is_tess_eval_func { false };
+		bool is_task_func { false };
+		bool is_mesh_func { false };
 		
 		VulkanFinal() :
 		FunctionPass(ID) {
@@ -988,9 +1045,15 @@ namespace {
 			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
 			is_vertex_func = F.getCallingConv() == CallingConv::FLOOR_VERTEX;
 			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
-			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
-			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
-			if(!is_kernel_func && !is_vertex_func && !is_fragment_func) return false;
+			is_task_func = F.getCallingConv() == CallingConv::FLOOR_TASK;
+			is_mesh_func = F.getCallingConv() == CallingConv::FLOOR_MESH;
+			if (!is_kernel_func &&
+				!is_vertex_func &&
+				!is_fragment_func &&
+				!is_task_func &&
+				!is_mesh_func) {
+				return false;
+			}
 			
 			//
 			M = F.getParent();
@@ -1003,45 +1066,6 @@ namespace {
 			// transform all ConstantExpr GEPs to normal GEPs,
 			// since we don't have this in Vulkan + require this to perform valid transforms later on
 			transform_constexpr_geps(F);
-			
-			// handle return value / output
-			DBG(errs() << "> handling return values ...\n";)
-			if(is_vertex_func || is_fragment_func || is_tess_eval_func) {
-				const auto emit_output_var = [this](const std::string& var_name,
-													llvm::Type* global_type,
-													uint32_t address_space,
-													bool is_constant,
-													Constant* initializer) {
-					auto GV = new GlobalVariable(*M,
-												 global_type,
-												 is_constant,
-												 GlobalVariable::ExternalWeakLinkage,
-												 initializer,
-												 var_name,
-												 nullptr,
-												 GlobalValue::NotThreadLocal,
-												 address_space);
-					return GV;
-				};
-				
-				const auto ret_type = F.getReturnType();
-				const auto func_name = F.getName().str();
-				uint32_t return_idx = 0;
-				if(ret_type->isStructTy()) {
-					const auto st_type = cast<llvm::StructType>(ret_type);
-					for(const auto& elem : st_type->elements()) {
-						emit_output_var(func_name + ".vulkan_output." + std::to_string(return_idx++),
-										elem, SPIRAS_Output, false, nullptr);
-					}
-				}
-				else if(ret_type->isArrayTy()) {
-					emit_output_var(func_name + ".vulkan_output.0", ret_type, SPIRAS_Output, false, nullptr);
-				}
-				else if(!ret_type->isVoidTy()) {
-					emit_output_var(func_name + ".vulkan_output.0", ret_type, SPIRAS_Output, false, nullptr);
-				}
-				// else: nothing/passthrough
-			}
 			
 			// visit everything in this function
 			DBG(errs() << "> handling instructions ...\n";)
@@ -1180,11 +1204,10 @@ namespace {
 			// -> add padding
 			for (auto field_iter = combined_st.begin(); field_iter != combined_st.end(); ) {
 				const auto& field = *field_iter;
-				total_size += field.value_size;
-				++field_iter;
+				const auto field_size = field.value_size;
 				
+				// do we need to add padding *prior* to the field?
 				if (auto cur_alignment = total_size % field.elemental_size; cur_alignment != 0u) {
-					// need to add padding
 					auto padding = field.elemental_size - cur_alignment;
 					total_size += padding;
 					// if the padding is small enough, just add small types
@@ -1211,6 +1234,9 @@ namespace {
 						++field_iter;
 					}
 				}
+				
+				total_size += field_size;
+				++field_iter;
 			}
 			assert(total_size > 0u);
 			
@@ -1608,11 +1634,12 @@ namespace {
 		}
 		
 		void visitReturnInst(ReturnInst &RI) {
-			if(!is_vertex_func && !is_fragment_func && !is_tess_eval_func) return;
+			if(!is_vertex_func && !is_fragment_func) return;
 			
 			auto ret_val = RI.getReturnValue();
+			if (!ret_val) return;
 			const auto ret_type = ret_val->getType();
-			if(ret_val == nullptr) return;
+			if (!ret_type) return;
 			
 			DebugLoc DL;
 			if(auto ret_instr = dyn_cast<Instruction>(ret_val)) {
@@ -1669,8 +1696,8 @@ namespace {
 		bool is_kernel_func { false };
 		bool is_vertex_func { false };
 		bool is_fragment_func { false };
-		bool is_tess_control_func { false };
-		bool is_tess_eval_func { false };
+		bool is_task_func { false };
+		bool is_mesh_func { false };
 		bool was_modified { false };
 		ConstantFolder folder;
 		
@@ -1702,13 +1729,13 @@ namespace {
 			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
 			is_vertex_func = F.getCallingConv() == CallingConv::FLOOR_VERTEX;
 			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
-			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
-			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
+			is_task_func = F.getCallingConv() == CallingConv::FLOOR_TASK;
+			is_mesh_func = F.getCallingConv() == CallingConv::FLOOR_MESH;
 			if (!is_kernel_func &&
 				!is_vertex_func &&
 				!is_fragment_func &&
-				!is_tess_control_func &&
-				!is_tess_eval_func) {
+				!is_task_func &&
+				!is_mesh_func) {
 				return false;
 			}
 			
@@ -1744,6 +1771,10 @@ namespace {
 			// NOTE: disabled for now as we don't need this any more (probably ...)
 			// handle everything
 			//handle_pointers();
+			// enable specific pointer-select+store workarounds
+			if (M->getNamedMetadata("floor.vulkan_ptr_workarounds")) {
+				handle_select_ptrs();
+			}
 			
 			// we can't use mem* instructions that handle more than one value in Vulkan/SPIR-V
 			if (!mem_instrs.empty()) {
@@ -1815,10 +1846,11 @@ namespace {
 			
 			const auto base_idx_count = base_gep->getNumIndices();
 			const auto idx_count = gep->getNumIndices();
+			assert(base_idx_count > 0 && idx_count > 0);
 			
 			DBG(errs() << ">>> fusing: " << *base_gep << " + " << *gep << "\n";)
 			
-			if(base_idx_count == 1 && replace_old_gep) {
+			if (base_idx_count == 1 && replace_old_gep) {
 				// -> base is just an offset pointer, can simply fuse both GEPs
 				DBG(errs() << ">> fused (simple): " << *gep;)
 				
@@ -1830,11 +1862,13 @@ namespace {
 				
 				DBG(errs() << ", with " << *gep << "\n";)
 				return { gep, false };
-			}
-			else {
+			} else {
 				// -> need to create a new GEP so that it can contain all indices from both GEPs
 				// NOTE: last idx in base + first in current always matches -> -1
 				const auto fused_idx_count = base_idx_count + idx_count - 1;
+				
+				auto gep_ptr = base_gep->getPointerOperand();
+				auto gep_ptr_type = cast<PointerType>(gep_ptr->getType()->getScalarType())->getPointerElementType();
 				
 				// create fused idx list
 				SmallVector<Value*, 4> idx_list;
@@ -1843,9 +1877,46 @@ namespace {
 				for(uint32_t i = 1, count = base_gep->getNumIndices() + 1; i < count; ++i) {
 					idx_list.push_back(base_gep->getOperand(i));
 				}
+				assert(idx_list.size() >= 2); // must be true with base_idx_count > 1
 				
-				// fust last (base) + first (current) idx
-				idx_list[idx_list.size() - 1] = fuse_index(idx_list.back(), gep->getOperand(1), gep);
+				// fuse last valid base index + first (current) index
+				auto fuse_idx = idx_list.size() - 1;
+				if (auto st_type = dyn_cast_or_null<StructType>(GetElementPtrInst::getIndexedType(gep_ptr_type, ArrayRef { idx_list.data(), idx_list.size() - 1u }));
+					st_type) {
+					// if we're indexing a struct type, both indices must be constant and within range
+					ConstantInt* lhs_const = dyn_cast_or_null<ConstantInt>(idx_list.back());
+					ConstantInt* rhs_const = dyn_cast_or_null<ConstantInt>(gep->getOperand(1));
+					bool traverse_up = true;
+					if (lhs_const && rhs_const) {
+						const auto st_elem_idx = lhs_const->getZExtValue() + rhs_const->getZExtValue();
+						if (st_elem_idx < st_type->getNumElements()) {
+							// -> all good
+							traverse_up = false;
+						}
+						// else: OOB -> traverse up
+					}
+					// else: either is dynamic -> traverse up
+					
+					if (traverse_up) {
+						// we must have at least 3 indices in our list + the upper type must support dynamic indexing, i.e. must be an array or generic ptr type
+						assert(idx_list.size() >= 3);
+						for (uint32_t depth = 2; idx_list.size() >= (depth + 1u); ++depth) {
+							--fuse_idx;
+							auto upper_type = GetElementPtrInst::getIndexedType(gep_ptr_type, ArrayRef { idx_list.data(), idx_list.size() - depth });
+							assert(upper_type);
+							if (upper_type->isArrayTy() || upper_type->isPointerTy()) {
+								// -> all good now
+								break;
+							} else if (upper_type->isStructTy()) {
+								// should only have a single element, otherwise the non-fused GEP is very strange by hopping struct types
+								assert(cast<StructType>(upper_type)->getNumElements() == 1);
+							} else {
+								assert(false && "unhandled type");
+							}
+						}
+					}
+				}
+				idx_list[fuse_idx] = fuse_index(idx_list[fuse_idx], gep->getOperand(1), gep);
 				
 				// add current indices
 				for(uint32_t i = 2, count = gep->getNumIndices() + 1; i < count; ++i) {
@@ -1854,8 +1925,6 @@ namespace {
 				assert(idx_list.size() == fused_idx_count && "invalid idx list size");
 				
 				// create the new GEP
-				auto gep_ptr = base_gep->getPointerOperand();
-				auto gep_ptr_type = cast<PointerType>(gep_ptr->getType()->getScalarType())->getPointerElementType();
 				if (const auto idx_type = GetElementPtrInst::getIndexedType(gep_ptr_type, idx_list); !idx_type) {
 					// can't handle it -> ignore it
 					// NOTE: since variable pointers are now used by default, PtrAccessChain is possible -> we don't necessarily
@@ -1913,6 +1982,474 @@ namespace {
 				return;
 			}
 			phi_ptrs.emplace_back(&PHI);
+		}
+		
+		void handle_select_ptrs() {
+			DBG(errs() << "####################\n## in " << func->getName() << "\n";
+				for(const auto& sel : select_ptrs) {
+					errs() << "select: " << *sel << "\n";
+				}
+			)
+			was_modified = true; // TODO: do this properly
+			
+			//
+			std::vector<GetElementPtrInst*> problem_geps;
+			for(const auto& gep : gep_ptrs) {
+				if(input_ptrs.count(gep->getPointerOperand()) == 0) {
+					problem_geps.emplace_back(gep);
+					continue;
+				}
+			}
+			DBG(errs() << "\n";
+				for(const auto& gep : problem_geps) {
+					errs() << "PROBLEM GEP: " << *gep << "\n";
+				}
+			)
+			
+			// needed for finding the origin pointers
+			auto DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
+			DT->recalculate(*func);
+			LoopInfo LI(*DT);
+			
+			// find set of problem instructions and their pointer origin(s)
+			std::deque<Instruction*> problem_instrs;
+			problem_instrs.insert(begin(problem_instrs), begin(select_ptrs), end(select_ptrs));
+			problem_instrs.insert(begin(problem_instrs), begin(problem_geps), end(problem_geps));
+			
+			struct ptr_set {
+				// pointer origin(s)
+				std::unordered_set<const Value*> src;
+				// pointer producers (PHIs, selects, GEPs)
+				// TODO: pointer bitcasts should be handled previously
+				std::unordered_set<Instruction*> producers;
+				// pointer consumers (loads, stores)
+				std::unordered_set<Instruction*> consumers;
+			};
+			std::vector<std::shared_ptr<ptr_set>> ptr_sets;
+			std::unordered_map<Instruction*, ptr_set*> ptr_set_map;
+			std::unordered_multimap<const Value*, ptr_set*> origin_map;
+			
+			// create initial ptr_sets from our "problem" instructions
+			for(; !problem_instrs.empty(); problem_instrs.pop_front()) {
+				const auto& instr = problem_instrs[0];
+				
+				// already handled elsewhere?
+				if(ptr_set_map.count(instr) > 0) continue;
+				
+				// figure out which origin pointer(s) this comes from
+				SmallVector<const Value*, 3> origins;
+				DBG(errs() << "\n-> " << *instr << "\n";)
+				getUnderlyingObjects(instr, origins, &LI, 0);
+				DBG(for(const auto& orig : origins) {
+					errs() << "     origin: " << *orig << "\n";
+				})
+				if(origins.empty()) {
+					ctx->emitError(instr, "instruction has no origin");
+					return;
+				}
+				
+				// check if we have a ptr_set for this origin combination yet
+				ptr_set* pset = nullptr;
+				auto orig_range = origin_map.equal_range(origins[0]);
+				for(auto oiter = orig_range.first; oiter != orig_range.second; ++oiter) {
+					// same size?
+					if(oiter->second->src.size() != origins.size()) {
+						continue;
+					}
+					
+					// same content?
+					bool equal_set = true;
+					for(const auto& origin : origins) {
+						if(oiter->second->src.count(origin) == 0) {
+							equal_set = false;
+							break;
+						}
+					}
+					if(!equal_set) continue;
+					
+					// found a ptr_set that matches
+					pset = oiter->second;
+					break;
+				}
+				
+				// create a ptr_set if none exists yet
+				if(pset == nullptr) {
+					auto new_ptr_set = std::make_shared<ptr_set>();
+					ptr_sets.push_back(new_ptr_set);
+					pset = new_ptr_set.get();
+					
+					pset->src.insert(origins.begin(), origins.end());
+					for(const auto& origin : origins) {
+						origin_map.emplace(origin, pset);
+					}
+				}
+				
+				// add this instruction
+				pset->producers.emplace(instr);
+				ptr_set_map.emplace(instr, pset);
+				
+				// we must also handle the pointers contained within instructions
+				// -> this makes sure that we recursively get the complete net/graph of pointers
+				if(PHINode* phi = dyn_cast_or_null<PHINode>(instr)) {
+					for(const auto& phi_inc_val : phi->incoming_values()) {
+						// only add the value/instruction if we haven't handled it yet + if it isn't a input ptr
+						const auto phi_inc_instr = dyn_cast_or_null<Instruction>(&phi_inc_val);
+						if(phi_inc_instr != nullptr &&
+						   input_ptrs.count(phi_inc_instr) == 0 &&
+						   ptr_set_map.count(phi_inc_instr) == 0) {
+							problem_instrs.emplace_back(phi_inc_instr);
+						}
+					}
+				}
+				else if(SelectInst* sel = dyn_cast_or_null<SelectInst>(instr)) {
+					const auto true_instr = dyn_cast_or_null<Instruction>(sel->getTrueValue());
+					const auto false_instr = dyn_cast_or_null<Instruction>(sel->getFalseValue());
+					if(true_instr != nullptr &&
+					   input_ptrs.count(true_instr) == 0 &&
+					   ptr_set_map.count(true_instr) == 0) {
+						problem_instrs.emplace_back(true_instr);
+					}
+					if(false_instr != nullptr &&
+					   input_ptrs.count(false_instr) == 0 &&
+					   ptr_set_map.count(false_instr) == 0) {
+						problem_instrs.emplace_back(false_instr);
+					}
+				}
+				else if(GetElementPtrInst* GEP = dyn_cast_or_null<GetElementPtrInst>(instr)) {
+					const auto gep_instr = dyn_cast_or_null<Instruction>(GEP->getPointerOperand());
+					if(gep_instr != nullptr &&
+					   input_ptrs.count(gep_instr) == 0 &&
+					   ptr_set_map.count(gep_instr) == 0) {
+						problem_instrs.emplace_back(gep_instr);
+					}
+				}
+			}
+			
+			// find all consumers of our producers
+			for (const auto& instr_pset : ptr_set_map) {
+				const auto& instr = instr_pset.first;
+				auto& pset = instr_pset.second;
+				
+				// only need to consider direct users this time
+				libfloor_utils::for_all_instruction_users(*instr, [&pset](Instruction& user_instr) {
+					if (isa<GetElementPtrInst>(user_instr) ||
+						isa<SelectInst>(user_instr) ||
+						isa<PHINode>(user_instr) ||
+						isa<LoadInst>(user_instr)) {
+						// not interested in these, should already be handled elsewhere
+						return;
+					}
+					// NOTE: we don't care about what kind of instructions consumers are, because
+					// we can simply iterate over all operands of the instruction and replace the
+					// producer(s) accordingly
+					pset->consumers.emplace(&user_instr);
+				});
+			}
+			
+			// debug output
+			DBG(errs() << "\n\n## ptr sets:\n";
+				for(const auto& pset : ptr_sets) {
+					errs() << "# set\n";
+					errs() << "origins:\n";
+					for(const auto& origin : pset->src) {
+						errs() << "\t" << *origin << "\n";
+					}
+					errs() << "producers:\n";
+					for(const auto& prod : pset->producers) {
+						errs() << "\t" << *prod << "\n";
+					}
+					errs() << "consumers:\n";
+					for(const auto& cons : pset->consumers) {
+						errs() << "\t" << *cons << "\n";
+					}
+					
+					errs() << "\n";
+				}
+			)
+			
+			for (const auto& pset : ptr_sets) {
+				if (pset->src.size() < 2) {
+					// ignore trivial cases
+				}
+				
+				bool has_store_inst = false;
+				for (const auto& cons : pset->consumers) {
+					if (isa<StoreInst>(cons)) {
+						has_store_inst = true;
+						break;
+					}
+				}
+				if (!has_store_inst) {
+					DBG(errs() << "!! ignoring non-store-only consumers\n";)
+				}
+				
+				// go down the condition tree until we hit a leaf / origin pointer, in between:
+				//  * for GEPs: store them in a chain (in the same order as they were encountered) and pass/copy
+				//              them through to each tree branch (so that each branch has its individual chain)
+				//  * for SELs: create if/else branches for each SEL (using the same condition as the SEL),
+				//              then recursively go down each branch, meeting up again after the SEL instruction,
+				//              also insert a PHI if the consumer produces a value (replace consumer with that at the end)
+				//  * for origin ptrs: fuse the GEP chain up to that point, replace pointer with the origin pointer (now
+				//                     unambiguous), replace use of producer pointer in the consumer with the new GEP
+				
+				// (upside-down) condition tree
+				struct condition_tree {
+					enum class TYPE : uint32_t {
+						COMPARE_BOOL,
+						COMPARE_PHI,
+						ORIGIN_PTR,
+						GEP,
+					};
+					TYPE type;
+					
+					// if COMPARE_BOOL: i1 compare value
+					// if COMPARE_PHI: i32 compare value
+					// if ORIGIN_PTR: actual origin ptr (+this is a leaf node)
+					// if GEP: intermediate GEP
+					Value* val;
+					
+					// pointers to the next condition node(s) or actual origin ptrs (if they are leaf nodes)
+					std::vector<condition_tree> nodes;
+				};
+				uint32_t leaf_count = 0;
+				const std::function<void(Value*, condition_tree&)> create_condition_tree =
+				[&create_condition_tree, &pset, &leaf_count, this](Value* prod, condition_tree& node) {
+					// origin ptr: attach as leaf node
+					if(pset->src.count(prod) > 0) {
+						node.type = condition_tree::TYPE::ORIGIN_PTR;
+						node.val = prod;
+						++leaf_count;
+						return;
+					}
+					
+					// intermediate GEP, continue with pointer op
+					if(GetElementPtrInst* GEP = dyn_cast_or_null<GetElementPtrInst>(prod)) {
+						node.type = condition_tree::TYPE::GEP;
+						node.val = GEP;
+						
+						condition_tree child;
+						create_condition_tree(GEP->getPointerOperand(), child);
+						node.nodes.push_back(child);
+					}
+					// select, store condition + continue traversal with true and false value
+					else if(SelectInst* sel = dyn_cast_or_null<SelectInst>(prod)) {
+						node.type = condition_tree::TYPE::COMPARE_BOOL;
+						node.val = sel->getCondition();
+						
+						// NOTE: must be in this order
+						condition_tree true_child, false_child;
+						create_condition_tree(sel->getTrueValue(), true_child);
+						create_condition_tree(sel->getFalseValue(), false_child);
+						node.nodes.push_back(true_child);
+						node.nodes.push_back(false_child);
+					}
+					else if(isa<PHINode>(prod)) {
+						// TODO: handle PHIs!
+						node.type = condition_tree::TYPE::COMPARE_PHI;
+						return;
+					}
+					else {
+						if(Instruction* instr = dyn_cast_or_null<Instruction>(prod)) {
+							ctx->emitError(instr, "unhandled producer while creating condition tree");
+						}
+						else {
+							ctx->emitError("unhandled non-instruction producer value while creating condition tree");
+						}
+					}
+				};
+				
+				// for debugging purposes
+				const std::function<void(const condition_tree&, const uint32_t)> dump_condition_tree =
+				[&dump_condition_tree](const condition_tree& node, const uint32_t level) {
+					errs() << std::string(level, '-') << "> ";
+					switch(node.type) {
+						case condition_tree::TYPE::COMPARE_BOOL:
+							errs() << "SELECT: " << *node.val << "\n";
+							dump_condition_tree(node.nodes[0], level + 1);
+							dump_condition_tree(node.nodes[1], level + 1);
+							break;
+						case condition_tree::TYPE::COMPARE_PHI:
+							errs() << "PHI:\n";
+							break;
+						case condition_tree::TYPE::GEP:
+							errs() << "GEP: " << *node.val << "\n";
+							dump_condition_tree(node.nodes[0], level + 1);
+							break;
+						case condition_tree::TYPE::ORIGIN_PTR:
+							errs() << "LEAF: " << *node.val << "\n";
+							break;
+					}
+				};
+				
+				// this determines if replacing the condition is viable/possible, i.e. there are no PHIs in it
+				const std::function<bool(const condition_tree&, bool)> is_viable_condition_tree =
+				[&is_viable_condition_tree](const condition_tree& node, const bool has_branch_term) {
+					bool viable = true;
+					switch (node.type) {
+						case condition_tree::TYPE::COMPARE_BOOL:
+							viable &= is_viable_condition_tree(node.nodes[0], true);
+							viable &= is_viable_condition_tree(node.nodes[1], true);
+							break;
+						case condition_tree::TYPE::COMPARE_PHI:
+							viable = false;
+							break;
+						case condition_tree::TYPE::GEP:
+							viable &= is_viable_condition_tree(node.nodes[0], has_branch_term);
+							break;
+						case condition_tree::TYPE::ORIGIN_PTR:
+							if (!has_branch_term) {
+								return false;
+							}
+							break;
+					}
+					return viable;
+				};
+				
+				for (Instruction* cons : pset->consumers) {
+					// find producer
+					Instruction* producer = nullptr;
+					for(uint32_t i = 0, count = cons->getNumOperands(); i < count; ++i) {
+						const auto op = cons->getOperand(i);
+						const auto piter = pset->producers.find((Instruction*)op);
+						if(piter != pset->producers.end()) {
+							producer = *piter;
+							break;
+						}
+					}
+					assert(producer != nullptr && "consumer has no producer");
+					DBG(errs() << "-> cons/prod: " << *cons << " -> " << *producer << "\n";)
+					
+					// find the condition(s) on which we need to branch
+					condition_tree cond_tree;
+					create_condition_tree(producer, cond_tree);
+					DBG(dump_condition_tree(cond_tree, 0); errs() << "\n";)
+					if (!is_viable_condition_tree(cond_tree, false)) {
+						DBG(errs() << "!! ignoring non-viable condition tree\n";)
+						continue;
+					}
+					
+					// TODO: once switches are supported, combine all conditions to a single large switch,
+					// instead of creating a condition tree
+					// TODO: try to merge multiple users to a single block per origin instead of per GEP/user
+					
+					BasicBlock* continue_block = nullptr; // code/block _after_ the consumer instruction
+					PHINode* continue_phi = nullptr;
+					const std::function<void(const condition_tree&, std::vector<GetElementPtrInst*>, Instruction*)>
+					handle_condition_tree = [this, &handle_condition_tree, &continue_block, &continue_phi, &leaf_count,
+											 &cons, &producer](const condition_tree& node,
+															   std::vector<GetElementPtrInst*> gep_chain,
+															   Instruction* branch_term)
+					{
+						switch(node.type) {
+							case condition_tree::TYPE::COMPARE_BOOL: {
+								DBG(errs() << "@SEL: " << *node.val << "\n";)
+								// select: create an if-else branch
+								Value* cond = node.val;
+								
+								Instruction* true_term = nullptr;
+								Instruction* false_term = nullptr;
+								if(continue_block == nullptr) {
+									// create the first split and final continue block
+									SplitBlockAndInsertIfThenElse(cond, cons, &true_term, &false_term);
+									assert(true_term != nullptr && "failed to create true branch/term");
+									assert(false_term != nullptr && "failed to create false branch/term");
+									continue_block = cons->getParent();
+									continue_block->setName("continue.block");
+									
+									// insert continue phi if the consumer produces a value
+									if(!cons->getType()->isVoidTy()) {
+										continue_phi = PHINode::Create(cons->getType(), leaf_count, "continue.phi",
+																	   cons->getNextNode());
+									}
+								}
+								else {
+									// TODO: implement this
+									assert(false && "not implemented yet");
+									ctx->emitError("multi-select not implemented yet");
+									return;
+								}
+								
+								true_term->getParent()->setName("sel.true");
+								false_term->getParent()->setName("sel.false");
+								
+								// copy GEP chain into both branches
+								handle_condition_tree(node.nodes[0], gep_chain, true_term);
+								handle_condition_tree(node.nodes[1], gep_chain, false_term);
+								break;
+							}
+							case condition_tree::TYPE::COMPARE_PHI: {
+								DBG(errs() << "@PHI: " << *node.val << "\n";)
+								ctx->emitError("PHI nodes are not handled yet");
+								break;
+							}
+							case condition_tree::TYPE::GEP: {
+								DBG(errs() << "@GEP: " << *node.val << "\n";)
+								// add GEP to chain and continue
+								gep_chain.emplace_back(dyn_cast<GetElementPtrInst>(node.val));
+								handle_condition_tree(node.nodes[0], std::move(gep_chain), branch_term);
+								break;
+							}
+							case condition_tree::TYPE::ORIGIN_PTR: {
+								DBG(errs() << "@PTR: " << *node.val << "\n";)
+								// leaf: finally reached an origin pointer
+								assert(branch_term != nullptr && "must have a branch terminator");
+								
+								// fuse GEPs with origin ptr
+								GetElementPtrInst* mat_gep = (GetElementPtrInst*)gep_chain[0]->clone();
+								mat_gep->setOperand(0, node.val);
+								mat_gep->setName(gep_chain.back()->getName());
+								mat_gep->setDebugLoc(gep_chain.back()->getDebugLoc());
+								for(size_t i = 1, count = gep_chain.size(); i < count; ++i) {
+									bool abort = false;
+									std::tie(mat_gep, abort) = fuse_geps(mat_gep, gep_chain[i], false); // TODO
+									if (abort) {
+										break;
+									}
+								}
+								mat_gep->insertBefore(branch_term);
+								DBG(errs() << ">> mat_gep: " << *mat_gep << "\n";)
+								
+								// copy consumer
+								auto cons_clone = cons->clone();
+								if(cons->hasName()) {
+									cons_clone->setName(cons->getName());
+								}
+								cons_clone->setDebugLoc(cons->getDebugLoc());
+								cons_clone->insertBefore(branch_term);
+								
+								// replace consumer ptr
+								DBG(errs() << ">> cons before: " << *cons_clone << "\n";)
+								for(uint32_t i = 0, count = cons_clone->getNumOperands(); i < count; ++i) {
+									const auto op = cons_clone->getOperand(i);
+									if(op == producer) {
+										cons_clone->setOperand(i, mat_gep);
+									}
+								}
+								DBG(errs() << ">> cons after: " << *cons_clone << "\n";)
+								
+								// branch to continue block
+								auto br_inst = dyn_cast_or_null<BranchInst>(branch_term);
+								assert(br_inst != nullptr && "invalid terminator");
+								assert(br_inst->isUnconditional() && "branch must be unconditional");
+								br_inst->setSuccessor(0, continue_block);
+								
+								// update continue phi (if there is one)
+								if(continue_phi != nullptr) {
+									continue_phi->addIncoming(cons_clone, cons_clone->getParent());
+									DBG(errs() << ">> updated phi: " << *continue_phi << "\n";)
+								}
+								break;
+							}
+						}
+					};
+					handle_condition_tree(cond_tree, {}, nullptr);
+					
+					if(continue_phi != nullptr) {
+						cons->replaceAllUsesWith(continue_phi);
+					}
+					cons->eraseFromParent();
+				}
+			}
 		}
 		
 		void handle_pointers() {
@@ -2488,59 +3025,19 @@ namespace {
 				} else if (auto memmove_instr = dyn_cast_or_null<MemMoveInst>(mem_instr)) {
 					llvm::errs() << "can't lower memmove yet: " << *memmove_instr << "\n";
 				} else if (auto memset_instr = dyn_cast_or_null<MemSetInst>(mem_instr)) {
-					llvm::errs() << "can't lower memset yet: " << *memset_instr << "\n";
+					was_modified |= lower_memset(*memset_instr);
 				} else {
 					llvm::errs() << "unknown/unhandled memory instruction: " << *mem_instr << "\n";
 				}
 			}
 		}
+		
 		//! tries to lower "memcpy_instr" to LLVM instructions,
 		//! returns true if the lowering happened
 		bool lower_memcpy(MemCpyInst& memcpy_instr) {
-			auto len_op = memcpy_instr.getLength();
-			auto const_len_op = dyn_cast_or_null<ConstantInt>(len_op);
-#if 0
-			if (const_len_op && const_len_op->getZExtValue() <= 1 /* not sure if 0 is possible */) {
-				// -> only copying one value, can be handled by OpCopyMemory
+			auto [src, dst, const_len_op, len_op, override_loop_op_type, _, __] = libfloor_utils::compute_memop_lower_info(*M, memcpy_instr);
+			if (!src || !dst || !len_op) {
 				return false;
-			}
-#endif
-			
-			// optimize length operand
-			if (const_len_op) {
-				if (auto simplified_len = libfloor_utils::simplify_const_integer_to_32bit(*const_len_op); simplified_len) {
-					const_len_op = simplified_len;
-				}
-			} else {
-				if (auto simplified_len = libfloor_utils::simplify_integer_to_32bit(*len_op); simplified_len) {
-					len_op = simplified_len;
-				}
-			}
-			
-			// try to use the original type for the memcpy
-			auto src = memcpy_instr.getRawSource();
-			auto dst = memcpy_instr.getRawDest();
-			auto src_orig_type = src->getType();
-			auto dst_orig_type = dst->getType();
-			auto src_bitcast_op = libfloor_utils::get_underlying_bitcast_operand_or_null(src);
-			auto dst_bitcast_op = libfloor_utils::get_underlying_bitcast_operand_or_null(dst);
-			if (src_bitcast_op) {
-				src_orig_type = src_bitcast_op->getType();
-			}
-			if (dst_bitcast_op) {
-				dst_orig_type = dst_bitcast_op->getType();
-			}
-			auto elem_type = src_orig_type->getPointerElementType();
-			llvm::Type* override_loop_op_type = nullptr;
-			if (elem_type == dst_orig_type->getPointerElementType() && elem_type->isSized()) {
-				auto elem_size = M->getDataLayout().getTypeStoreSize(elem_type).getFixedValue();
-				if (elem_size > 1) {
-					// original source and destination types are compatible -> copy based on this type instead
-					src = (src_bitcast_op ? src_bitcast_op : src);
-					dst = (dst_bitcast_op ? dst_bitcast_op : dst);
-					override_loop_op_type = elem_type;
-					assert(!const_len_op || (const_len_op->getZExtValue() % elem_size == 0u));
-				}
 			}
 			
 			// -> length is either constant > 1 or a dynamic length
@@ -2557,602 +3054,28 @@ namespace {
 			memcpy_instr.eraseFromParent();
 			return true;
 		}
-	};
-
-	// VulkanPreFinalPointerBCFixup
-	struct VulkanPreFinalPointerBCFixup : public FunctionPass, InstVisitor<VulkanPreFinalPointerBCFixup> {
-		friend class InstVisitor<VulkanPreFinalPointerBCFixup>;
 		
-		static char ID; // Pass identification, replacement for typeid
-		
-		Module* M { nullptr };
-		const DataLayout* DL { nullptr };
-		LLVMContext* ctx { nullptr };
-		Function* func { nullptr };
-		bool is_kernel_func { false };
-		bool is_vertex_func { false };
-		bool is_fragment_func { false };
-		bool is_tess_control_func { false };
-		bool is_tess_eval_func { false };
-		bool was_modified { false };
-		ConstantFolder folder;
-		
-		// gather pointer bitcast instructions
-		std::vector<BitCastInst*> ptr_bc_instrs;
-		
-		VulkanPreFinalPointerBCFixup() :
-		FunctionPass(ID) {
-			initializeVulkanPreFinalPass(*PassRegistry::getPassRegistry());
-		}
-		
-		void getAnalysisUsage(AnalysisUsage &AU) const override {
-			AU.addRequired<AAResultsWrapperPass>();
-			AU.addRequired<GlobalsAAWrapperPass>();
-			AU.addRequired<AssumptionCacheTracker>();
-			AU.addRequired<TargetLibraryInfoWrapperPass>();
-			AU.addRequired<AssumptionCacheTracker>();
-			AU.addRequired<DominatorTreeWrapperPass>();
-			AU.addRequired<TargetTransformInfoWrapperPass>();
-		}
-		
-		bool runOnFunction(Function &F) override {
-			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
-			is_vertex_func = F.getCallingConv() == CallingConv::FLOOR_VERTEX;
-			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
-			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
-			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
-			if (!is_kernel_func &&
-				!is_vertex_func &&
-				!is_fragment_func &&
-				!is_tess_control_func &&
-				!is_tess_eval_func) {
+		//! tries to lower "memset_instr" to LLVM instructions,
+		//! returns true if the lowering happened
+		bool lower_memset(MemSetInst& memset_instr) {
+			auto [src, dst, const_len_op, len_op, override_loop_op_type, _, __] = libfloor_utils::compute_memop_lower_info(*M, memset_instr);
+			if (!src || !dst || !len_op) {
 				return false;
 			}
 			
-			//
-			M = F.getParent();
-			DL = &M->getDataLayout();
-			ctx = &M->getContext();
-			func = &F;
-			ptr_bc_instrs.clear();
+			// TODO: make use of VK_KHR_zero_initialize_workgroup_memory when memory is local/work-group and this is the first use of it
 			
-			// gather all stuff
-			was_modified = false;
-			visit(F);
-			
-			// fix invalid pointer bitcasts
-			if (!ptr_bc_instrs.empty()) {
-				was_modified |= fix_pointer_bitcasts();
-			}
-			
-			return was_modified;
-		}
-		
-		// InstVisitor overrides...
-		using InstVisitor<VulkanPreFinalPointerBCFixup>::visit;
-		void visit(Instruction& I) {
-			InstVisitor<VulkanPreFinalPointerBCFixup>::visit(I);
-		}
-		
-		void visitBitCastInst(BitCastInst& BC) {
-			if (BC.getSrcTy()->isPointerTy() && BC.getDestTy()->isPointerTy()) {
-				ptr_bc_instrs.emplace_back(&BC);
-				return;
-			}
-			assert(!BC.getSrcTy()->isPointerTy() && !BC.getDestTy()->isPointerTy()); // just in case ...
-		}
-		
-		struct struct_element_t {
-			std::vector<llvm::Value*> indices;
-			std::vector<uint32_t> const_indices;
-			llvm::Type* type { nullptr };
-		};
-		static std::vector<struct_element_t> get_struct_elements(BitCastInst& BC, llvm::Type* in_st_type, LLVMContext& ctx) {
-			assert(in_st_type->isStructTy());
-			auto st_type = cast<StructType>(in_st_type);
-			
-			std::vector<struct_element_t> elems;
-			std::vector<llvm::Value*> indices;
-			std::vector<uint32_t> const_indices;
-			for (;;) {
-				const auto elem_count = st_type->getNumElements();
-				assert(elem_count > 0);
-				if (elem_count == 1 && st_type->getElementType(0)->isStructTy()) {
-					// recurse
-					const_indices.emplace_back(0u);
-					indices.emplace_back(ConstantInt::get(llvm::Type::getInt32Ty(ctx), const_indices.back()));
-					st_type = cast<StructType>(st_type->getElementType(0));
-					continue;
-				}
-				
-				for (uint32_t i = 0; i < elem_count; ++i) {
-					auto elem_type = st_type->getElementType(i);
-					if (elem_type->isStructTy()) {
-						ctx.emitError(&BC, "invalid pointer bitcast: can't handle nested structs");
-						return {};
-					}
-					auto elem_indices = indices;
-					const_indices.emplace_back(i);
-					elem_indices.emplace_back(ConstantInt::get(llvm::Type::getInt32Ty(ctx), const_indices.back()));
-					elems.emplace_back(struct_element_t {
-						.indices = std::move(elem_indices),
-						.const_indices = std::move(const_indices),
-						.type = elem_type,
-					});
-				}
-				break;
-			}
-			return elems;
-		}
-		
-		std::optional<bool> fix_pointer_bitcast_with_loads(BitCastInst& BC, Function& F, const std::vector<LoadInst*>& loads) {
-			const auto dst_type = cast<PointerType>(BC.getDestTy())->getPointerElementType();
-			const auto dst_size = DL->getTypeStoreSize(dst_type).getFixedSize();
-			
-			auto src_ptr_type = cast<PointerType>(BC.getSrcTy());
-			auto src_type = cast<PointerType>(BC.getSrcTy())->getPointerElementType();
-			auto src_size = DL->getTypeStoreSize(src_type).getFixedSize();
-			auto src = cast<Instruction>(BC.getOperand(0));
-			GetElementPtrInst* src_gep = nullptr;
-			
-			std::vector<Instruction*> cleanup_instrs { &BC };
-			
-			// direct struct<->vector bitcast+load?
-			bool is_vec_struct_load = ((src_type->isVectorTy() && dst_type->isStructTy()) ||
-									   (src_type->isStructTy() && dst_type->isVectorTy()));
-			
-			// indirect struct->vector bitcast+load?
-			// src might already point to the lowest element of a struct -> need to go up
-			if (!is_vec_struct_load && src_size < dst_size && dst_type->isVectorTy()) {
-				if (auto gep = dyn_cast_or_null<GetElementPtrInst>(src); gep && gep->getSourceElementType()->isStructTy()) {
-					const auto src_elem_type = gep->getSourceElementType();
-					SmallVector<Value*> indices;
-					for (auto& idx : gep->indices()) {
-						indices.emplace_back(idx);
-					}
-					
-					for (size_t i = 1, count = indices.size(); i < count; ++i) {
-						// last index must be 0 for this to work
-						const auto last_idx = dyn_cast_or_null<ConstantInt>(indices.back());
-						if (!last_idx || last_idx->getZExtValue() != 0) {
-							break;
-						}
-						indices.pop_back();
-						
-						auto higher_src_type = GetElementPtrInst::getIndexedType(src_elem_type, indices);
-						if (higher_src_type) {
-							if (auto new_src_size = DL->getTypeStoreSize(higher_src_type).getFixedSize(); new_src_size >= dst_size) {
-								// found it, create a new GEP with the current indices
-								src_gep = GetElementPtrInst::Create(gep->getSourceElementType(), gep->getOperand(0),
-																	indices, src->getName() + ".adj", src);
-								src_gep->setIsInBounds(gep->isInBounds());
-								src_gep->setDebugLoc(gep->getDebugLoc());
-								
-								// set new src
-								auto new_src_ptr_type = PointerType::get(higher_src_type, src_ptr_type->getPointerAddressSpace());
-								src_ptr_type = new_src_ptr_type;
-								src_size = new_src_size;
-								src_type = higher_src_type;
-								src = src_gep;
-								cleanup_instrs.emplace_back(src);
-								
-								is_vec_struct_load = true;
-								break;
-							}
-						}
-					}
-				}
-			}
-			
-			if (is_vec_struct_load) {
-				if (loads.size() > 1) {
-					ctx->emitError(&BC, "invalid pointer bitcast: can't replace more than one load");
-					return {};
-				}
-				if (!src_gep) {
-					src_gep = dyn_cast_or_null<GetElementPtrInst>(src);
-					cleanup_instrs.emplace_back(src_gep);
-				}
-				
-				// if either side is a struct and the other is a vector type,
-				// we need to do a (full) extraction and insertion of elements
-				const auto src_st_elements = (src_type->isStructTy() ? get_struct_elements(BC, src_type, *ctx) : std::vector<struct_element_t> {});
-				const auto dst_st_elements = (dst_type->isStructTy() ? get_struct_elements(BC, dst_type, *ctx) : std::vector<struct_element_t> {});
-				const auto src_elem_count = (src_type->isStructTy() ? src_st_elements.size() : size_t(cast<VectorType>(src_type)->getElementCount().getFixedValue()));
-				const auto dst_elem_count = (dst_type->isStructTy() ? dst_st_elements.size() : size_t(cast<VectorType>(dst_type)->getElementCount().getFixedValue()));
-				if (src_elem_count == 0 || dst_elem_count == 0) {
-					ctx->emitError(&BC, "invalid pointer bitcast: invalid destination or source vector type (no or invalid elements)");
-					return {};
-				}
-				if (dst_elem_count > src_elem_count) {
-					ctx->emitError(&BC, "invalid pointer bitcast: destination vector type has more elements than the source vector type");
-					return {};
-				}
-				
-				//
-				auto& ld = loads[0];
-				auto insertion_point = ld;
-				
-				// only do this for as many dst elements that we have
-				llvm::Value* new_dst = UndefValue::get(dst_type);
-				for (uint32_t i = 0, count = uint32_t(dst_elem_count); i < count; ++i) {
-					// extract
-					llvm::Value* src_elem = nullptr;
-					if (!src_st_elements.empty()) {
-						// extract struct elem
-						const auto& elem = src_st_elements[i];
-						GetElementPtrInst* elem_gep = nullptr;
-						if (src_gep) {
-							SmallVector<Value*> indices;
-							for (auto& idx : src_gep->indices()) {
-								indices.emplace_back(idx);
-							}
-							for (auto& idx : elem.indices) {
-								indices.emplace_back(idx);
-							}
-							elem_gep = GetElementPtrInst::Create(src_gep->getSourceElementType(), src_gep->getOperand(0), indices, "", insertion_point);
-						} else {
-							// NOTE/TODO: untested path!
-							elem_gep = GetElementPtrInst::Create(src_type, src, elem.indices, "", insertion_point);
-						}
-						elem_gep->setIsInBounds(true);
-						elem_gep->setDebugLoc(ld->getDebugLoc());
-						auto elem_ld = new LoadInst(elem.type, elem_gep, "", false, insertion_point);
-						src_elem = elem_ld;
-					} else {
-						// extract vector elem
-						auto extract_elem = ExtractElementInst::Create(src, ConstantInt::get(llvm::Type::getInt32Ty(*ctx), i), "", insertion_point);
-						extract_elem->setDebugLoc(ld->getDebugLoc());
-						src_elem = extract_elem;
-					}
-					
-					// insert
-					if (!dst_st_elements.empty()) {
-						// NOTE/TODO: untested path!
-						// insert struct elem
-						const auto& elem = dst_st_elements[i];
-						auto insert_val = InsertValueInst::Create(new_dst, src_elem, elem.const_indices, "", insertion_point);
-						insert_val->setDebugLoc(ld->getDebugLoc());
-						new_dst = insert_val;
-					} else {
-						// insert vector elem
-						auto insert_elem = InsertElementInst::Create(new_dst, src_elem, ConstantInt::get(llvm::Type::getInt32Ty(*ctx), i), "", insertion_point);
-						insert_elem->setDebugLoc(ld->getDebugLoc());
-						new_dst = insert_elem;
-					}
-				}
-				
-				// finally: replace load with newly created/loaded construct
-				ld->replaceAllUsesWith(new_dst);
-				ld->eraseFromParent();
+			if (const_len_op) {
+				createMemSetLoopKnownSize(&memset_instr, dst, const_len_op, src,
+										  memset_instr.getDestAlign().valueOrOne(),
+										  memset_instr.isVolatile(), override_loop_op_type);
 			} else {
-				// -> non vector<->struct BC+load
-				
-				// if the source size is larger, the source pointer likely orignates from a struct GEP at a higher level
-				// -> drill down
-				assert(src_size >= dst_size && "source must always be >= destination");
-				if (src_size > dst_size) {
-					src_gep = dyn_cast_or_null<GetElementPtrInst>(src);
-					if (!src_gep) {
-						ctx->emitError(&BC, "invalid pointer bitcast: invalid src -> dst cast (can't replace non-GEP src)");
-						return {};
-					}
-					cleanup_instrs.emplace_back(src_gep);
-					
-					SmallVector<llvm::Value*> indices;
-					for (auto& idx : src_gep->indices()) {
-						indices.emplace_back(idx);
-					}
-					
-					for (;;) {
-						auto src_st_type = dyn_cast_or_null<StructType>(src_type);
-						if (!src_st_type) {
-							ctx->emitError(&BC, "invalid pointer bitcast: invalid src -> dst cast (src is not a struct type)");
-							return {};
-						}
-						indices.emplace_back(ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0u));
-						src_type = src_st_type->getStructElementType(0);
-						src_size = DL->getTypeStoreSize(src_type).getFixedSize();
-						if (src_size == dst_size) {
-							// if this is still a struct type, do another round (struct containing a single element)
-							// also: if this matches the dst type (for some reason, which shouldn't occur ...), use it straight away
-							if (src_type->isStructTy() && src_type != dst_type) {
-								assert(cast<StructType>(src_type)->getStructNumElements() == 1);
-								continue;
-							}
-							
-							src = GetElementPtrInst::Create(src_gep->getSourceElementType(), src_gep->getOperand(0), indices,
-															src_gep->getName(), src_gep);
-							((GetElementPtrInst*)src)->setIsInBounds(src_gep->isInBounds());
-							src->setDebugLoc(src_gep->getDebugLoc());
-							break;
-						}
-					}
-				}
-				
-				// fix up by emitting a load of the original (src) pointer, then bitcast to the dst type
-				// NOTE: I would expect there to only be one load, but handle all just in case
-				for (auto& ld : loads) {
-					auto src_ld = new LoadInst(src_type, src, ld->getName(), ld->isVolatile(), ld->getAlign(), ld);
-					src_ld->copyMetadata(*ld);
-					src_ld->setDebugLoc(ld->getDebugLoc());
-					
-					auto src_bc = new BitCastInst(src_ld, dst_type, ld->getName() + ".bc", ld);
-					src_bc->setDebugLoc(ld->getDebugLoc());
-					
-					// cleanup
-					ld->replaceAllUsesWith(src_bc);
-					ld->eraseFromParent();
-				}
+				createMemSetLoop(&memset_instr, dst, len_op, src,
+								 memset_instr.getDestAlign().valueOrOne(),
+								 memset_instr.isVolatile(), override_loop_op_type);
 			}
-			
-			// cleanup
-			for (auto& cleanup_instr : cleanup_instrs) {
-				if (cleanup_instr && cleanup_instr->users().empty() && cleanup_instr->uses().empty()) {
-					cleanup_instr->eraseFromParent();
-				}
-			}
-			
+			memset_instr.eraseFromParent();
 			return true;
-		}
-		
-		std::optional<bool> fix_pointer_bitcast_with_stores(BitCastInst& BC, Function& F, const std::vector<StoreInst*>& stores) {
-			const auto dst_type = cast<PointerType>(BC.getDestTy())->getPointerElementType();
-			const auto dst_size = DL->getTypeStoreSize(dst_type).getFixedSize();
-			
-			auto src_ptr_type = cast<PointerType>(BC.getSrcTy());
-			auto src_type = cast<PointerType>(BC.getSrcTy())->getPointerElementType();
-			auto src_size = DL->getTypeStoreSize(src_type).getFixedSize();
-			auto src = cast<Instruction>(BC.getOperand(0));
-			GetElementPtrInst* src_gep = nullptr;
-			
-			std::vector<Instruction*> cleanup_instrs { &BC };
-			
-			// direct struct<->vector bitcast+store?
-			bool is_vec_struct_store = ((src_type->isVectorTy() && dst_type->isStructTy()) ||
-										(src_type->isStructTy() && dst_type->isVectorTy()));
-			
-			// indirect struct->vector bitcast+store?
-			// src might already point to the lowest element of a struct -> need to go up
-			if (!is_vec_struct_store && src_size < dst_size && dst_type->isVectorTy()) { // TODO: is this correct?
-				if (auto gep = dyn_cast_or_null<GetElementPtrInst>(src); gep && gep->getSourceElementType()->isStructTy()) {
-					const auto src_elem_type = gep->getSourceElementType();
-					SmallVector<Value*> indices;
-					for (auto& idx : gep->indices()) {
-						indices.emplace_back(idx);
-					}
-					
-					for (size_t i = 1, count = indices.size(); i < count; ++i) {
-						// last index must be 0 for this to work
-						const auto last_idx = dyn_cast_or_null<ConstantInt>(indices.back());
-						if (!last_idx || last_idx->getZExtValue() != 0) {
-							break;
-						}
-						indices.pop_back();
-						
-						auto higher_src_type = GetElementPtrInst::getIndexedType(src_elem_type, indices);
-						if (higher_src_type) {
-							if (auto new_src_size = DL->getTypeStoreSize(higher_src_type).getFixedSize(); new_src_size >= dst_size) {
-								// found it, create a new GEP with the current indices
-								src_gep = GetElementPtrInst::Create(gep->getSourceElementType(), gep->getOperand(0),
-																	indices, src->getName() + ".adj", src);
-								src_gep->setIsInBounds(gep->isInBounds());
-								src_gep->setDebugLoc(gep->getDebugLoc());
-								
-								// set new src
-								auto new_src_ptr_type = PointerType::get(higher_src_type, src_ptr_type->getPointerAddressSpace());
-								src_ptr_type = new_src_ptr_type;
-								src_size = new_src_size;
-								src_type = higher_src_type;
-								src = src_gep;
-								cleanup_instrs.emplace_back(src);
-								
-								is_vec_struct_store = true;
-								break;
-							}
-						}
-					}
-				}
-			}
-			
-			if (is_vec_struct_store) {
-				if (stores.size() > 1) {
-					ctx->emitError(&BC, "invalid pointer bitcast: can't replace more than one store");
-					return {};
-				}
-				// TODO: implement this
-				assert(false && "unhandled bitcast store replacement");
-			} else {
-				// -> non vector<->struct BC+store
-				
-				// if the source size is larger, the source pointer likely orignates from a struct GEP at a higher level
-				// -> drill down
-				if (src_size > dst_size) { // TODO: is this correct?
-					src_gep = dyn_cast_or_null<GetElementPtrInst>(src);
-					if (!src_gep) {
-						ctx->emitError(&BC, "invalid pointer bitcast: invalid src -> dst cast (can't replace non-GEP src)");
-						return {};
-					}
-					cleanup_instrs.emplace_back(src_gep);
-					
-					SmallVector<llvm::Value*> indices;
-					for (auto& idx : src_gep->indices()) {
-						indices.emplace_back(idx);
-					}
-					
-					for (;;) {
-						auto src_st_type = dyn_cast_or_null<StructType>(src_type);
-						if (!src_st_type) {
-							ctx->emitError(&BC, "invalid pointer bitcast: invalid src -> dst cast (src is not a struct type)");
-							return {};
-						}
-						indices.emplace_back(ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0u));
-						src_type = src_st_type->getStructElementType(0);
-						src_size = DL->getTypeStoreSize(src_type).getFixedSize();
-						if (src_size == dst_size) {
-							// if this is still a struct type, do another round (struct containing a single element)
-							// also: if this matches the dst type (for some reason, which shouldn't occur ...), use it straight away
-							if (src_type->isStructTy() && src_type != dst_type) {
-								assert(cast<StructType>(src_type)->getStructNumElements() == 1);
-								continue;
-							}
-							
-							src = GetElementPtrInst::Create(src_gep->getSourceElementType(), src_gep->getOperand(0), indices,
-															src_gep->getName(), src_gep);
-							((GetElementPtrInst*)src)->setIsInBounds(src_gep->isInBounds());
-							src->setDebugLoc(src_gep->getDebugLoc());
-							break;
-						}
-					}
-					// TODO: implement this
-					assert(false && "unhandled bitcast store replacement");
-				} else if (src_size < dst_size) {
-					if (stores.size() > 1) {
-						ctx->emitError(&BC, "invalid pointer bitcast: can't replace more than one store");
-						return {};
-					}
-					
-					src_gep = dyn_cast_or_null<GetElementPtrInst>(src);
-					if (!src_gep) {
-						ctx->emitError(&BC, "invalid pointer bitcast: invalid src -> dst cast (can't replace non-GEP src)");
-						return {};
-					}
-					
-					// if this happens, a larger value/type is stored to a pointer of lower bit depth (e.g. i64 into i8*)
-					// -> split up value into parts that fit into the used pointer element type
-					assert((dst_size % src_size) == 0u && "uneven store using a larger value type into a smaller pointer type");
-					const auto split_count = (dst_size / src_size);
-					const auto src_bitness = src_size * 8u;
-					
-					SmallVector<Value*, 8> src_gep_indices;
-					for (auto& idx : src_gep->indices()) {
-						src_gep_indices.emplace_back(idx);
-					}
-					
-					const auto store = stores[0];
-					auto store_value = store->getValueOperand();
-					Type* store_value_int_type = nullptr;
-					if (!store_value->getType()->isIntegerTy()) {
-						// if the source value is not an integer, we need to bitcast it to an integer
-						// NOTE/TODO: this probably won't work in all cases ...
-						assert(dst_size <= 8 && "source value is too large");
-						store_value_int_type = IntegerType::get(*ctx, dst_size * 8u);
-						store_value = new BitCastInst(store_value, store_value_int_type, "store_value_bc", store);
-					} else {
-						store_value_int_type = store_value->getType();
-					}
-					
-					cleanup_instrs.emplace_back(store);
-					for (uint32_t split_idx = 0u; split_idx < split_count; ++split_idx) {
-						Value* shifted_value = nullptr;
-						GetElementPtrInst* store_gep = nullptr;
-						if (split_idx > 0) {
-							// right shift by bitness * split-index
-							shifted_value = BinaryOperator::CreateLShr(store_value,
-																	   ConstantInt::get(store_value_int_type, split_idx * src_bitness),
-																	   "st_split_shift", store);
-							
-							// advance GEP by one
-							auto adj_gep_indices = src_gep_indices;
-							auto last_gep_idx = adj_gep_indices.back();
-							auto adv_idx = BinaryOperator::CreateAdd(last_gep_idx,
-																	 ConstantInt::get(last_gep_idx->getType(), split_idx),
-																	 "st_src_gep_idx_adv", src_gep);
-							adj_gep_indices[adj_gep_indices.size() - 1] = adv_idx;
-							
-							store_gep = llvm::GetElementPtrInst::Create(src_gep->getSourceElementType(), src_gep->getPointerOperand(),
-																		adj_gep_indices, "st_src_gep_adv", src_gep);
-							if (src_gep->isInBounds()) {
-								store_gep->setIsInBounds();
-							}
-							store_gep->copyMetadata(*src_gep);
-							store_gep->setDebugLoc(src_gep->getDebugLoc());
-						} else {
-							// first iteration: use value and GEP as is
-							shifted_value = store_value;
-							store_gep = src_gep;
-						}
-						auto trunc_shifted_value = new TruncInst(shifted_value, src_type, "st_trunc_split_shift", store);
-						auto repl_st = new StoreInst(trunc_shifted_value, store_gep, store->isVolatile(),
-													 store->getAlign(), store->getOrdering(), store->getSyncScopeID(),
-													 store);
-						repl_st->copyMetadata(*store);
-						repl_st->setDebugLoc(store->getDebugLoc());
-					}
-				} else { // src_size == dst_size
-					// TODO: implement this?
-					// -> ignore for now, since sizes do match
-				}
-			}
-			
-			// cleanup
-			for (auto& cleanup_instr : cleanup_instrs) {
-				if (cleanup_instr && cleanup_instr->users().empty() && cleanup_instr->uses().empty()) {
-					cleanup_instr->eraseFromParent();
-				}
-			}
-			
-			return true;
-		}
-		
-		bool fix_pointer_bitcasts() {
-			bool did_modify = false;
-			for (auto& BC : ptr_bc_instrs) {
-				const auto src_ptr_type = cast<PointerType>(BC->getSrcTy());
-				const auto dst_ptr_type = cast<PointerType>(BC->getDestTy());
-				
-				// bitcasts aren't technically allowed to bitcast address spaces, but still check this
-				if (src_ptr_type->getAddressSpace() != dst_ptr_type->getAddressSpace()) {
-					ctx->emitError(BC, "invalid pointer bitcast: address space cast is not allowed");
-					return false;
-				}
-				
-				// we will only replace the pointer bitcast if all users are simple loads or stores
-				bool all_users_are_loads_or_stores = true;
-				std::vector<LoadInst*> loads;
-				std::vector<StoreInst*> stores;
-				libfloor_utils::for_all_instruction_users(*BC, [&all_users_are_loads_or_stores, &loads, &stores](Instruction& instr) {
-					if (auto ld = dyn_cast_or_null<LoadInst>(&instr); ld) {
-						loads.emplace_back(ld);
-					} else if (auto st = dyn_cast_or_null<StoreInst>(&instr); st) {
-						stores.emplace_back(st);
-					} else if (dyn_cast_or_null<CallInst>(&instr)) {
-						// ignore external function calls (may e.g. be used for atomic functions)
-					} else {
-						all_users_are_loads_or_stores = false;
-					}
-				});
-				if (!all_users_are_loads_or_stores) {
-					ctx->emitError(BC, "invalid pointer bitcast: failed to run bitcast fixup (unhandled instructions)");
-					return false;
-				}
-				if (!stores.empty() && !loads.empty()) {
-					ctx->emitError(BC, "invalid pointer bitcast: failed to run bitcast fixup (can't handle both loads and stores)");
-					return false;
-				}
-				if (loads.empty() && stores.empty()) {
-					// ignore this bitcast
-					continue;
-				}
-				
-				if (!loads.empty()) {
-					auto result = fix_pointer_bitcast_with_loads(*BC, *func, loads);
-					if (!result) {
-						return false;
-					}
-					did_modify |= *result;
-				}
-
-				// NOTE: this is still very much a WIP and may fail catastrophically
-				if (!stores.empty()) {
-					auto result = fix_pointer_bitcast_with_stores(*BC, *func, stores);
-					if (!result) {
-						return false;
-					}
-					did_modify |= *result;
-				}
-			}
-			return did_modify;
 		}
 	};
 	
@@ -3231,19 +3154,6 @@ INITIALIZE_PASS_DEPENDENCY(CallGraphWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_END(VulkanPreFinal, "VulkanPreFinal", "VulkanPreFinal Pass", false, false)
-
-char VulkanPreFinalPointerBCFixup::ID = 0;
-FunctionPass *llvm::createVulkanPreFinalPointerBCFixupPass() {
-	return new VulkanPreFinalPointerBCFixup();
-}
-INITIALIZE_PASS_BEGIN(VulkanPreFinalPointerBCFixup, "VulkanPreFinalPointerBCFixup", "VulkanPreFinalPointerBCFixup Pass", false, false)
-INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
-INITIALIZE_PASS_DEPENDENCY(GlobalsAAWrapperPass)
-INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
-INITIALIZE_PASS_DEPENDENCY(CallGraphWrapperPass)
-INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
-INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
-INITIALIZE_PASS_END(VulkanPreFinalPointerBCFixup, "VulkanPreFinalPointerBCFixup", "VulkanPreFinalPointerBCFixup Pass", false, false)
 
 char VulkanFinalModuleCleanup::ID = 0;
 ModulePass *llvm::createVulkanFinalModuleCleanupPass() {

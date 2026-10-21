@@ -24,6 +24,7 @@
 #include "llvm/Analysis/ScopedNoAliasAA.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/TypeBasedAliasAnalysis.h"
+#include "llvm/CodeGen/Passes.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Verifier.h"
@@ -226,7 +227,6 @@ PassManagerBuilder::PassManagerBuilder() {
     EnableAddressSpaceFix = false;
     EnableCUDAPasses = false;
     EnableMetalPasses = false;
-    EnableMetalIntelWorkarounds = false;
     EnableSPIRPasses = false;
     EnableSPIRIntelWorkarounds = false;
     EnableVerifySPIR = false;
@@ -728,13 +728,6 @@ void PassManagerBuilder::populateModulePassManager(
     //MPM.add(createBarrierNoopPass());
   }
 
-  // run "first" passes that should run before all else
-  // if(EnableCUDAPasses) --none
-  if(EnableMetalPasses) {
-    MPM.add(createMetalFirstPass(EnableMetalIntelWorkarounds));
-  }
-  // if(EnableSPIRPasses) --none
-
   // run this before any other major optimizations (it will be helpful to them)
   MPM.add(createPropagateRangeInfoPass());
 
@@ -889,6 +882,13 @@ void PassManagerBuilder::populateModulePassManager(
   if (OptLevel > 2)
     MPM.add(createArgumentPromotionPass()); // Scalarize uninlined fn args
 
+  // run mesh shading transformations now as this will likely require an SROA pass which is done next (func simplification)
+  if (EnableMetalPasses) {
+    MPM.add(createMetalMeshPass());
+  } else if (EnableVulkanPasses) {
+    MPM.add(createVulkanMeshPass());
+  }
+
   addExtensionsToPM(EP_CGSCCOptimizerLate, MPM);
   addFunctionSimplificationPasses(MPM);
 
@@ -902,13 +902,12 @@ void PassManagerBuilder::populateModulePassManager(
   // with constants potentially changing/improving the behavior and allowing
   // additional checking (like oob offsets).
   if(EnableCUDAPasses || EnableMetalPasses || EnableSPIRPasses) {
-    if(EnableCUDAPasses) MPM.add(createCUDAImagePass(floor_image_capabilities));
-    if(EnableMetalPasses) MPM.add(createMetalImagePass(floor_image_capabilities));
-    if(EnableSPIRPasses) {
-      if(!EnableVulkanPasses) {
+    if (EnableCUDAPasses) MPM.add(createCUDAImagePass(floor_image_capabilities));
+    if (EnableMetalPasses) MPM.add(createMetalImagePass(floor_image_capabilities));
+    if (EnableSPIRPasses) {
+      if (!EnableVulkanPasses) {
         MPM.add(createSPIRImagePass(floor_image_capabilities, EnableSPIRIntelWorkarounds));
-      }
-      else {
+      } else {
         MPM.add(createVulkanImagePass(floor_image_capabilities));
       }
     }
@@ -1085,6 +1084,11 @@ void PassManagerBuilder::populateModulePassManager(
   MPM.add(createCFGSimplificationPass(
       SimplifyCFGOptions().convertSwitchRangeToICmp(true)));
 
+  // expand all llvm.vector.reduce.* intrinsics for Metal/Vulkan/OpenCL
+  if (EnableMetalPasses || EnableVulkanPasses || EnableSPIRPasses) {
+    MPM.add(createExpandReductionsPass());
+  }
+
   addExtensionsToPM(EP_OptimizerLast, MPM);
 
   // run backend final passes at the very end, no IR should change after this point!
@@ -1096,6 +1100,9 @@ void PassManagerBuilder::populateModulePassManager(
     }
   }
   if (EnableVulkanPasses) { // must run after spir!
+    // builtin -> parameter replacement
+    MPM.add(createVulkanBuiltinParamHandlingPass());
+
     // initial cfg cleanup/simplification
     MPM.add(createAggressiveDCEPass(true /* allow CFG removal here */));
     // NOTE: we no longer need to or want to perform switch lowering (switch'es can be handled now!)
@@ -1111,9 +1118,6 @@ void PassManagerBuilder::populateModulePassManager(
     MPM.add(createNaryReassociatePass());
     MPM.add(createEarlyCSEPass());
 
-    // builtin -> parameter replacement
-    MPM.add(createVulkanBuiltinParamHandlingPass());
-
     // "pre-final" vulkanization (prior to cfg structurization)
     // NOTE: we perform some loop+vector passes after this to clean up lowered memcpy's
     MPM.add(createVulkanPreFinalPass());
@@ -1124,7 +1128,7 @@ void PassManagerBuilder::populateModulePassManager(
     MPM.add(createVulkanPreFinalPass()); // yes, run again
 
     // try to fix invalid pointer bitcasts (must be done after memcpy lowering)
-    MPM.add(createVulkanPreFinalPointerBCFixupPass());
+    MPM.add(createPointerBCFixupPass());
 
     // run attribute inference again so that we can safely assume which arguments are read-only/write-only/read-write
     MPM.add(createInferFunctionAttrsLegacyPass());
@@ -1142,14 +1146,27 @@ void PassManagerBuilder::populateModulePassManager(
     }
     // -> finally use the CFG structurizer from dxil-spirv to get a proper conformant CFG
     MPM.add(createCFGStructurizationPass());
+    // try to fix up allocas that were created during structurization
+    MPM.add(createPromoteMemoryToRegisterPass());
 
     // vulkanization
     MPM.add(createVulkanFinalPass());
+    MPM.add(createPropagateCoherencyPass());
     MPM.add(createVulkanFinalModuleCleanupPass());
   }
   if (EnableMetalPasses) {
+    // perform memop lowering (where beneficial) + loop+vector passes for cleanup
+    MPM.add(createMetalMemopLoweringPass());
+    MPM.add(createSimpleLoopUnrollPass(OptLevel, DisableUnrollLoops, ForgetAllSCEVInLoopUnroll));
+    MPM.add(createLoopDistributePass());
+    addVectorPasses(MPM, /* IsFullLTO */ false);
+    addVectorPasses(MPM, true);
+
+    // remaining final passes
+    MPM.add(createPointerBCFixupPass());
     MPM.add(createFMACombinerPass());
-    MPM.add(createMetalFinalPass(EnableMetalIntelWorkarounds));
+    MPM.add(createMetalFinalPass());
+    MPM.add(createPropagateCoherencyPass());
     MPM.add(createMetalFinalModuleCleanupPass());
   }
 
@@ -1170,6 +1187,11 @@ void PassManagerBuilder::populateModulePassManager(
     // NOTE: use new GVN here, b/c it doesn't change basic blocks
     MPM.add(createNewGVNPass());
     MPM.add(createAggressiveDCEPass(false /* don't allow CFG removal */));
+  }
+
+  // perform final module cleanup (this won't modify CFG)
+  if (EnableMetalPasses || EnableCUDAPasses || EnableSPIRPasses || EnableVulkanPasses) {
+	  MPM.add(createFloorModuleCleanupPass());
   }
 
   if (EnableVerifySPIR) MPM.add(createSpirValidationPass());

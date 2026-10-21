@@ -32,6 +32,8 @@
 #include <string>
 #include <array>
 #include <unordered_map>
+#include <optional>
+#include "llvm/IR/Constants.h"
 
 namespace metal {
 
@@ -65,6 +67,7 @@ enum TAG_TYPE : uint32_t {
 	DEPF        = make_tag_type('D', 'E', 'P', 'F'),
 	// used in reflection list section
 	RBUF        = make_tag_type('R', 'B', 'U', 'F'),
+	RBUZ        = make_tag_type('R', 'B', 'U', 'Z'),
 	AIRR        = make_tag_type('A', 'I', 'R', 'R'),
 	// used for source code/archive
 	SARC        = make_tag_type('S', 'A', 'R', 'C'),
@@ -75,6 +78,34 @@ enum TAG_TYPE : uint32_t {
 	END         = make_tag_type('E', 'N', 'D', 'T'),
 };
 #undef make_tag_type
+
+//! entry point function type
+enum class FUNCTION_TYPE : uint8_t {
+	VERTEX = 0,
+	FRAGMENT = 1,
+	KERNEL = 2,
+	UNQUALIFIED = 3,
+	VISIBLE = 4,
+	EXTERN = 5,
+	INTERSECTION = 6,
+	MESH = 7,
+	OBJECT = 8,
+	NONE = 255
+};
+
+//! supported memory address spaces
+enum class ADDRESS_SPACE : uint8_t {
+	PRIVATE = 0u,
+	GLOBAL = 1u,
+	CONSTANT = 2u,
+	LOCAL = 3u,
+	IMAGEBLOCK = 4u,
+	RAY = 5u,
+	TASK = 6u,
+	MESH = 7u,
+	GENERIC = 8u,
+	INTERSECTION_RESULT = 9u,
+};
 
 //! Apple platform targets
 //! in recent LLVM versions, this is defined here: https://github.com/llvm/llvm-project/blob/main/llvm/include/llvm/BinaryFormat/MachO.def#L123
@@ -236,6 +267,15 @@ enum class DATA_TYPE : uint8_t {
 	
 	BOOL8 = 119,
 	BOOL16 = 120,
+	
+	BFLOAT1 = 121,
+	BFLOAT2 = 122,
+	BFLOAT3 = 123,
+	BFLOAT4 = 124,
+	
+	DEPTH_STENCIL_STATE = 139,
+	
+	TENSOR = 140,
 };
 
 static inline const char* data_type_to_string(const DATA_TYPE type) {
@@ -478,6 +518,18 @@ static inline const char* data_type_to_string(const DATA_TYPE type) {
 			return "bool8";
 		case DATA_TYPE::BOOL16:
 			return "bool16";
+		case DATA_TYPE::BFLOAT1:
+			return "bfloat";
+		case DATA_TYPE::BFLOAT2:
+			return "bfloat2";
+		case DATA_TYPE::BFLOAT3:
+			return "bfloat3";
+		case DATA_TYPE::BFLOAT4:
+			return "bfloat4";
+		case DATA_TYPE::DEPTH_STENCIL_STATE:
+			return "depth-stencil-state";
+		case DATA_TYPE::TENSOR:
+			return "tensor";
 		case DATA_TYPE::_UNUSED_0:
 		case DATA_TYPE::_UNUSED_1:
 			break;
@@ -547,6 +599,11 @@ static inline DATA_TYPE data_type_from_string(const std::string& type_str) {
 		{ "bool2", DATA_TYPE::BOOL2 },
 		{ "bool3", DATA_TYPE::BOOL3 },
 		{ "bool4", DATA_TYPE::BOOL4 },
+		{ "bfloat", DATA_TYPE::BFLOAT1 },
+		{ "bfloat1", DATA_TYPE::BFLOAT1 },
+		{ "bfloat2", DATA_TYPE::BFLOAT2 },
+		{ "bfloat3", DATA_TYPE::BFLOAT3 },
+		{ "bfloat4", DATA_TYPE::BFLOAT4 },
 	};
 	const auto iter = lut.find(type_str);
 	if (iter == lut.end()) {
@@ -579,7 +636,7 @@ struct function_constant {
 	bool active { false };
 };
 
-//! returns the Metal language version of a module as major_version * 100 + minor_version * 10 (e.g. 310 for Metal 3.1)
+//! returns the Metal language version of a module as major_version * 100 + minor_version * 10 (e.g. 320 for Metal 3.2)
 static inline uint32_t get_metal_version(llvm::Module& M) {
 	llvm::NamedMDNode* AIRLangVersion = M.getNamedMetadata("air.language_version");
 	assert(AIRLangVersion);
@@ -600,6 +657,43 @@ static inline uint32_t get_metal_version(llvm::Module& M) {
 		}
 	}
 	return metal_version;
+}
+
+static inline std::optional<std::string> get_metal_native_typename(llvm::Type* type, const bool is_signed, const bool with_sign_prefix) {
+	std::string ret;
+	auto elem_type = type;
+	if (auto vec_type = dyn_cast_or_null<llvm::FixedVectorType>(type); vec_type) {
+		elem_type = vec_type->getElementType();
+		ret += "v" + std::to_string(vec_type->getNumElements());
+	}
+	switch (elem_type->getTypeID()) {
+		case llvm::Type::IntegerTyID:
+			if (with_sign_prefix) {
+				ret += (is_signed ? "s." : "u.");
+			}
+			ret += "i" + std::to_string(cast<llvm::IntegerType>(elem_type)->getBitWidth());
+			break;
+			// NOTE: we generally omit the ".f" here, because it's usually not wanted
+		case llvm::Type::HalfTyID:
+			ret += "f16";
+			break;
+		case llvm::Type::FloatTyID:
+			ret += "f32";
+			break;
+		case llvm::Type::DoubleTyID:
+			ret += "f64";
+			break;
+		default:
+			return {};
+	}
+	return ret;
+}
+
+static inline std::optional<std::string> get_metal_suffix_for_type(llvm::Type* type, const bool is_signed) {
+	if (auto str = get_metal_native_typename(type, is_signed, true); str) {
+		return "." + *str;
+	}
+	return {};
 }
 
 } // namespace metal

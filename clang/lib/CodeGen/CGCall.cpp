@@ -63,11 +63,14 @@ unsigned CodeGenTypes::ClangCallConvToLLVMCallConv(CallingConv CC) {
   case CC_X86VectorCall: return llvm::CallingConv::X86_VectorCall;
   case CC_AArch64VectorCall: return llvm::CallingConv::AArch64_VectorCall;
   case CC_FloorFunction: return llvm::CallingConv::FLOOR_FUNC;
+  case CC_FloorIOFunction: return llvm::CallingConv::FLOOR_IO_FUNC;
   case CC_FloorKernel: return llvm::CallingConv::FLOOR_KERNEL;
   case CC_FloorVertex: return llvm::CallingConv::FLOOR_VERTEX;
   case CC_FloorFragment: return llvm::CallingConv::FLOOR_FRAGMENT;
   case CC_FloorTessControl: return llvm::CallingConv::FLOOR_TESS_CONTROL;
   case CC_FloorTessEval: return llvm::CallingConv::FLOOR_TESS_EVAL;
+  case CC_FloorTask: return llvm::CallingConv::FLOOR_TASK;
+  case CC_FloorMesh: return llvm::CallingConv::FLOOR_MESH;
   case CC_PreserveMost: return llvm::CallingConv::PreserveMost;
   case CC_PreserveAll: return llvm::CallingConv::PreserveAll;
   case CC_Swift: return llvm::CallingConv::Swift;
@@ -255,8 +258,17 @@ static CallingConv getCallingConventionForDecl(const ObjCMethodDecl *D,
   if (D->hasAttr<GraphicsTessellationEvaluationShaderAttr>())
     return CC_FloorTessEval;
 
+  if (D->hasAttr<GraphicsTaskShaderAttr>())
+    return CC_FloorTask;
+
+  if (D->hasAttr<GraphicsMeshShaderAttr>())
+    return CC_FloorMesh;
+
   if (D->hasAttr<ComputeKernelAttr>())
     return CC_FloorKernel;
+
+  if (D->hasAttr<FloorIOFunctionAttr>())
+    return CC_FloorIOFunction;
 
   if (D->hasAttr<PreserveMostAttr>())
     return CC_PreserveMost;
@@ -471,9 +483,11 @@ uint32_t CodeGenTypes::getMetalVulkanImplicitArgCount(const FunctionDecl* FD) co
     } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
       return 4 + printf_arg;
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
-      return 1 + printf_arg + (CodeGenOpts.GraphicsPrimitiveID ? 1 : 0) + (CodeGenOpts.GraphicsBarycentricCoord ? 1 : 0);
+      return 2 + printf_arg + (CodeGenOpts.GraphicsPrimitiveID ? 1 : 0) + (CodeGenOpts.GraphicsBarycentricCoord ? 1 : 0);
     } else if (FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
       return 4 + printf_arg;
+    } else if (FD->hasAttr<GraphicsTaskShaderAttr>() || FD->hasAttr<GraphicsMeshShaderAttr>()) {
+      return 10 + printf_arg;
     }
   } else if(LangOpts.Vulkan) {
     const uint32_t printf_arg = (CodeGenOpts.VulkanSoftPrintf > 0 ? 1 : 0);
@@ -482,11 +496,15 @@ uint32_t CodeGenTypes::getMetalVulkanImplicitArgCount(const FunctionDecl* FD) co
     } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
       return 5 + printf_arg;
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
-      return 3 + printf_arg + (CodeGenOpts.GraphicsPrimitiveID ? 1 : 0) + (CodeGenOpts.GraphicsBarycentricCoord ? 1 : 0);
+      return 4 + printf_arg + (CodeGenOpts.GraphicsPrimitiveID ? 1 : 0) + (CodeGenOpts.GraphicsBarycentricCoord ? 1 : 0);
     } else if (FD->hasAttr<GraphicsTessellationControlShaderAttr>()) {
-      return 0 + printf_arg; // TODO: !
+      return 0 + printf_arg;
     } else if (FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
-      return 0 + printf_arg; // TODO: !
+      return 0 + printf_arg;
+    } else if (FD->hasAttr<GraphicsTaskShaderAttr>()) {
+      return 6 + printf_arg;
+    } else if (FD->hasAttr<GraphicsMeshShaderAttr>()) {
+      return 7 + printf_arg;
     }
   }
 
@@ -508,7 +526,9 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       !FD->hasAttr<GraphicsVertexShaderAttr>() &&
       !FD->hasAttr<GraphicsFragmentShaderAttr>() &&
       !FD->hasAttr<GraphicsTessellationControlShaderAttr>() &&
-      !FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
+      !FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>() &&
+      !FD->hasAttr<GraphicsTaskShaderAttr>() &&
+      !FD->hasAttr<GraphicsMeshShaderAttr>()) {
     return; // no entry function/point
   }
 
@@ -551,7 +571,8 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       add_arg(Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.IntTy, LangAS::opencl_global)), "__metal__printf_buffer__");
     }
 
-    if (FD->hasAttr<ComputeKernelAttr>() || FD->hasAttr<GraphicsTessellationControlShaderAttr>()) {
+    if (FD->hasAttr<ComputeKernelAttr>() || FD->hasAttr<GraphicsTessellationControlShaderAttr>() ||
+        FD->hasAttr<GraphicsTaskShaderAttr>() || FD->hasAttr<GraphicsMeshShaderAttr>()) {
       // id types, all int3:
       auto int3_type = Ctx.getExtVectorType(Ctx.IntTy, 3);
       add_arg(int3_type, "__metal__global_id__");
@@ -581,9 +602,9 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
         add_arg(float3_type, "__metal__barycentric_coord__");
       }
 
-      // fixed: only point coord for now:
       auto float2_type = Ctx.getExtVectorType(Ctx.FloatTy, 2);
       add_arg(float2_type, "__metal__point_coord__");
+      add_arg(Ctx.BoolTy, "__metal__front_facing__");
     } else if (FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
       // patch id, instance id and position-in-patch:
       add_arg(Ctx.IntTy, "__metal__patch_id__");
@@ -598,7 +619,7 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       add_arg(Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.IntTy, LangAS::opencl_global)), "vulkan.printf_buffer");
     }
 
-    if (FD->hasAttr<ComputeKernelAttr>()) {
+    if (FD->hasAttr<ComputeKernelAttr>() || FD->hasAttr<GraphicsTaskShaderAttr>() || FD->hasAttr<GraphicsMeshShaderAttr>()) {
       // id types, all int3* or int* (sub-group):
       auto int3_type = Ctx.getExtVectorType(Ctx.IntTy, 3);
       auto int3_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(int3_type, LangAS::vulkan_input));
@@ -609,6 +630,10 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       add_arg(int_ptr_type, "vulkan.sub_group_local_id");
       add_arg(int_ptr_type, "vulkan.sub_group_size");
       add_arg(int_ptr_type, "vulkan.num_sub_groups");
+      if (FD->hasAttr<GraphicsMeshShaderAttr>()) {
+        // mesh shader also allows/needs view_index
+        add_arg(int_ptr_type, "vulkan.view_index");
+      }
     } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
       // only vertex id + view index + instance id for now:
       auto int_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.IntTy, LangAS::vulkan_input));
@@ -629,16 +654,13 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
         add_arg(float3_ptr_type, "vulkan.barycentric_coord");
       }
 
-      // fixed: only point + frag coord + view index for now:
       auto float2_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.getExtVectorType(Ctx.FloatTy, 2), LangAS::vulkan_input));
       add_arg(float2_ptr_type, "vulkan.point_coord");
       auto float4_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.getExtVectorType(Ctx.FloatTy, 4), LangAS::vulkan_input));
       add_arg(float4_ptr_type, "vulkan.frag_coord");
       add_arg(int_ptr_type, "vulkan.view_index");
-    } else if (FD->hasAttr<GraphicsTessellationControlShaderAttr>()) {
-      // TODO: !
-    } else if (FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
-      // TODO: !
+      auto bool_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.BoolTy, LangAS::vulkan_input));
+      add_arg(bool_ptr_type, "vulkan.front_facing");
     }
   }
 
@@ -973,6 +995,104 @@ void computeSPIRKernelABIInfo(CodeGenModule &CGM, CGFunctionInfo &FI);
 }
 }
 
+llvm::Type* CodeGenTypes::GraphicsExpandIOType(const QualType& type,
+											   const bool create_unnamed,
+											   const bool is_floor_arg_buffer,
+											   const bool is_task_or_mesh) {
+	if (!type->isStructureOrClassType()) {
+		return ConvertType(type);
+	}
+	const auto cxx_rdecl = type->getAsCXXRecordDecl();
+	
+	// check for incompatible packed attribute
+	if (cxx_rdecl->hasAttr<PackedAttr>()) {
+		auto err_diagID = getContext().getDiagnostics().getCustomDiagID(DiagnosticsEngine::Fatal, "%0");
+		getContext().getDiagnostics().Report(cxx_rdecl->getSourceRange().getBegin(),
+											 err_diagID) << "graphics I/O types/structs must never be packed";
+		return nullptr;
+	}
+	
+	// if the top decl already is a compat vector, return it directly
+	if (cxx_rdecl->hasAttr<VectorCompatAttr>()) {
+		return ConvertType(Context.get_compat_vector_type(cxx_rdecl));
+	}
+	
+	// check if we already handled this
+	const auto is_vk_floor_arg_buffer = (is_floor_arg_buffer && getContext().getLangOpts().Vulkan);
+	const auto existing_flattened_type = (!is_vk_floor_arg_buffer ?
+										  getFlattenedRecordType(cxx_rdecl, create_unnamed) :
+										  getFlattenedFloorArgBufferType(cxx_rdecl));
+	if (existing_flattened_type) {
+		return existing_flattened_type;
+	}
+	
+	// else: extract all fields and create a flat llvm struct from them
+	const auto fields = get_aggregate_scalar_fields(cxx_rdecl, cxx_rdecl, false, is_vk_floor_arg_buffer, false,
+													/* do not expand image arrays if this is an arg buffer */
+													!is_vk_floor_arg_buffer,
+													/* do not expand non-image arrays if this is an arg buffer or task/mesh type */
+													!is_vk_floor_arg_buffer && !is_task_or_mesh,
+													/* use array parent field decls for non-expanded arrays (-> unique) + singular childs */
+													is_vk_floor_arg_buffer || is_task_or_mesh);
+	std::vector<llvm::Type*> llvm_fields;
+	const type_conversion_opts_t conv_opts {
+		// we always need deep I/O and vector compat conversion for task payloads and mesh types
+		.io_type_conversion = is_task_or_mesh,
+		.convert_array_image_or_buffer_type = true,
+		.single_field_array_image_or_buffer_only = !is_floor_arg_buffer,
+		.vector_compat_conversion = is_task_or_mesh,
+	};
+	for (const auto& field : fields) {
+		if (field.hasAttr<PackedAttr>()) {
+			auto err_diagID = getContext().getDiagnostics().getCustomDiagID(DiagnosticsEngine::Fatal, "%0");
+			getContext().getDiagnostics().Report(field.field_decl->getSourceRange().getBegin(),
+												 err_diagID) << "fields within graphics I/O types/structs must never be packed";
+			return nullptr;
+		}
+		
+		auto llvm_field_type = ConvertType(field.type, conv_opts);
+		if (is_vk_floor_arg_buffer) {
+			if (llvm_field_type->isArrayImageType()) {
+				// transform fields of arrays into pointers to arrays
+				llvm_field_type = llvm::PointerType::get(llvm_field_type, 0u);
+			} else if (llvm_field_type->isArrayBufferType()) {
+				// transform fields of arrays into pointers to arrays
+				llvm_field_type = llvm::PointerType::get(llvm_field_type, getContext().getTargetAddressSpace(LangAS::opencl_global));
+			} else if (!llvm_field_type->isPointerTy() && !field.type->isAggregateImageType()) {
+				// transform non-pointer (buffer) fields into pointers in the constant address space (will be IUBs or SSBOs later on)
+				llvm_field_type = llvm::PointerType::get(llvm_field_type, getContext().getTargetAddressSpace(LangAS::opencl_constant));
+			}
+		}
+		if (!is_task_or_mesh && field.hasAttr<GraphicsPrimitiveCulledAttr>()) {
+			// skip [[culled]] field if not part of task/mesh I/O (generally within fragment shader stage input)
+			continue;
+		}
+		llvm_fields.push_back(llvm_field_type);
+	}
+	if (llvm_fields.empty()) {
+		auto err_diagID = getContext().getDiagnostics().getCustomDiagID(DiagnosticsEngine::Fatal, "%0");
+		getContext().getDiagnostics().Report(cxx_rdecl->getSourceRange().getBegin(),
+											 err_diagID) << "graphics I/O types/structs must never be empty";
+		return nullptr;
+	}
+	
+	llvm::StructType* ret = nullptr;
+	if (!create_unnamed) {
+		std::string name = "struct.floor.flat.";
+		if (is_vk_floor_arg_buffer) {
+			name += "arg_buffer.";
+		}
+		name += cxx_rdecl->getName().str();
+		ret = llvm::StructType::create(llvm_fields, name);
+	} else {
+		assert(!is_floor_arg_buffer);
+		ret = llvm::StructType::get(getLLVMContext(), llvm_fields);
+	}
+	ret->setGraphicsIOType();
+	create_flattened_cg_layout(cxx_rdecl, ret, fields, is_vk_floor_arg_buffer); // create corresponding flattend CGRecordLayout
+	return ret;
+}
+
 /// Arrange the argument and result information for an abstract value
 /// of a given function type.  This is the method which all of the
 /// above functions ultimately defer to.
@@ -1009,29 +1129,73 @@ CodeGenTypes::arrangeLLVMFunctionInfo(CanQualType resultType,
   assert(inserted && "Recursively being processed?");
 
   // Compute ABI information.
-#if 0 // this is stupid ... rather: use a proper ABI implementation as before, which does the correct thing
-  if (CC == llvm::CallingConv::FLOOR_KERNEL) {
-    // Force target independent argument handling for the host visible
-    // kernel functions.
-    computeSPIRKernelABIInfo(CGM, *FI);
-  } else
-#endif
   if (info.getCC() == CC_Swift || info.getCC() == CC_SwiftAsync) {
     swiftcall::computeABIInfo(CGM, *FI);
   } else {
     getABIInfo().computeInfo(*FI);
   }
 
+  // special handling for graphics backends (Metal/Vulkan)
+  // -> if this is a shader, kernel, or I/O function and we have an I/O type that is a struct/aggregate,
+  //    fully expand/flatten all types within (i.e. structs and arrays to scalars, keep existing scalars)
+  const auto is_graphics_abi = ((getContext().getLangOpts().Metal || getContext().getLangOpts().Vulkan) &&
+                                isFloorEntryPoint(info.getCC()));
+  const auto is_floor_io_abi = isFloorIO(info.getCC());
+
   // Loop over all of the computed argument and return value info.  If any of
   // them are direct or extend without a specified coerce type, specify the
   // default now.
   ABIArgInfo &retInfo = FI->getReturnInfo();
-  if (retInfo.canHaveCoerceToType() && retInfo.getCoerceToType() == nullptr)
-    retInfo.setCoerceToType(ConvertType(FI->getReturnType()));
+  if (retInfo.canHaveCoerceToType()) {
+    if (is_graphics_abi && FI->getReturnType()->isStructureOrClassType()) {
+      auto llvm_io_type = GraphicsExpandIOType(FI->getReturnType(), getContext().getLangOpts().Metal, false, false);
+      if (!llvm_io_type) {
+        return *FI;
+      }
+      retInfo.setCoerceToType(llvm_io_type);
+    } else if (retInfo.getCoerceToType() == nullptr) {
+      retInfo.setCoerceToType(ConvertType(FI->getReturnType()));
+    }
+  }
 
-  for (auto &I : FI->arguments())
-    if (I.info.canHaveCoerceToType() && I.info.getCoerceToType() == nullptr)
+  for (uint32_t arg_idx = 0u; auto &I : FI->arguments()) {
+    const QualType arg_type = I.type;
+    const auto arg_ext_info = FI->getExtParameterInfo(arg_idx++);
+    if (is_graphics_abi && arg_type->isStructureOrClassType() &&
+        (arg_ext_info.isFloorStageInput() || I.info.isExpandFloorArgBuffer())) {
+      if (!GraphicsExpandIOType(arg_type, false, I.info.isExpandFloorArgBuffer(), false)) {
+        return *FI;
+      }
+    } else if (is_floor_io_abi && arg_type->isStructureOrClassType()) {
+      assert(I.info.canHaveCoerceToType());
+      auto llvm_io_type = GraphicsExpandIOType(arg_type, false, false, true);
+      if (!llvm_io_type) {
+        return *FI;
+      }
+      I.info.setCoerceToType(llvm_io_type);
+    } else if (is_graphics_abi &&
+               ((arg_type->isAnyPointerType() || arg_type->isReferenceType()) &&
+                arg_type->getPointeeType().getAddressSpace() == LangAS::task_payload)) {
+      assert(I.info.canHaveCoerceToType());
+      auto llvm_io_type = GraphicsExpandIOType(arg_type->getPointeeType(), false, false, true);
+      if (!llvm_io_type) {
+        return *FI;
+      }
+      I.info.setCoerceToType(llvm::PointerType::get(llvm_io_type, Context.getTargetAddressSpace(LangAS::task_payload)));
+    } else if (is_graphics_abi && arg_type->isAnyPointerType() &&
+               arg_type->getPointeeType().getAddressSpace() == LangAS::vulkan_input &&
+               arg_type->getPointeeType()->isBooleanType()) {
+      // NOTE: we generally don't allow bool*/i1* pointers, but for certain builtin inputs we need this
+      assert(I.info.canHaveCoerceToType());
+      I.info.setCoerceToType(llvm::PointerType::get(llvm::IntegerType::get(getLLVMContext(), 1),
+                                                    getContext().getTargetAddressSpace(LangAS::vulkan_input)));
+    } else if (I.info.canHaveCoerceToType() && getContext().getLangOpts().FloorHostCompute &&
+               isFloorEntryPoint(info.getCC())) {
       I.info.setCoerceToType(ConvertType(I.type));
+    } else if (I.info.canHaveCoerceToType() && I.info.getCoerceToType() == nullptr) {
+      I.info.setCoerceToType(ConvertType(I.type));
+    }
+  }
 
   bool erased = FunctionsBeingProcessed.erase(FI); (void)erased;
   assert(erased && "Not in set?");
@@ -1188,17 +1352,9 @@ getTypeExpansion(QualType Ty, const ASTContext &Context,
   const RecordType *RT = Ty->getAs<RecordType>();
   const CXXRecordDecl* cxx_rdecl = (RT != nullptr ? RT->getAsCXXRecordDecl() : nullptr);
   if (cxx_rdecl) {
-    // libfloor vector compat expansion (Metal/Vulkan shader only, or vulkan compute shader)
-    if (cxx_rdecl->hasAttr<VectorCompatAttr>() &&
-        ((Context.getLangOpts().Metal && (CC == CallingConv::CC_FloorVertex ||
-                                          CC == CallingConv::CC_FloorFragment ||
-                                          CC == CallingConv::CC_FloorTessControl ||
-                                          CC == CallingConv::CC_FloorTessEval)) ||
-         (Context.getLangOpts().Vulkan && (CC == CallingConv::CC_FloorKernel ||
-                                           CC == CallingConv::CC_FloorVertex ||
-                                           CC == CallingConv::CC_FloorFragment ||
-                                           CC == CallingConv::CC_FloorTessControl ||
-                                           CC == CallingConv::CC_FloorTessEval)))) {
+    // libfloor vector compat expansion (Metal/Vulkan)
+    if (cxx_rdecl->hasAttr<VectorCompatAttr>() && isFloorEntryPointOrIO(CC) &&
+        (Context.getLangOpts().Metal || Context.getLangOpts().Vulkan)) {
       const auto vec_type = Context.get_compat_vector_type(cxx_rdecl);
       return std::make_unique<FloorVectorCompatExpansion>(Ty, vec_type);
     }
@@ -1207,15 +1363,8 @@ getTypeExpansion(QualType Ty, const ASTContext &Context,
     // * any aggregate if calling a Metal/Vulkan shader function
     // similar to (non-union) record expansion below, but also stores some additional information
     if ((Ty->isAggregateImageType() ||
-         ((Context.getLangOpts().Metal && (CC == CallingConv::CC_FloorVertex ||
-                                           CC == CallingConv::CC_FloorFragment ||
-                                           CC == CallingConv::CC_FloorTessControl ||
-                                           CC == CallingConv::CC_FloorTessEval)) ||
-          (Context.getLangOpts().Vulkan && (CC == CallingConv::CC_FloorKernel ||
-                                            CC == CallingConv::CC_FloorVertex ||
-                                            CC == CallingConv::CC_FloorFragment ||
-                                            CC == CallingConv::CC_FloorTessControl ||
-                                            CC == CallingConv::CC_FloorTessEval)))) &&
+         (isFloorEntryPointOrIO(CC) &&
+          (Context.getLangOpts().Metal || Context.getLangOpts().Vulkan))) &&
         !cxx_rdecl->isUnion()) {
       SmallVector<const CXXBaseSpecifier *, 1> bases;
       SmallVector<const FieldDecl *, 1> field_decls;
@@ -1232,6 +1381,10 @@ getTypeExpansion(QualType Ty, const ASTContext &Context,
           continue;
         assert(!FD->isBitField() &&
                "Cannot expand structure with bit-field members.");
+        if (FD->hasAttr<GraphicsPrimitiveCulledAttr>()) {
+          // skip [[culled]] fields
+          continue;
+        }
         field_decls.push_back(FD);
       }
 
@@ -1241,6 +1394,18 @@ getTypeExpansion(QualType Ty, const ASTContext &Context,
                                                       Context.getLangOpts().Metal),
                                                     !is_vk_floor_arg_buffer,
                                                     is_vk_floor_arg_buffer);
+
+      // remove [[culled]] fields
+      for (auto field_iter = fields.begin(); field_iter != fields.end(); ) {
+        if (field_iter->hasAttr<GraphicsPrimitiveCulledAttr>()) {
+          assert(field_iter->type->isBooleanType());
+          field_iter = fields.erase(field_iter);
+        } else {
+          ++field_iter;
+        }
+      }
+      assert(!fields.empty());
+
       return std::make_unique<FloorAggregateExpansion>(std::move(bases), std::move(field_decls), std::move(fields));
     }
   }
@@ -1336,7 +1501,11 @@ CodeGenTypes::getExpandedTypes(QualType Ty,
   } else if (auto FAExp = dyn_cast<FloorAggregateExpansion>(Exp.get())) {
     const auto is_vk_floor_arg_buffer = (is_floor_arg_buffer && Context.getLangOpts().Vulkan);
     for(const auto& field : FAExp->fields) {
-      auto conv_type = ConvertType(field.type, true, !is_floor_arg_buffer);
+      const type_conversion_opts_t conv_opts {
+        .convert_array_image_or_buffer_type = true,
+        .single_field_array_image_or_buffer_only = !is_floor_arg_buffer,
+      };
+      auto conv_type = ConvertType(field.type, conv_opts);
       if (field.type->isArrayImageType(false)) {
         *TI++ = (!conv_type->isPointerTy() ? llvm::PointerType::get(conv_type, 0) : conv_type);
       } else if (field.type->isArrayBufferType()) {
@@ -2623,7 +2792,7 @@ void CodeGenModule::ConstructAttributeList(StringRef Name,
                                  NumElemsParam);
     }
 
-    if (TargetDecl->hasAttr<ComputeKernelAttr>()) {
+    if (TargetDecl->hasAttr<ComputeKernelAttr>() && !getLangOpts().Metal) {
       if (getLangOpts().OpenCLVersion <= 120) {
         // OpenCL v1.2 Work groups are always uniform
         FuncAttrs.addAttribute("uniform-work-group-size", "true");
@@ -2983,6 +3152,9 @@ void CodeGenModule::ConstructAttributeList(StringRef Name,
     }
 
     switch (FI.getExtParameterInfo(ArgNo).getABI()) {
+    case ParameterABI::MaxParameterABI:
+      llvm_unreachable("invalid parameter ABI");
+
     case ParameterABI::Ordinary:
       break;
 
@@ -3391,7 +3563,8 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
       }
 
       Address Alloca = CreateMemTemp(Ty, getContext().getDeclAlign(Arg),
-                                     Arg->getName());
+                                     Arg->getName(), nullptr,
+                                     true /* use I/O type if available */);
 
       // Pointer to store into.
       Address Ptr = emitAddressAtOffset(*this, Alloca, ArgI);
@@ -3523,7 +3696,7 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
 			
 			if (field.field_decl) {
 				// array of images/buffers and singular images
-				if (field.type->isArrayImageType(false) || field.type->isArrayBufferType()||
+				if (field.type->isArrayImageType(false) || field.type->isArrayBufferType() ||
 					field.type->isArrayType()) {
 					LValue SubLV = EmitLValueForField(LV, field.field_decl, true);
 					Builder.CreateStore(&*AI, SubLV.getAddress(*this));
@@ -5175,19 +5348,23 @@ public:
 
 } // namespace
 
-static llvm::Value* handle_call_arg_buffer_indirection(llvm::Value* V, llvm::Type* param_type, CGBuilderTy& Builder) {
-	auto base_alloca = dyn_cast_or_null<llvm::AllocaInst>(V);
-	if (!base_alloca) {
-		return nullptr;
-	}
-	
-	auto annotation_md = base_alloca->getMetadata(llvm::LLVMContext::MD_annotation);
-	if (!annotation_md || annotation_md->getNumOperands() == 0) {
-		return nullptr;
-	}
-	auto annotation_str = dyn_cast_or_null<llvm::MDString>(annotation_md->getOperand(0));
-	if (!annotation_str || !annotation_str->getString().equals("vulkan_arg_buffer")) {
-		return nullptr;
+static llvm::Value* handle_call_arg_buffer_indirection(CodeGenFunction& CGF, llvm::Value* V, llvm::Type* param_type, CGBuilderTy& Builder) {
+	// value must either be an alloca or a direct arg buffer argument
+	if (auto base_alloca = dyn_cast_or_null<llvm::AllocaInst>(V); base_alloca) {
+		auto annotation_md = base_alloca->getMetadata(llvm::LLVMContext::MD_annotation);
+		if (!annotation_md || annotation_md->getNumOperands() == 0) {
+			return nullptr;
+		}
+		auto annotation_str = dyn_cast_or_null<llvm::MDString>(annotation_md->getOperand(0));
+		if (!annotation_str || !annotation_str->getString().equals("vulkan_arg_buffer")) {
+			return nullptr;
+		}
+	} else {
+		if (!V->getType()->isPointerTy() ||
+			!V->getType()->getPointerElementType()->isFlattenedFloorArgBufferType() ||
+			!CGF.is_floor_indirect_arg_buffer_argument(V)) {
+			return nullptr;
+		}
 	}
 	
 	// annotate bitcast with "vulkan_arg_buffer" for later fix-up
@@ -5529,7 +5706,8 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
             // it's not ideal to emit an address space cast at all,
             // but we have no other option here if src AS is 0
             V = Builder.CreateAddrSpaceCast(V, param_type);
-          } else if (auto arg_buffer_indirection = handle_call_arg_buffer_indirection(V, param_type, Builder); arg_buffer_indirection) {
+          } else if (auto arg_buffer_indirection = handle_call_arg_buffer_indirection(*this, V, param_type, Builder);
+                     arg_buffer_indirection) {
             V = arg_buffer_indirection;
           } else {
             V = Builder.CreateBitCast(V, param_type);
@@ -5759,6 +5937,23 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
   if (llvm::Function *OrigFn = simplifyVariadicCallee(IRFuncTy, CalleePtr)) {
     CalleePtr = OrigFn;
     IRFuncTy = OrigFn->getFunctionType();
+  }
+
+  // in backends using graphics I/O types, we may need to bitcast arguments to their non-I/O variant
+  if (getContext().getLangOpts().Metal || getContext().getLangOpts().Vulkan) {
+    for (uint32_t arg_idx = 0, arg_count = IRCallArgs.size(); arg_idx < arg_count; ++arg_idx) {
+      const auto func_arg_type = IRFuncTy->getParamType(arg_idx);
+      auto arg_type = IRCallArgs[arg_idx]->getType();
+      if (arg_type != func_arg_type && arg_type->isPointerTy() &&
+          arg_type->getPointerElementType()->isStructTy() &&
+          cast<llvm::StructType>(arg_type->getPointerElementType())->isGraphicsIOType()) {
+        // NOTE: ideally, we would check if the struct type is compatible, but there is no trivial way of doing that,
+        //       and we can't store/associate an equivalent non-I/O struct type either for all I/O types,
+        //       because type translation may simply use a different struct type altogether
+        assert(func_arg_type->isPointerTy() && func_arg_type->getPointerElementType()->isStructTy());
+        IRCallArgs[arg_idx] = Builder.CreateBitCast(IRCallArgs[arg_idx], func_arg_type);
+      }
+    }
   }
 
   // 3. Perform the actual call.

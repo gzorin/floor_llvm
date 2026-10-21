@@ -4003,7 +4003,10 @@ void X86_64ABIInfo::computeInfo(CGFunctionInfo &FI) const {
   unsigned FreeSSERegs = IsRegCall ? 16 : 8;
   unsigned NeededInt, NeededSSE;
 
-  if (!::classifyReturnType(getCXXABI(), FI, *this)) {
+  if (llvm::CallingConv::isFloorEntryPoint(CallingConv)) {
+    FI.getReturnInfo() = (FI.getReturnType()->getTypePtr()->isVoidType() ?
+                          ABIArgInfo::getIgnore() : ABIArgInfo::getDirect());
+  } else if (!::classifyReturnType(getCXXABI(), FI, *this)) {
     if (IsRegCall && FI.getReturnType()->getTypePtr()->isRecordType() &&
         !FI.getReturnType()->getTypePtr()->isUnionType()) {
       FI.getReturnInfo() =
@@ -5561,9 +5564,12 @@ private:
   bool isIllegalVectorType(QualType Ty) const;
 
   void computeInfo(CGFunctionInfo &FI) const override {
-    if (!::classifyReturnType(getCXXABI(), FI, *this))
-      FI.getReturnInfo() =
-          classifyReturnType(FI.getReturnType(), FI.isVariadic());
+    if (llvm::CallingConv::isFloorEntryPoint(FI.getCallingConvention())) {
+      FI.getReturnInfo() = (FI.getReturnType()->getTypePtr()->isVoidType() ?
+                            ABIArgInfo::getIgnore() : ABIArgInfo::getDirect());
+    } else if (!::classifyReturnType(getCXXABI(), FI, *this)) {
+      FI.getReturnInfo() = classifyReturnType(FI.getReturnType(), FI.isVariadic());
+    }
 
     for (auto &it : FI.arguments())
       it.info = classifyArgumentType(it.type, FI.isVariadic(),
@@ -10487,7 +10493,7 @@ void SPIRVABIInfo::computeInfo(CGFunctionInfo &FI) const {
     FI.getReturnInfo() = classifyReturnType(FI.getReturnType());
 
   for (auto &I : FI.arguments()) {
-    if (CC == llvm::CallingConv::FLOOR_KERNEL) {
+    if (llvm::CallingConv::isFloorEntryPoint(CC)) {
       I.info = classifyKernelArgumentType(I.type);
     } else {
       I.info = classifyArgumentType(I.type);
@@ -10531,7 +10537,7 @@ public:
   AIRABIInfo(CodeGenTypes &CGT) : ABIInfo(CGT) {}
 
   ABIArgInfo classifyReturnType(QualType RetTy) const;
-  ABIArgInfo classifyArgumentType(QualType Ty) const;
+  ABIArgInfo classifyArgumentType(QualType Ty, unsigned int CC) const;
 
   void computeInfo(CGFunctionInfo &FI) const override;
   Address EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
@@ -10560,15 +10566,26 @@ ABIArgInfo AIRABIInfo::classifyReturnType(QualType RetTy) const {
           ABIArgInfo::getExtend(RetTy) : ABIArgInfo::getDirect());
 }
 
-ABIArgInfo AIRABIInfo::classifyArgumentType(QualType Ty) const {
-  // CGT.getTarget() // TODO: native array image test
+ABIArgInfo AIRABIInfo::classifyArgumentType(QualType Ty, unsigned int CC) const {
   // direct array of images (not writable)
   if (Ty->isArrayImageType(true))
     return getNaturalAlignIndirect(Ty);
 
+  // all shader inputs must either be scalar or vector types, or arrays thereof
+  // -> expand all aggregates (entry points) or pass directly with later coercion (I/O)
   if (CodeGenFunction::hasAggregateEvaluationKind(Ty) &&
-      Ty->isStructureOrClassType()) {
-    return ABIArgInfo::getExpand();
+      Ty->isStructureOrClassType() &&
+      llvm::CallingConv::isFloorEntryPointOrIO(CC)) {
+    return (llvm::CallingConv::isFloorEntryPoint(CC) ? ABIArgInfo::getExpand() : ABIArgInfo::getDirect());
+  }
+
+  if (isAggregateTypeForABI(Ty)) {
+    // Records with non-trivial destructors/copy-constructors should not be
+    // passed by value.
+    if (CGCXXABI::RecordArgABI RAA = getRecordArgABI(Ty, getCXXABI()))
+      return getNaturalAlignIndirect(Ty, RAA == CGCXXABI::RAA_DirectInMemory);
+
+    return getNaturalAlignIndirect(Ty);
   }
 
   // Treat an enum type as its underlying type.
@@ -10581,11 +10598,12 @@ ABIArgInfo AIRABIInfo::classifyArgumentType(QualType Ty) const {
 
 void AIRABIInfo::computeInfo(CGFunctionInfo &FI) const {
   // return type should never be indirect
-  // TODO: ... if the function is a kernel/vs/fs
   FI.getReturnInfo() = classifyReturnType(FI.getReturnType());
 
-  for (auto &I : FI.arguments())
-    I.info = classifyArgumentType(I.type);
+  for (uint32_t arg_idx = 0, arg_count = FI.arg_size(); arg_idx < arg_count; ++arg_idx) {
+    auto& I = FI.arguments()[arg_idx];
+    I.info = classifyArgumentType(I.type, FI.getCallingConvention());
+  }
 
   // Always honor user-specified calling convention.
   if (FI.getCallingConvention() != llvm::CallingConv::C)
@@ -10645,14 +10663,10 @@ ABIArgInfo VulkanABIInfo::classifyReturnType(QualType RetTy, unsigned int CC) co
 ABIArgInfo VulkanABIInfo::classifyArgumentType(QualType Ty, unsigned int CC,
                                                FunctionProtoType::ExtParameterInfo ext_info) const {
   if (ext_info.isFloorArgBuffer()) {
-    if (CC == llvm::CallingConv::FLOOR_VERTEX ||
-        CC == llvm::CallingConv::FLOOR_FRAGMENT ||
-        CC == llvm::CallingConv::FLOOR_KERNEL ||
-        CC == llvm::CallingConv::FLOOR_TESS_CONTROL ||
-        CC == llvm::CallingConv::FLOOR_TESS_EVAL) {
+    if (llvm::CallingConv::isFloorEntryPoint(CC)) {
       // for entry points: use expand with argument buffer specific handling
       return ABIArgInfo::getExpandFloorArgBuffer();
-    } else if (CC == llvm::CallingConv::FLOOR_FUNC &&
+    } else if ((CC == llvm::CallingConv::FLOOR_FUNC || llvm::CallingConv::isFloorIO(CC)) &&
                (Ty->isPointerType() || Ty->isReferenceType())) {
       // for functions: use direct with argument buffer specific handling
       return ABIArgInfo::getDirectFloorArgBuffer();
@@ -10664,15 +10678,11 @@ ABIArgInfo VulkanABIInfo::classifyArgumentType(QualType Ty, unsigned int CC,
     return getNaturalAlignIndirect(Ty);
 
   // all shader inputs must either be scalar or vector types, or arrays thereof
-  // -> expand all aggregates
+  // -> expand all aggregates (entry points) or pass directly with later coercion (I/O)
   if (CodeGenFunction::hasAggregateEvaluationKind(Ty) &&
       Ty->isStructureOrClassType() &&
-      (CC == llvm::CallingConv::FLOOR_VERTEX ||
-       CC == llvm::CallingConv::FLOOR_FRAGMENT ||
-       CC == llvm::CallingConv::FLOOR_KERNEL ||
-       CC == llvm::CallingConv::FLOOR_TESS_CONTROL ||
-       CC == llvm::CallingConv::FLOOR_TESS_EVAL)) {
-    return ABIArgInfo::getExpand();
+      llvm::CallingConv::isFloorEntryPointOrIO(CC)) {
+    return (llvm::CallingConv::isFloorEntryPoint(CC) ? ABIArgInfo::getExpand() : ABIArgInfo::getDirect());
   }
 
   if (isAggregateTypeForABI(Ty)) {

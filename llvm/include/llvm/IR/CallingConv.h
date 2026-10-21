@@ -145,10 +145,18 @@ namespace CallingConv {
     /// AIR/Metal and SPIR-V/Vulkan tessellation evaluation shader function calling convention
     /// NOTE: for Metal this is entirely virtual and will be stripped in the end
     FLOOR_TESS_EVAL = 201,
+    /// AIR/Metal and SPIR-V/Vulkan task shader function calling convention
+    /// NOTE: for Metal this is entirely virtual and will be stripped in the end
+    FLOOR_TASK = 202,
+    /// AIR/Metal and SPIR-V/Vulkan mesh shader function calling convention
+    /// NOTE: for Metal this is entirely virtual and will be stripped in the end
+    FLOOR_MESH = 203,
     /// OpenCL/SPIR/SPIR-V, AIR/Metal, CUDA and SPIR-V/Vulkan normal function calling convention (not an entry point)
     /// NOTE: for Metal this is entirely virtual and will be stripped in the end
     /// NOTE: used to be SPIR_FUNC, must be 75 for binary compat
     FLOOR_FUNC = 75,
+    /// AIR/Metal and SPIR-V/Vulkan graphics I/O function calling convention
+    FLOOR_IO_FUNC = 204,
     /// OpenCL/SPIR/SPIR-V, AIR/Metal, CUDA and SPIR-V/Vulkan compute kernel function calling convention
     /// NOTE: for Metal this is entirely virtual and will be stripped in the end
     /// NOTE: used to be SPIR_KERNEL, must be 76 for binary compat
@@ -258,6 +266,28 @@ namespace CallingConv {
     /// The highest possible calling convention ID. Must be some 2^k - 1.
     MaxID = 1023
   };
+
+  //! returns true if the specified "CC" calling convention is a device entry point
+  static inline bool isFloorEntryPoint(CallingConv::ID CC) {
+    if (CC == CallingConv::FLOOR_KERNEL ||
+        CC == CallingConv::FLOOR_VERTEX ||
+        CC == CallingConv::FLOOR_FRAGMENT ||
+        CC == CallingConv::FLOOR_TESS_CONTROL ||
+        CC == CallingConv::FLOOR_TESS_EVAL ||
+        CC == CallingConv::FLOOR_TASK ||
+        CC == CallingConv::FLOOR_MESH) {
+      return true;
+    }
+    return false;
+  }
+  //! returns true if the specified "CC" calling convention is a floor graphics I/O CC
+  static inline bool isFloorIO(CallingConv::ID CC) {
+    return (CC == CallingConv::FLOOR_IO_FUNC);
+  }
+  //! returns true if the specified "CC" calling convention is a device entry point or floor graphics I/O CC
+  static inline bool isFloorEntryPointOrIO(CallingConv::ID CC) {
+    return isFloorEntryPoint(CC) || isFloorIO(CC);
+  }
 
 } // end namespace CallingConv
 
