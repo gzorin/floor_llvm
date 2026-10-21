@@ -597,12 +597,14 @@ llvm::buildEntryModule(const Module &M, const Function *entry,
 
   // clean up metadata
   // * metadata of all entry points that no longer exist
-  static constexpr const std::array<const char *, 5> entry_point_md_names{{
+  static constexpr const std::array<const char *, 7> entry_point_md_names{{
       "air.kernel",
       "air.vertex",
       "air.fragment",
       "air.object",
       "air.mesh",
+      "air.visible",
+      "air.intersection",
   }};
   for (const auto &entry_point_md_name : entry_point_md_names) {
     if (auto func_entries =
@@ -658,6 +660,29 @@ llvm::buildEntryModule(const Module &M, const Function *entry,
       // now, only add ones we want to keep
       for (auto node : kept_nodes) {
         sampler_states->addOperand(node);
+      }
+    }
+  }
+  // * visible function references whose referencing stub no longer exists
+  if (auto visible_refs =
+          cloned_mod->getNamedMetadata("air.visible_function_references")) {
+    vector<MDNode *> kept_nodes;
+    for (auto op_iter = visible_refs->op_begin();
+         op_iter != visible_refs->op_end(); ++op_iter) {
+      MDNode *node = *op_iter;
+      if (node->getNumOperands() != 3 ||
+          node->getOperand(1).get() == nullptr) {
+        continue;
+      }
+      kept_nodes.emplace_back(node);
+    }
+
+    visible_refs->dropAllReferences();
+    if (kept_nodes.empty()) {
+      visible_refs->eraseFromParent();
+    } else {
+      for (auto node : kept_nodes) {
+        visible_refs->addOperand(node);
       }
     }
   }
@@ -765,12 +790,14 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   // gather entry point functions that we want to clone/emit
   unordered_map<string, FUNCTION_TYPE> function_set;
   // -> first pass to gather all entry points specified in metadata lists
-  static constexpr const std::array<FUNCTION_TYPE, 5> func_types{{
+  static constexpr const std::array<FUNCTION_TYPE, 7> func_types{{
       FUNCTION_TYPE::KERNEL,
       FUNCTION_TYPE::VERTEX,
       FUNCTION_TYPE::FRAGMENT,
       FUNCTION_TYPE::OBJECT,
       FUNCTION_TYPE::MESH,
+      FUNCTION_TYPE::VISIBLE,
+      FUNCTION_TYPE::INTERSECTION,
   }};
   for (const auto func_type : func_types) {
     const NamedMDNode *func_list = nullptr;
@@ -790,10 +817,14 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     case FUNCTION_TYPE::MESH:
       func_list = M.getNamedMetadata("air.mesh");
       break;
-    case FUNCTION_TYPE::UNQUALIFIED:
     case FUNCTION_TYPE::VISIBLE:
-    case FUNCTION_TYPE::EXTERN:
+      func_list = M.getNamedMetadata("air.visible");
+      break;
     case FUNCTION_TYPE::INTERSECTION:
+      func_list = M.getNamedMetadata("air.intersection");
+      break;
+    case FUNCTION_TYPE::UNQUALIFIED:
+    case FUNCTION_TYPE::EXTERN:
     case FUNCTION_TYPE::NONE:
       llvm_unreachable("invalid type");
     }

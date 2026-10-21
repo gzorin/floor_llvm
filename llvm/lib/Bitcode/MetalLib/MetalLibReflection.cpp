@@ -22,6 +22,7 @@
 #include <optional>
 #include <vector>
 #include <array>
+#include <unordered_set>
 #include "llvm/Transforms/LibFloor/MetalTypes.h"
 #include "llvm/Transforms/LibFloor/metal_reflection.hpp"
 #include "llvm/Transforms/LibFloor/metal_reflection_writing.hpp"
@@ -186,6 +187,45 @@ static inline bool generic_create_location_type_name_and_name(node_type& node, c
 			}
 			node.location_index = { *location_index };
 			node.location_count = { *location_count };
+			return true;
+		} else if (type_str == "air.arg_type_name") {
+			if (const auto str = md_get_next_string(md_node, iter); str) {
+				node.type_name = str->str();
+				return true;
+			}
+		} else if (type_str == "air.arg_name") {
+			if (const auto str = md_get_next_string(md_node, iter); str) {
+				node.name = str->str();
+				return true;
+			}
+		}
+		return false;
+	});
+}
+
+template <typename node_type>
+static inline bool generic_create_location_access_type_name_and_name(node_type& node, const llvm::MDNode& md_node) {
+	return md_node_iterate(md_node, [&node, &md_node](llvm::StringRef type_str, llvm::MDNode::op_iterator& iter) {
+		if (type_str == "air.location_index") {
+			const auto location_index = md_get_next_uint(md_node, iter);
+			if (!location_index) {
+				return false;
+			}
+			const auto location_count = md_get_next_uint(md_node, iter);
+			if (!location_count) {
+				return false;
+			}
+			node.location_index = { *location_index };
+			node.location_count = { *location_count };
+			return true;
+		} else if (type_str == "air.read") {
+			node.access_qualifier = ACCESS_QUALIFIER::READ;
+			return true;
+		} else if (type_str == "air.read_write") {
+			node.access_qualifier = ACCESS_QUALIFIER::READ_WRITE;
+			return true;
+		} else if (type_str == "air.write") {
+			node.access_qualifier = ACCESS_QUALIFIER::WRITE;
 			return true;
 		} else if (type_str == "air.arg_type_name") {
 			if (const auto str = md_get_next_string(md_node, iter); str) {
@@ -979,6 +1019,116 @@ static inline node_id_t create_vertex_id(const llvm::MDNode& md_node, reflection
 	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
 }
 
+static inline node_id_t create_direction(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_direction_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_distance(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_distance_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_geometry_id(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_geometry_id_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_geometry_intersection_function_table_offset(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_geometry_intersection_function_table_offset_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_instance_acceleration_structure(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_instance_acceleration_structure_arg_t>();
+	return generic_create_location_access_type_name_and_name(node, md_node) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_instance_intersection_function_table_offset(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_instance_intersection_function_table_offset_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_intersection_function_table(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_intersection_function_table_arg_t>();
+	return generic_create_location_access_type_name_and_name(node, md_node) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_key_frame_count(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_key_frame_count_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_max_distance(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_max_distance_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_min_distance(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_min_distance_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_motion_end_time(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_motion_end_time_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_motion_start_time(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_motion_start_time_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_object_to_world_transform(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_object_to_world_transform_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_origin(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_origin_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_primitive_acceleration_structure(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_primitive_acceleration_structure_arg_t>();
+	return generic_create_location_access_type_name_and_name(node, md_node) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_primitive_data(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_primitive_data_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_time(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_time_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_user_instance_id(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_user_instance_id_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_visible_function_table(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_visible_function_table_arg_t>();
+	return generic_create_location_access_type_name_and_name(node, md_node) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_world_space_direction(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_world_space_direction_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_world_space_origin(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_world_space_origin_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_world_to_object_transform(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_world_to_object_transform_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
 static inline node_id_t create_depth_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
 	auto [node, node_id] = state.create_node<node_depth_ret_t>();
 	if (!md_node_iterate(md_node, [&node, &md_node](llvm::StringRef type_str, llvm::MDNode::op_iterator& iter) {
@@ -1175,6 +1325,21 @@ static inline node_id_t create_stencil_ret(const llvm::MDNode& md_node, reflecti
 	return generic_create_type_name_and_name(node, md_node, state, 1u /* start at #1 for return type */) ? node_id : invalid_node_id;
 }
 
+static inline node_id_t create_accept_intersection_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_accept_intersection_ret_t>();
+	return generic_create_type_name_and_name(node, md_node, state, 1u /* start at #1 for return type */) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_continue_search_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_continue_search_ret_t>();
+	return generic_create_type_name_and_name(node, md_node, state, 1u /* start at #1 for return type */) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_distance_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_distance_ret_t>();
+	return generic_create_type_name_and_name(node, md_node, state, 1u /* start at #1 for return type */) ? node_id : invalid_node_id;
+}
+
 static inline node_id_t create_workgroup_max_size_fn_attr(const llvm::MDNode& md_node, reflection_state_t& state) {
 	auto [node, node_id] = state.create_node<node_workgroup_max_size_fn_attr_t>();
 	if (!md_node_iterate(md_node, [&node, &md_node](llvm::StringRef type_str, llvm::MDNode::op_iterator& iter) {
@@ -1249,18 +1414,34 @@ static inline node_id_t create_node(const llvm::MDNode& md_node, const std::stri
 		{ "air.command_buffer", &create_command_buffer },
 		{ "air.compute_pipeline_state", &create_compute_pipeline_state },
 		{ "air.patch_control_point_input", &create_control_point_input },
+		{ "air.direction", &create_direction },
+		{ "air.distance", &create_distance },
 		{ "air.fragment_input", &create_fragment_input },
 		{ "air.front_facing", &create_front_facing },
+		{ "air.geometry_id", &create_geometry_id },
+		{ "air.geometry_intersection_function_table_offset", &create_geometry_intersection_function_table_offset },
 		{ "air.indirect_buffer", &create_indirect_buffer },
 		{ "air.indirect_constant", &create_indirect_constant },
+		{ "air.instance_acceleration_structure", &create_instance_acceleration_structure },
 		{ "air.instance_id", &create_instance_id },
+		{ "air.instance_intersection_function_table_offset", &create_instance_intersection_function_table_offset },
+		{ "air.intersection_function_table", &create_intersection_function_table },
+		{ "air.key_frame_count", &create_key_frame_count },
+		{ "air.max_distance", &create_max_distance },
 		{ "air.mesh", &create_mesh },
 		{ "air.mesh_grid_properties", &create_mesh_grid_properties },
+		{ "air.min_distance", &create_min_distance },
+		{ "air.motion_end_time", &create_motion_end_time },
+		{ "air.motion_start_time", &create_motion_start_time },
+		{ "air.object_to_world_transform", &create_object_to_world_transform },
+		{ "air.origin", &create_origin },
 		{ "air.patch_id", &create_patch_id },
 		{ "air.payload", &create_payload },
 		{ "air.point_coord", &create_point_coord },
 		{ "air.position", &create_position },
 		{ "air.position_in_patch", &create_position_in_patch },
+		{ "air.primitive_acceleration_structure", &create_primitive_acceleration_structure },
+		{ "air.primitive_data", &create_primitive_data },
 		{ "air.primitive_id", &create_primitive_id },
 		{ "air.render_target_array_index", &create_render_target_array_index },
 		{ "air.sampler", &create_sampler },
@@ -1278,7 +1459,13 @@ static inline node_id_t create_node(const llvm::MDNode& md_node, const std::stri
 		{ "air.threads_per_grid", &create_threads_per_grid },
 		{ "air.threads_per_simdgroup", &create_threads_per_simdgroup },
 		{ "air.threads_per_threadgroup", &create_threads_per_threadgroup },
+		{ "air.time", &create_time },
+		{ "air.user_instance_id", &create_user_instance_id },
 		{ "air.vertex_id", &create_vertex_id },
+		{ "air.visible_function_table", &create_visible_function_table },
+		{ "air.world_space_direction", &create_world_space_direction },
+		{ "air.world_space_origin", &create_world_space_origin },
+		{ "air.world_to_object_transform", &create_world_to_object_transform },
 		
 		// attribute nodes
 		{ "air.max_work_group_size", &create_workgroup_max_size_fn_attr },
@@ -1287,7 +1474,10 @@ static inline node_id_t create_node(const llvm::MDNode& md_node, const std::stri
 	};
 	static const std::unordered_map<std::string, create_func_t> ret_handlers {
 		// return nodes
+		{ "air.accept_intersection", &create_accept_intersection_ret },
+		{ "air.continue_search", &create_continue_search_ret },
 		{ "air.depth", &create_depth_ret },
+		{ "air.distance", &create_distance_ret },
 		{ "air.mesh_primitive_data", &create_mesh_primitive_data_ret },
 		{ "air.mesh_vertex_data", &create_mesh_vertex_data_ret },
 		{ "air.point_size", &create_point_size_ret },
@@ -1442,6 +1632,27 @@ static inline bool handle_func_str_attribute(const llvm::StringRef& attr_str, re
 			llvm::errs() << "reflection: invalid function type for early_fragment_tests\n";
 			return false;
 		}
+	} else if constexpr (func_type == FUNCTION_TYPE::INTERSECTION) {
+		// triangle is the default primitive kind and is not emitted
+		if (attr_str == "air.triangle") {
+		} else if (attr_str == "air.bounding_box") {
+			func_node.primitive_kind = PRIMITIVE_KIND::BOUNDING_BOX;
+		} else if (attr_str == "air.instancing") {
+			func_node.instancing = true;
+		} else if (attr_str == "air.triangle_data") {
+			func_node.triangle_data = true;
+		} else if (attr_str == "air.world_space_data") {
+			func_node.world_space_data = true;
+		} else if (attr_str == "air.primitive_motion") {
+			func_node.primitive_motion = true;
+		} else if (attr_str == "air.instance_motion") {
+			func_node.instance_motion = true;
+		} else if (attr_str == "air.extended_limits") {
+			func_node.extended_limits = true;
+		} else {
+			llvm::errs() << "reflection: unhandled intersection function attribute string: " << attr_str << "\n";
+			return false;
+		}
 	} else {
 		llvm::errs() << "reflection: unhandled function attribute string: " << attr_str << "\n";
 		return false;
@@ -1528,6 +1739,67 @@ static inline bool handle_function_reflection(const llvm::MDNode& func_md, refle
 	return true;
 }
 
+// visible functions only carry their name (no return type or argument reflection)
+static inline bool handle_visible_function_reflection(const llvm::MDNode& func_md, reflection_state_t& state,
+													  std::vector<node_id_t>& refl_functions) {
+	if (func_md.getNumOperands() < 3) {
+		llvm::errs() << "reflection: invalid function metadata count\n";
+		return false;
+	}
+	
+	const auto func_md_const = dyn_cast_or_null<llvm::ConstantAsMetadata>(func_md.getOperand(0));
+	if (!func_md_const) {
+		llvm::errs() << "reflection: invalid function metadata\n";
+		return false;
+	}
+	const auto func = dyn_cast_or_null<llvm::Function>(func_md_const->getValue());
+	if (!func) {
+		llvm::errs() << "reflection: invalid function metadata\n";
+		return false;
+	}
+	auto [node, node_id] = state.create_node<node_visible_function_t>();
+	node.name = func->getName().str();
+	refl_functions.emplace_back(node_id);
+	return true;
+}
+
+// direct calls to visible functions go through "<name>.MTL_VISIBLE_FN_REF" stubs listed in air.visible_function_references
+static inline bool handle_visible_function_references(const llvm::NamedMDNode& refs_md, reflection_state_t& state) {
+	std::unordered_set<std::string> function_names;
+	for (const auto& ref : refs_md.operands()) {
+		if (ref->getNumOperands() != 3) {
+			llvm::errs() << "reflection: invalid visible function reference metadata\n";
+			return false;
+		}
+		const auto ref_type = dyn_cast_or_null<llvm::MDString>(ref->getOperand(0));
+		if (!ref_type || ref_type->getString() != "air.visible_function_reference") {
+			llvm::errs() << "reflection: invalid visible function reference metadata\n";
+			return false;
+		}
+		// the referencing stub may have been removed
+		if (!ref->getOperand(1)) {
+			continue;
+		}
+		const auto function_name = dyn_cast_or_null<llvm::MDString>(ref->getOperand(2));
+		if (!function_name) {
+			llvm::errs() << "reflection: invalid visible function reference name\n";
+			return false;
+		}
+		// linking may duplicate references
+		if (!function_names.emplace(function_name->getString().str()).second) {
+			continue;
+		}
+		
+		auto [node, node_id] = state.create_node<node_visible_function_reference_t>();
+		node.function_name = function_name->getString().str();
+		if (!state.refl.visible_function_references) {
+			state.refl.visible_function_references = std::vector<node_id_t> {};
+		}
+		state.refl.visible_function_references->emplace_back(node_id);
+	}
+	return true;
+}
+
 std::vector<uint8_t> create_reflection(llvm::Module& M) {
 	reflection_t refl {
 		.version = version_t { .major = 0, .minor = 4, .sub_minor = 0 },
@@ -1535,12 +1807,14 @@ std::vector<uint8_t> create_reflection(llvm::Module& M) {
 	reflection_state_t state { .refl = refl };
 	
 	// handle functions
-	const std::array<std::tuple<const char*, std::optional<std::vector<node_id_t>>&, FUNCTION_TYPE>, 5> function_types {{
+	const std::array<std::tuple<const char*, std::optional<std::vector<node_id_t>>&, FUNCTION_TYPE>, 7> function_types {{
 		{ "air.fragment", refl.fragment_functions, FUNCTION_TYPE::FRAGMENT },
 		{ "air.kernel", refl.kernel_functions, FUNCTION_TYPE::KERNEL },
 		{ "air.vertex", refl.vertex_functions, FUNCTION_TYPE::VERTEX },
 		{ "air.object", refl.object_functions, FUNCTION_TYPE::OBJECT },
 		{ "air.mesh", refl.mesh_functions, FUNCTION_TYPE::MESH },
+		{ "air.visible", refl.visible_functions, FUNCTION_TYPE::VISIBLE },
+		{ "air.intersection", refl.intersection_functions, FUNCTION_TYPE::INTERSECTION },
 	}};
 	bool has_any_function = false;
 	for (const auto& func_type : function_types) {
@@ -1584,16 +1858,34 @@ std::vector<uint8_t> create_reflection(llvm::Module& M) {
 																			  std::make_unique<node_mesh_function_t>());
 					break;
 				}
+				case FUNCTION_TYPE::VISIBLE: {
+					success = handle_visible_function_reflection(*func, state, *get<1>(func_type));
+					break;
+				}
+				case FUNCTION_TYPE::INTERSECTION: {
+					success = handle_function_reflection<FUNCTION_TYPE::INTERSECTION>(*func, state, *get<1>(func_type),
+																					  std::make_unique<node_intersection_function_t>());
+					break;
+				}
 				case FUNCTION_TYPE::UNQUALIFIED:
-				case FUNCTION_TYPE::VISIBLE:
 				case FUNCTION_TYPE::EXTERN:
-				case FUNCTION_TYPE::INTERSECTION:
 				case FUNCTION_TYPE::NONE:
 					llvm_unreachable("unhandled function type");
 			}
 			if (!success) {
 				return {};
 			}
+		}
+	}
+	
+	// handle visible function references
+	if (const auto refs_md = M.getNamedMetadata("air.visible_function_references"); refs_md && refs_md->getNumOperands() > 0) {
+		if (!has_any_function) {
+			has_any_function = true;
+			refl.nodes = std::vector<std::unique_ptr<node_base_t>> {};
+		}
+		if (!handle_visible_function_references(*refs_md, state)) {
+			return {};
 		}
 	}
 	
