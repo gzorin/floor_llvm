@@ -47,12 +47,20 @@ struct reflection_state_t {
 	std::pair<node_type&, node_id_t> create_node() {
 		auto node = std::make_unique<node_type>();
 		auto node_ptr = node.get();
-		return { *node_ptr, add_node(std::move(node)) };
+		const auto node_id = add_node(std::move(node));
+		if constexpr (requires { node_ptr->unused; }) {
+			unused_fields.emplace(node_id.id, &node_ptr->unused);
+		}
+		return { *node_ptr, node_id };
 	}
 	
 	// these MDNodes may be referenced more than once, but we only want to emit them once
 	// -> remember which ones we've already emitted + their reflection node ID
 	std::unordered_map<const llvm::MDNode*, node_id_t> struct_type_info_lut;
+	
+	// "air.arg_unused" may be set on any argument node that has an "unused" field
+	// -> node ID to that field, so that it can be set without knowing the node type
+	std::unordered_map<uint32_t, std::optional<bool>*> unused_fields;
 };
 
 static inline node_id_t create_node(const llvm::MDNode& md_node, const std::string node_type_name, reflection_state_t& state,
@@ -71,6 +79,10 @@ static bool md_node_iterate(const llvm::MDNode& md_node, std::function<bool(llvm
 		if (!type) {
 			llvm::errs() << "reflection: unexpected metadata type in: " << md_node << "\n";
 			return false;
+		}
+		// handled generically in create_node()
+		if (type->getString() == "air.arg_unused") {
+			continue;
 		}
 		if (!cb(type->getString(), iter)) {
 			llvm::errs() << "reflection: error during handling of \"" << type->getString() << "\" in: " << md_node << "\n";
@@ -158,6 +170,41 @@ static inline bool generic_create_type_name_and_name(node_type& node, const llvm
 		return false;
 	}
 	return true;
+}
+
+template <typename node_type>
+static inline bool generic_create_location_type_name_and_name(node_type& node, const llvm::MDNode& md_node) {
+	return md_node_iterate(md_node, [&node, &md_node](llvm::StringRef type_str, llvm::MDNode::op_iterator& iter) {
+		if (type_str == "air.location_index") {
+			const auto location_index = md_get_next_uint(md_node, iter);
+			if (!location_index) {
+				return false;
+			}
+			const auto location_count = md_get_next_uint(md_node, iter);
+			if (!location_count) {
+				return false;
+			}
+			node.location_index = { *location_index };
+			node.location_count = { *location_count };
+			return true;
+		} else if (type_str == "air.arg_type_name") {
+			if (const auto str = md_get_next_string(md_node, iter); str) {
+				node.type_name = str->str();
+				return true;
+			}
+		} else if (type_str == "air.arg_name") {
+			if (const auto str = md_get_next_string(md_node, iter); str) {
+				node.name = str->str();
+				return true;
+			}
+		}
+		return false;
+	});
+}
+
+static inline node_id_t create_amplification_id(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_amplification_id_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
 }
 
 static inline node_id_t create_barycentric(const llvm::MDNode& md_node, reflection_state_t& state) {
@@ -383,6 +430,11 @@ static inline bool generic_create_buffer(node_type& node, const llvm::MDNode& md
 				node.struct_type_info = st_info_node_id;
 				return true;
 			}
+		} else if (type_str == "air.raster_order_group") {
+			if (const auto val = md_get_next_uint(md_node, iter); val) {
+				node.raster_order_group = { *val };
+				return true;
+			}
 		} else if (type_str == "air.arg_type_size") {
 			if (const auto val = md_get_next_uint(md_node, iter); val) {
 				node.type_size = { *val };
@@ -419,6 +471,16 @@ static inline node_id_t create_buffer(const llvm::MDNode& md_node, reflection_st
 static inline node_id_t create_indirect_buffer(const llvm::MDNode& md_node, reflection_state_t& state) {
 	auto [node, node_id] = state.create_node<node_indirect_buffer_arg_t>();
 	return generic_create_buffer<NODE_TYPE::INDIRECT_BUFFER_ARG>(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_command_buffer(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_command_buffer_arg_t>();
+	return generic_create_location_type_name_and_name(node, md_node) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_compute_pipeline_state(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_compute_pipeline_state_arg_t>();
+	return generic_create_location_type_name_and_name(node, md_node) ? node_id : invalid_node_id;
 }
 
 static inline node_id_t create_control_point_field(const llvm::MDNode& md_node, reflection_state_t& state) {
@@ -792,6 +854,16 @@ static inline node_id_t create_primitive_id(const llvm::MDNode& md_node, reflect
 	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
 }
 
+static inline node_id_t create_render_target_array_index(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_render_target_array_index_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_sampler(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_sampler_arg_t>();
+	return generic_create_location_type_name_and_name(node, md_node) ? node_id : invalid_node_id;
+}
+
 static inline node_id_t create_simdgroup_index_in_threadgroup(const llvm::MDNode& md_node, reflection_state_t& state) {
 	auto [node, node_id] = state.create_node<node_simdgroup_index_in_threadgroup_arg_t>();
 	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
@@ -799,6 +871,16 @@ static inline node_id_t create_simdgroup_index_in_threadgroup(const llvm::MDNode
 
 static inline node_id_t create_simdgroups_per_threadgroup(const llvm::MDNode& md_node, reflection_state_t& state) {
 	auto [node, node_id] = state.create_node<node_simdgroups_per_threadgroup_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_stage_in_grid_origin(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_stage_in_grid_origin_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_stage_in_grid_size(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_stage_in_grid_size_arg_t>();
 	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
 }
 
@@ -849,6 +931,11 @@ static inline node_id_t create_texture(const llvm::MDNode& md_node, reflection_s
 
 static inline node_id_t create_thread_index_in_simdgroup(const llvm::MDNode& md_node, reflection_state_t& state) {
 	auto [node, node_id] = state.create_node<node_thread_index_in_simdgroup_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_thread_index_in_threadgroup(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_thread_index_in_threadgroup_arg_t>();
 	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
 }
 
@@ -979,19 +1066,46 @@ static inline node_id_t create_mesh_vertex_data_ret(const llvm::MDNode& md_node,
 	return node_id;
 }
 
+// "air.shared" marks a return value that is identical across all vertex amplifications
+template <typename node_type>
+static inline bool shared_ret_create_type_name_and_name(node_type& node, const llvm::MDNode& md_node) {
+	return md_node_iterate(md_node, [&node, &md_node](llvm::StringRef type_str, llvm::MDNode::op_iterator& iter) {
+		if (type_str == "air.shared") {
+			node.shared = true;
+			return true;
+		} else if (type_str == "air.arg_type_name") {
+			if (const auto str = md_get_next_string(md_node, iter); str) {
+				node.type_name = str->str();
+				return true;
+			}
+		} else if (type_str == "air.arg_name") {
+			if (const auto str = md_get_next_string(md_node, iter); str) {
+				node.name = str->str();
+				return true;
+			}
+		}
+		return false;
+	}, 1u /* start at #1 for return type */);
+}
+
 static inline node_id_t create_point_size_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
 	auto [node, node_id] = state.create_node<node_point_size_ret_t>();
-	return generic_create_type_name_and_name(node, md_node, state, 1u /* start at #1 for return type */) ? node_id : invalid_node_id;
+	return shared_ret_create_type_name_and_name(node, md_node) ? node_id : invalid_node_id;
 }
 
 static inline node_id_t create_position_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
 	auto [node, node_id] = state.create_node<node_position_ret_t>();
-	return generic_create_type_name_and_name(node, md_node, state, 1u /* start at #1 for return type */) ? node_id : invalid_node_id;
+	return shared_ret_create_type_name_and_name(node, md_node) ? node_id : invalid_node_id;
 }
 
 static inline node_id_t create_primitive_culled_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
 	auto [node, node_id] = state.create_node<node_primitive_culled_ret_t>();
-	return generic_create_type_name_and_name(node, md_node, state, 1u /* start at #1 for return type */) ? node_id : invalid_node_id;
+	return shared_ret_create_type_name_and_name(node, md_node) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_render_target_array_index_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_render_target_array_index_ret_t>();
+	return shared_ret_create_type_name_and_name(node, md_node) ? node_id : invalid_node_id;
 }
 
 static inline node_id_t create_vertex_output_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
@@ -1002,6 +1116,9 @@ static inline node_id_t create_vertex_output_ret(const llvm::MDNode& md_node, re
 				node.attribute_name = str->str();
 				return true;
 			}
+		} else if (type_str == "air.shared") {
+			node.shared = true;
+			return true;
 		} else if (type_str == "air.arg_type_name") {
 			if (const auto str = md_get_next_string(md_node, iter); str) {
 				node.type_name = str->str();
@@ -1051,6 +1168,11 @@ static inline node_id_t create_render_target_ret(const llvm::MDNode& md_node, re
 		return invalid_node_id;
 	}
 	return node_id;
+}
+
+static inline node_id_t create_stencil_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_stencil_ret_t>();
+	return generic_create_type_name_and_name(node, md_node, state, 1u /* start at #1 for return type */) ? node_id : invalid_node_id;
 }
 
 static inline node_id_t create_workgroup_max_size_fn_attr(const llvm::MDNode& md_node, reflection_state_t& state) {
@@ -1119,10 +1241,13 @@ static inline node_id_t create_node(const llvm::MDNode& md_node, const std::stri
 	using create_func_t = node_id_t (*)(const llvm::MDNode&, reflection_state_t&);
 	static const std::unordered_map<std::string, create_func_t> arg_attr_handlers {
 		// argument nodes
+		{ "air.amplification_id", &create_amplification_id },
 		{ "air.barycentric_coord", &create_barycentric },
 		{ "air.base_instance", &create_base_instance },
 		{ "air.base_vertex", &create_base_vertex },
 		{ "air.buffer", &create_buffer },
+		{ "air.command_buffer", &create_command_buffer },
+		{ "air.compute_pipeline_state", &create_compute_pipeline_state },
 		{ "air.patch_control_point_input", &create_control_point_input },
 		{ "air.fragment_input", &create_fragment_input },
 		{ "air.front_facing", &create_front_facing },
@@ -1137,10 +1262,15 @@ static inline node_id_t create_node(const llvm::MDNode& md_node, const std::stri
 		{ "air.position", &create_position },
 		{ "air.position_in_patch", &create_position_in_patch },
 		{ "air.primitive_id", &create_primitive_id },
+		{ "air.render_target_array_index", &create_render_target_array_index },
+		{ "air.sampler", &create_sampler },
 		{ "air.simdgroup_index_in_threadgroup", &create_simdgroup_index_in_threadgroup },
 		{ "air.simdgroups_per_threadgroup", &create_simdgroups_per_threadgroup },
+		{ "air.stage_in_grid_origin", &create_stage_in_grid_origin },
+		{ "air.stage_in_grid_size", &create_stage_in_grid_size },
 		{ "air.texture", &create_texture },
 		{ "air.thread_index_in_simdgroup", &create_thread_index_in_simdgroup },
+		{ "air.thread_index_in_threadgroup", &create_thread_index_in_threadgroup },
 		{ "air.thread_position_in_grid", &create_thread_position_in_grid },
 		{ "air.thread_position_in_threadgroup", &create_thread_position_in_threadgroup },
 		{ "air.threadgroup_position_in_grid", &create_threadgroup_position_in_grid },
@@ -1163,7 +1293,9 @@ static inline node_id_t create_node(const llvm::MDNode& md_node, const std::stri
 		{ "air.point_size", &create_point_size_ret },
 		{ "air.position", &create_position_ret },
 		{ "air.primitive_culled", &create_primitive_culled_ret },
+		{ "air.render_target_array_index", &create_render_target_array_index_ret },
 		{ "air.render_target", &create_render_target_ret },
+		{ "air.stencil", &create_stencil_ret },
 		{ "air.vertex_output", &create_vertex_output_ret },
 	};
 	
@@ -1173,7 +1305,24 @@ static inline node_id_t create_node(const llvm::MDNode& md_node, const std::stri
 		llvm::errs() << "reflection: no handler for \"" << node_type_name << "\"\n";
 		return invalid_node_id;
 	}
-	return handler->second(md_node, state);
+	const auto node_id = handler->second(md_node, state);
+	if (node_id.id == invalid_node_id.id) {
+		return invalid_node_id;
+	}
+	
+	const auto is_unused = std::any_of(md_node.op_begin(), md_node.op_end(), [](const llvm::MDOperand& op) {
+		const auto str = llvm::dyn_cast_or_null<llvm::MDString>(op);
+		return str && str->getString() == "air.arg_unused";
+	});
+	if (is_unused) {
+		const auto unused_field = state.unused_fields.find(node_id.id);
+		if (unused_field == state.unused_fields.end()) {
+			llvm::errs() << "reflection: \"" << node_type_name << "\" can not be marked unused in: " << md_node << "\n";
+			return invalid_node_id;
+		}
+		*unused_field->second = true;
+	}
+	return node_id;
 }
 
 template <FUNCTION_TYPE func_type>

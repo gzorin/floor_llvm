@@ -17,6 +17,7 @@ add_llvm_component_library(LLVMMetalLib
 
   LINK_COMPONENTS
   Analysis
+  BitWriter140
   Core
   MC
   Object
